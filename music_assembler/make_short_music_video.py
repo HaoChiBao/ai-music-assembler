@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from music_assembler.bottom_text_overlay import resolve_font_key
 from music_assembler.config import AssemblerConfig, AssemblerPaths, DurationBounds, TextOverlayStyle
 from music_assembler.ffmpeg_util import FFmpegNotFoundError, find_ffmpeg, find_ffprobe
 from music_assembler.pipeline import assemble
+from music_assembler.youtube_metadata import generate_youtube_title_description, write_youtube_metadata_txt
 
 # Target total mix length: 1 hour 15 min .. 1 hour 30 min (not mm:ss).
 DEFAULT_MIN_SEC = 75 * 60.0  # 1h15m = 4500 s
@@ -103,6 +105,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  tracks in mix: {len(result['playlist'])}")
     dur = result["final_audio_duration_sec"]
     print(f"  audio duration: {dur / 60:.1f} min ({dur:.0f} s)")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    yt_path = (project_root / DEFAULT_OUTPUT_DIR / f"{basename}_youtube.txt").resolve()
+    if not api_key or not api_key.strip():
+        print(
+            "Skipping YouTube metadata file: set OPENAI_API_KEY in .env (see .env.example).",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            title, description = generate_youtube_title_description(text, api_key=api_key)
+            write_youtube_metadata_txt(yt_path, title, description)
+            print(f"  youtube_txt: {yt_path}")
+        except Exception as e:
+            print(f"warning: could not generate YouTube title/description: {e}", file=sys.stderr)
+
     return 0
 
 
