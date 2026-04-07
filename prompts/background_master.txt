@@ -1,0 +1,17 @@
+Seamless **scene extension** (outpainting) — same API pattern as ChatGPT image edit: refine the **border strips only** so they look like a natural continuation of the **same photograph**.
+
+**What you must do**
+- The border areas are **pre-filled by extruding the photo’s edges** (stretched top/bottom/left/right edge pixels). Your job is to **turn that into a believable, seamless extension** of the existing environment: same **camera**, **lighting**, **white balance**, **grain / noise**, **depth of field**, and **perspective**.
+- Extend **a little** in every direction that has padding (horizontal and/or vertical as the frame requires): continue **sky, ground, walls, foliage, bokeh**, etc., exactly as implied by what is already visible at the edges of the photo. **Match the horizon, vanishing lines, and color gradients** so there is no seam.
+- **Do not** invent unrelated subjects, new people, animals, vehicles, text, logos, or a different location. **Do not** replace the scene with a generic stock background. Everything new must read as **more of the same shot**.
+
+**What you must not do**
+- Do not add random objects or “creative” scenery that does not logically continue from the edges.
+- **Preserve the original photograph’s content** in the masked (opaque) region: keep the same subject, framing, and detail; only **refine** the transparent border areas into a seamless continuation.
+
+**Look**
+- Optional **very subtle** overall softness (light soft-focus), not heavy blur or painterly smear.
+- Stay photorealistic; match film grain / digital noise at the borders to the photo.
+
+**Output**
+- Full frame, no watermark, no extra text, no visible letterbox seams.

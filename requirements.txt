@@ -1,0 +1,14 @@
+# Pin with pyproject.toml (single source of truth). From the repo root:
+#   pip install -r requirements.txt
+#
+# Use a normal (non-editable) install of this project so CLI scripts always find `music_assembler`.
+# Editable installs (`-e .`) can break on Python 3.14+: setuptools names .pth files `__editable__...`,
+# which site.py treats as hidden and skips, so imports fail outside the repo directory.
+#
+# Runtime dependencies:
+Pillow>=10.0.0
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+
+# Local package (copy into site-packages; re-run after changing code: pip install .)
+.

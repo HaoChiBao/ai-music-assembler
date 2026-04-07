@@ -1,0 +1,27 @@
+[project]
+name = "music-video-assembler"
+version = "0.1.0"
+description = "Assemble long MP3 mixes from a library and mux with a titled still image into MP4."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=10.0.0",
+    "google-genai>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+assemble-music-video = "music_assembler.cli:main"
+extend-backgrounds = "music_assembler.extend_backgrounds:main"
+extend-first-three = "music_assembler.extend_first_three:main"
+add-bottom-text = "music_assembler.add_bottom_text:main"
+add-text = "music_assembler.add_text:main"
+make-short-music-video = "music_assembler.make_short_music_video:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["music_assembler*"]
