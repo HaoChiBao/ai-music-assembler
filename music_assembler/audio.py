@@ -28,6 +28,45 @@ def logical_track_name(path: Path) -> str:
     return stem
 
 
+def display_track_title(path: Path) -> str:
+    """Human-friendly song title for on-screen text / tracklists.
+
+    Strips the trailing UUID (via :func:`logical_track_name`), drops a leading
+    ``workspace-`` prefix (everything before the first ``-``), and turns underscores
+    into spaces. E.g. ``My_Workspace-02AM_Window_Seat-<uuid>.mp3`` -> ``02AM Window Seat``.
+    """
+    name = logical_track_name(path)
+    if "-" in name:
+        name = name.split("-", 1)[1]
+    return name.replace("_", " ").strip() or logical_track_name(path)
+
+
+def build_track_segments(
+    playlist: list[Path], total_duration_sec: float
+) -> list[tuple[float, float, str]]:
+    """Return ``(start_sec, end_sec, title)`` for each track, clamped to ``total_duration_sec``.
+
+    The mix may be trimmed shorter than the sum of track durations, so the final
+    segment is cut at ``total_duration_sec``.
+    """
+    segments: list[tuple[float, float, str]] = []
+    t = 0.0
+    for path in playlist:
+        if t >= total_duration_sec:
+            break
+        dur = probe_duration_seconds(path)
+        end = min(t + dur, total_duration_sec)
+        if end <= t:
+            continue
+        segments.append((t, end, display_track_title(path)))
+        t = end
+    if segments:
+        # Make sure the last segment runs to the very end of the mix.
+        last_start, _, last_title = segments[-1]
+        segments[-1] = (last_start, total_duration_sec, last_title)
+    return segments
+
+
 def discover_mp3_files(songs_dir: Path) -> list[Path]:
     if not songs_dir.is_dir():
         raise FileNotFoundError(f"Songs directory does not exist: {songs_dir}")

@@ -32,7 +32,10 @@ def _parse_rgba(s: str) -> tuple[int, int, int, int]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="assemble-music-video",
-        description="Build a long random MP3 mix and mux it with a static titled image as MP4.",
+        description=(
+            "Build a long random MP3 mix over a still background, with the current song title "
+            "in the bottom-left corner, as MP4 (plus a tracklist .txt)."
+        ),
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--songs-dir", type=Path, default=None, help="Folder containing MP3 files.")
@@ -47,37 +50,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Background filename inside images-dir (default: random pick).",
     )
-    p.add_argument("--text", default=None, help="Overlay text (use \\n for line breaks). Required for assembly.")
-    p.add_argument("--output-dir", type=Path, default=Path("output"), help="Where to write mix, frame, and video.")
+    p.add_argument("--output-dir", type=Path, default=Path("output"), help="Where to write mix, video, and tracklist.")
     p.add_argument("--basename", default="session", help="Prefix for output files.")
     p.add_argument("--min-sec", type=float, default=75 * 60, help="Minimum mix length in seconds (default: 4500 = 75 min).")
     p.add_argument("--max-sec", type=float, default=105 * 60, help="Maximum mix length in seconds (default: 6300 = 105 min).")
     p.add_argument("--seed", type=int, default=None, help="Random seed for song order and random image pick.")
-    p.add_argument("--font", default="arial", help="Font key: arial, helvetica, georgia, times, sf_pro, or a file stem in fonts/.")
-    p.add_argument("--font-size", type=int, default=72)
+    p.add_argument("--font", default="arial", help="Song-title font key: arial, helvetica, georgia, times, sf_pro, or a file stem in fonts/.")
+    p.add_argument("--font-size", type=int, default=46, help="Bottom-left song-title font size in px (default: 46).")
     p.add_argument(
         "--font-weight",
         type=int,
-        default=None,
+        default=400,
         metavar="N",
-        help="Optional: pick a file in fonts/ by weight (300 = Light, 400 = Regular, 700 = Bold).",
+        help="Pick a file in fonts/ by weight (300 = Light, 400 = Regular, 700 = Bold). Default: 400.",
     )
-    p.add_argument("--fill", type=_parse_rgba, default=(255, 255, 255, 255))
-    p.add_argument("--stroke", type=_parse_rgba, default=(0, 0, 0, 255))
+    p.add_argument("--fill", type=_parse_rgba, default=(255, 255, 255, 235), help="Song-title color R,G,B[,A].")
     p.add_argument(
-        "--stroke-width",
-        type=int,
-        default=2,
-        help="Outline thickness (8-direction rings; lower = thinner). Default: 2.",
+        "--thumbnail-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "If given, also render a thumbnail: this text drawn in large letters *behind* "
+            "the subject of the background image (use \\n for multiple lines)."
+        ),
     )
-    p.add_argument(
-        "--embolden",
-        type=int,
-        default=0,
-        help="Simulated font weight on the title (0 = lightest). Default: 0.",
-    )
-    p.add_argument("--h-align", choices=("left", "center", "right"), default="center")
-    p.add_argument("--v-align", choices=("top", "center", "bottom"), default="center")
     p.add_argument("--video-width", type=int, default=1920)
     p.add_argument("--video-height", type=int, default=1080)
     p.add_argument(
@@ -104,8 +100,8 @@ def main(argv: list[str] | None = None) -> int:
             print(k)
         return 0
 
-    if args.songs_dir is None or args.text is None:
-        parser.error("--songs-dir and --text are required unless you pass --list-fonts.")
+    if args.songs_dir is None:
+        parser.error("--songs-dir is required unless you pass --list-fonts.")
 
     try:
         find_ffmpeg()
@@ -114,7 +110,6 @@ def main(argv: list[str] | None = None) -> int:
         print(e, file=sys.stderr)
         return 2
 
-    text = args.text.replace("\\n", "\n")
     cfg = AssemblerConfig(
         paths=AssemblerPaths(
             songs_dir=args.songs_dir,
@@ -128,27 +123,27 @@ def main(argv: list[str] | None = None) -> int:
             font_size_px=args.font_size,
             font_weight=args.font_weight,
             fill_color=args.fill,
-            stroke_color=args.stroke,
-            stroke_width=args.stroke_width,
-            embolden=args.embolden,
-            horizontal=args.h_align,
-            vertical=args.v_align,
         ),
         video_width=args.video_width,
         video_height=args.video_height,
         seed=args.seed,
     )
 
+    thumbnail_text = args.thumbnail_text.replace("\\n", "\n") if args.thumbnail_text else None
+
     result = assemble(
         cfg,
-        overlay_text=text,
         image_filename=args.image,
         output_basename=args.basename,
         progress=args.progress,
+        thumbnail_background_text=thumbnail_text,
     )
-    print("Wrote:")
-    for k in ("audio_mp3", "frame_png", "video_mp4"):
+    print(f"Wrote folder: {result['output_dir']}")
+    for k in ("frame_png", "audio_mp3", "video_mp4", "tracklist_txt"):
         print(f"  {k}: {result[k]}")
+    if result.get("thumbnail_png"):
+        print(f"  thumbnail_png: {result['thumbnail_png']}")
+    print(f"  background: {result['background']}")
     print(f"  tracks in mix: {len(result['playlist'])}")
     print(f"  audio duration (s): {result['final_audio_duration_sec']:.1f}")
     return 0

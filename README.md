@@ -38,11 +38,13 @@ Avoid **`pip install -e .`** on **Python 3.14+** with current setuptools: editab
 
 This installs the same packages as `pyproject.toml` and registers:
 
-- `assemble-music-video` — full mix + titled still + MP4  
+- **`python3 -m music_assembler.make_short_music_video`** — **main command**: ~**1h15–1h30** mix from **`music/`**, random still from **`post-processed/`** → a timestamped **per-run folder** **`music-video/mv_*/`** holding **`frame.png`** (the still), **`mv_*_mix.mp3`**, **`mv_*_video.mp4`**, and a YouTube-ready **`mv_*_tracklist.txt`** (timestamp → song, for chapters). The video shows the **current song title in the bottom-left** (changes per track, equal left/bottom margins). Pass **`--thumbnail-text "..."`** to also render **`mv_*_thumbnail.png`** — the same still with that text in large letters drawn **behind the subject**, segmented at the **highest quality** (BiRefNet **`birefnet-general`** + alpha matting; downloads a ~1GB model on first use). No on-screen caption and no API keys needed.  
+- `assemble-music-video` — same pipeline with full CLI flags (paths, duration, font, seed, etc.)  
 - `extend-backgrounds` — pre-processed photos → widescreen post-processed backgrounds (Gemini **image** models; default **gemini-3-pro-image-preview**)  
 - `extend-first-three` — same as `extend-backgrounds --limit 3` (handy for quick tests)  
 - `add-bottom-text` — overlay caption text on **one** image; placement and outline are configurable (uses **`fonts/`** when present)  
 - `add-text` — same text on the **first three** images in **`post-processed/`** → **`post-text-processed/`** (defaults: **96px**, **no outline**, **bottom center**)  
+- `add-text-behind-subject` — separate an image's **subject** from its **background** into two layers, draw **large text behind the subject**, and composite the subject back on top → **`layer-text-image/`**. Uses a **random** image from **`post-processed/`** (or `--input`). Segmentation backends via **`--segmenter`**: **`rembg`** (default, local; needs the optional extra `pip install ".[segmentation]"`, downloads a model on first use) or **`gemini`** (Google Gemini segmentation via `GEMINI_API_KEY`, default model **`gemini-3-flash-preview`**; override with `--gemini-model` and target with `--subject-prompt`). **Edge quality:** default rembg model is **`isnet-general-use`** (finer hair than u2net); switch with **`--rembg-model`** (e.g. `birefnet-general` for the best hair, `u2net_human_seg` for people, `u2net` for speed). For natural, non-hand-cut edges the subject mask is eroded by **`--shrink`** px (removes the background halo) then feathered with **`--feather`** px (Gaussian blur, default **1.5**; try 2-4 for soft hair), and **`--alpha-matting`** adds matte-based soft edges. Use **`--text-opacity`** (e.g. 85) to let the background show through the letters for a more integrated look.  
 
 ### Environment variables (`.env`)
 
@@ -58,9 +60,9 @@ This installs the same packages as `pyproject.toml` and registers:
 | `GEMINI_IMAGE_SIZE` | No | API resolution bucket: `512`, `1K`, `2K`, or `4K` (default: **`2K`**). See [image generation](https://ai.google.dev/gemini-api/docs/image-generation) for pixel sizes per ratio. |
 | `GEMINI_OUTPUT_WIDTH` | No | Resize saved PNG to this width in pixels (default: **`1600`**; `0` = keep native API dimensions). |
 
-`python-dotenv` loads `.env` when you run **`extend-backgrounds`**. **`assemble-music-video`** also loads `.env` if present so future options can live in one place.
+`python-dotenv` loads `.env` for **`extend-backgrounds`** and **`add-text-behind-subject --segmenter gemini`**.
 
-If you only run the video assembler (no AI background step), you do **not** need any API keys—only FFmpeg and your images.
+The video commands (**`make_short_music_video`**, **`assemble-music-video`**) need **no API keys**—only FFmpeg and your images.
 
 ## Project layout
 
@@ -70,11 +72,13 @@ If you only run the video assembler (no AI background step), you do **not** need
 | `pre-processed/` | **Photo dump** — raw images before any AI step (git ignores contents). |
 | `post-processed/` | **Backgrounds for the video** — 16:9 images after `extend-backgrounds` (default input for the assembler). |
 | `post-text-processed/` | Optional **captioned** stills after `add-text` (git ignores contents). |
+| `layer-text-image/` | Optional **text-behind-subject** composites after `add-text-behind-subject` (git ignores contents). |
 | `prompts/background_master.txt` | **Master prompt** for Gemini: extend to widescreen + style hints (see file). |
 | `fonts/` | Optional **`.ttf` / `.otf`** files; file stem becomes a `--font` key. |
-| `output/` | Generated mix, titled frame, and final MP4. |
+| `output/` | Generated mix, final MP4, and tracklist when using **`assemble-music-video`** defaults. |
+| `music-video/` | Default output for **`make_short_music_video`** — one **`mv_*/`** folder per run (`frame.png`, `mv_*_mix.mp3`, `mv_*_video.mp4`, `mv_*_tracklist.txt`, and `mv_*_thumbnail.png` when `--thumbnail-text` is used). |
 
-**Everything under `music/`**, **`pre-processed/`**, **`post-processed/`**, and **`post-text-processed/`** is ignored by git except each folder’s `.gitkeep`, so large assets are not committed by accident.
+**Everything under `music/`**, **`pre-processed/`**, **`post-processed/`**, **`post-text-processed/`**, and **`music-video/`** is ignored by git except each folder’s `.gitkeep`, so large assets are not committed by accident.
 
 ## Workflow: backgrounds (optional)
 
@@ -149,38 +153,49 @@ add-text --text "Your line of text here"
 
 Use **`--force`** to overwrite outputs. **Placement:** **`--h-align`**, **`--v-align`**, **`--margin`**. **Outline:** **`--stroke-width`** (default **0** = none; uses thin **8-direction** rings, not a solid square). **Weight:** **`--embolden`** (default **0** = lightest; try **1** or **2** for heavier type). **Size:** **`--font-size`** (default **96**). **Fonts:** Bundled **Inria Serif** faces live under **`fonts/Inria_Serif/`** (`InriaSerif-Light`, `InriaSerif-Regular`, `InriaSerif-Bold`, italics, etc.). Run **`add-text --list-fonts`** (or **`add-bottom-text --list-fonts`**) to print stems. The default when **`--font`** is omitted is **`fonts/Inria_Serif/InriaSerif-Light.ttf`** (stem **`InriaSerif-Light`**) when that file exists. Use **`--font InriaSerif-Regular`** for Regular. **Weight:** **`--font-weight`** (default **300**) applies when resolving without an exact **`--font`** stem. Edit **`DEFAULT_FONT_VARIANT`** / **`DEFAULT_FONT_WEIGHT`** at the top of **`music_assembler/add_text.py`** to change defaults. **`add-bottom-text`** supports the same options.
 
-## Quick start (full video)
+## Quick start: generate a video
 
-1. Add many `.mp3` files under `music/`.
-2. Put **16:9** images in **`post-processed/`** (either export them yourself or run **`extend-backgrounds`** first).
-3. Run:
+1. Add many `.mp3` files under **`music/`**.
+2. Put **16:9** images in **`post-processed/`** (export them yourself or run **`extend-backgrounds`** first).
+3. From the **repository root**, run:
+
+```bash
+python3 -m music_assembler.make_short_music_video
+```
+
+No arguments needed. Each run creates its own folder **`music-video/mv_<timestamp>/`** (e.g. **`music-video/mv_20260412_143022/`**) containing **`frame.png`** (the still used for the video), **`mv_20260412_143022_mix.mp3`**, **`mv_20260412_143022_video.mp4`**, and **`mv_20260412_143022_tracklist.txt`**. The video shows the **current song title in the bottom-left** (changing per track, with equal left/bottom margins); the tracklist file maps each **timestamp → song** for YouTube chapters. Mix length is about **1h15–1h30** by design; the tool picks a **random** background and avoids playing the same logical track title back-to-back. Optional: **`--title-font-size`** to resize the song title, and **`--thumbnail-text "Late Night"`** to also write **`mv_*_thumbnail.png`** — the same still with that text drawn **behind the subject**.
+
+### Full CLI (`assemble-music-video`)
+
+For custom folders, mix length, fixed seed, and song-title fonts, use **`assemble-music-video`**:
 
 ```bash
 assemble-music-video \
   --songs-dir music \
-  --text "My mix title\nSubtitle or episode" \
   --output-dir output \
   --basename my_session
 ```
 
 `--images-dir` defaults to **`post-processed`**; override if your backgrounds live elsewhere.
 
-Outputs:
+Outputs land in a per-run folder **`output/my_session/`**:
 
-- `output/my_session_mix.mp3` — concatenated mix  
-- `output/my_session_frame.png` — image with text  
-- `output/my_session_video.mp4` — final video  
+- `output/my_session/frame.png` — the still used for the video  
+- `output/my_session/my_session_mix.mp3` — concatenated mix  
+- `output/my_session/my_session_video.mp4` — final video (bottom-left song titles)  
+- `output/my_session/my_session_tracklist.txt` — timestamp → song list for YouTube chapters  
+- `output/my_session/my_session_thumbnail.png` — only when `--thumbnail-text` is given (text drawn behind the subject)  
 
-### Useful options
+### Useful options (`assemble-music-video`)
 
 | Option | Description |
 |--------|-------------|
 | `--min-sec` / `--max-sec` | Target mix length in **seconds** (defaults: 4500 and 6300). |
 | `--image filename.jpg` | Use a specific file inside `--images-dir` (default: **random** image). |
 | `--seed N` | Fixed seed for **track order** and **random background** selection. |
-| `--font arial` | Font key: built-ins include `arial`, `helvetica`, `georgia`, `times`, `sf_pro`, or a stem from `fonts/`. |
-| `--font-size`, `--font-weight`, `--fill`, `--stroke`, `--stroke-width`, `--embolden` | Text appearance; optional **`--font-weight`** (e.g. **300** = Light) for files in **`fonts/`**; **`--stroke-width`** default **2**; **`--embolden`** default **0**. |
-| `--h-align` / `--v-align` | `left` \| `center` \| `right` and `top` \| `center` \| `bottom`. |
+| `--font arial` | Song-title font key: built-ins include `arial`, `helvetica`, `georgia`, `times`, `sf_pro`, or a stem from `fonts/`. Non-Latin titles (e.g. Korean) auto-fall back to a Unicode system font. |
+| `--font-size`, `--font-weight`, `--fill` | Song-title appearance; **`--font-size`** default **46**, **`--font-weight`** default **400**, **`--fill`** `R,G,B[,A]` (default white). |
+| `--thumbnail-text "Late Night"` | Also render `<base>_thumbnail.png`: this text in large letters **behind the subject** of the background still. |
 | `--video-width` / `--video-height` | Encode size (default 1920×1080). |
 | `--list-fonts` | Print available font keys (no FFmpeg needed). |
 
@@ -189,16 +204,13 @@ Example: **90–120 minute** mix:
 ```bash
 assemble-music-video \
   --songs-dir music \
-  --text "Evening set" \
   --min-sec 5400 \
   --max-sec 7200
 ```
 
-Line breaks in text: use `\n` in the shell string, e.g. `--text "Line one\nLine two"`.
-
 ## Defaults in code
 
-Default min/max durations and video size live in `music_assembler/config.py` (`DEFAULT_MIN_DURATION_SEC`, `DEFAULT_MAX_DURATION_SEC`, etc.). You can change them there or always override via the CLI.
+**`make_short_music_video`** uses its own targets (**~1h15–1h30**, output **`music-video/`**, bottom-left song-title styling) in `music_assembler/make_short_music_video.py`. For **`assemble-music-video`**, default min/max durations and video size live in `music_assembler/config.py` (`DEFAULT_MIN_DURATION_SEC`, `DEFAULT_MAX_DURATION_SEC`, etc.); change them there or override via the CLI. The title margin/size/color defaults live at the top of `music_assembler/music_video.py`.
 
 ## Python API
 
@@ -222,26 +234,34 @@ cfg = AssemblerConfig(
         project_root=Path.cwd(),
     ),
     duration=DurationBounds(min_sec=75 * 60, max_sec=105 * 60),
-    text=TextOverlayStyle(font_key="arial", font_size_px=72),
+    # TextOverlayStyle now styles the bottom-left per-song title.
+    text=TextOverlayStyle(font_key="arial", font_size_px=46, font_weight=400),
 )
 result = assemble(
     cfg,
-    overlay_text="Title\nSubtitle",
     image_filename=None,
     output_basename="session",
+    # Optional: also render a thumbnail with this text drawn *behind* the subject.
+    thumbnail_background_text="Late Night",
 )
+print(result["output_dir"])     # output/session/
+print(result["frame_png"])      # output/session/frame.png
 print(result["video_mp4"])
+print(result["tracklist_txt"])
+print(result["thumbnail_png"])  # None unless thumbnail_background_text was given
 ```
 
 ## Module overview
 
 | Module | Role |
 |--------|------|
-| `music_assembler/audio.py` | Discover MP3s, probe durations, random playlist, concat + trim. |
+| `music_assembler/audio.py` | Discover MP3s, probe durations, random playlist, concat + trim, per-song display titles + track segments. |
 | `music_assembler/image_text.py` | Pillow rendering of text on the still. |
-| `music_assembler/video.py` | FFmpeg: still image + audio → MP4. |
+| `music_assembler/music_video.py` | FFmpeg: still + per-song bottom-left titles → MP4; writes the tracklist. |
+| `music_assembler/video.py` | FFmpeg helper: plain still image + audio → MP4. |
 | `music_assembler/pipeline.py` | `assemble()` orchestrates the full run. |
 | `music_assembler/cli.py` | `assemble-music-video` CLI. |
+| `music_assembler/make_short_music_video.py` | **`python3 -m music_assembler.make_short_music_video`** — opinionated defaults → **`music-video/`**. |
 | `music_assembler/extend_backgrounds.py` | `extend-backgrounds` — Gemini `generate_content` with prompt + image; saves first image part. |
 | `music_assembler/extend_first_three.py` | `extend-first-three` — first three images only (`--limit 3`). |
 | `music_assembler/bottom_text_overlay.py` | Shared bottom-center overlay using `TextOverlayStyle` + `render_image_with_text`. |

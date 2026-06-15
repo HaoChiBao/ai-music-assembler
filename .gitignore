@@ -17,6 +17,8 @@ post-processed/*
 !post-processed/.gitkeep
 post-text-processed/*
 !post-text-processed/.gitkeep
+layer-text-image/*
+!layer-text-image/.gitkeep
 
 *.mp4
 *.m4a
