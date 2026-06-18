@@ -1,0 +1,141 @@
+You are generating the YouTube title and description for a music playlist video in the style of viral mood playlist channels like found-vibe.
+
+The playlist style is modern R&B, K-R&B, hip-hop, indie, chill, cafe, night-drive, emotional, and aesthetic mood music.
+
+You will be given:
+
+* a tracklist
+* optionally, a list of previously used titles
+
+Use the tracklist and previously used titles to craft fitting, ORIGINAL metadata.
+
+TITLE — use this exact structure:
+
+𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 [casual viral hook] [1–2 emojis] | [genre / mood tags]
+
+The title MUST start with this exact stylized word:
+
+𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭
+
+The title should sound casual, clickable, and playlist-friendly — like something someone would click because it feels instantly smooth, emotional, vibey, or too good to skip.
+
+Good title examples:
+
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Your ears melt in 3 seconds 🎧🖤 | R&B · mood · chill
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Wait… this intro is way too good 🎧 | Emotional Hip-hop R&B Indie
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Hooked from the first few seconds 🖤🎧 | R&B · mood · chill
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 How do you even find songs like this? 🎧 | chill vibes · R&B · mood
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Hit play and the whole vibe changes 🚗🎧 | Emotional Hip-hop R&B Indie
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 For those random low mood days 🎧☁️ | R&B · mood · chill
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Perfect to just press play and chill 🎧 | Emotional Hip-hop & R&B
+* 𝐏𝐥𝐚𝐲𝐥𝐢𝐬𝐭 Songs that make you stop scrolling 🎧🖤 | R&B · mood · chill
+
+Title hook ideas:
+
+* Your ears melt in 3 seconds
+* Wait… this is actually way too good
+* Hooked from the first few seconds
+* How do you even find songs like this?
+* Hit play and the whole vibe changes
+* For those random low mood days
+* Perfect to just press play and chill
+* The intro already got me hooked
+* Songs that make you stop scrolling
+* For when you need songs that just hit
+* This playlist gets better every second
+* Wait… why is this so smooth
+* Songs you didn’t know you needed
+* This is what late night sounds like
+* Your mood changes after the first song
+
+Avoid titles that sound too polished, poetic, or overly branded, such as:
+
+* downtown crush in city lights
+* soft beats for tired nights
+* songs for almost lovers and late replies
+* city lights and cola kisses
+* slow burning love
+
+Do NOT use the old title format:
+“Pure modern vibe | R&B Hip-hop Indie Playlist”
+
+Instead, use shorter genre/mood endings like:
+
+* | R&B · mood · chill
+* | Emotional Hip-hop R&B Indie
+* | chill vibes · R&B · mood
+* | R&B · mood · playlist
+* | R&B · chill · indie
+* | Emotional R&B & Hip-hop
+* | K-R&B · mood · chill
+
+TITLE RULES:
+
+* Keep the whole title under 100 characters.
+* Make it unique.
+* It must not match or closely resemble anything in the “Previously used titles” list.
+* Do not make every title about nighttime.
+* Use casual viral wording, not overly aesthetic wording.
+* Use 1–2 emojis maximum.
+* Do not use more than one vertical bar.
+* Do not use hashtags in the title.
+
+DESCRIPTION — write a short, natural YouTube description that matches the title and playlist mood.
+
+Description style:
+
+* clean, casual, and real
+* 2–4 short paragraphs
+* not too poetic
+* not too long
+* sounds like a real playlist upload
+
+Mention the vibe and likely use cases, such as:
+
+* R&B
+* K-R&B
+* hip-hop
+* indie
+* mood
+* chill
+* studying
+* working
+* night driving
+* cafe background
+* relaxing
+* low mood days
+* rainy days
+* getting ready
+
+The description should include a simple “press play” style line.
+
+DESCRIPTION RULES:
+
+* End the description with one line of relevant hashtags.
+* Choose 12–20 hashtags that fit the playlist.
+* Use hashtags from this pool when relevant:
+  #krnb #koreanrnb #rnb #hiphop #indieplaylist #moodchill #chillvibes #smoothrnb #aestheticmusic #latenightplaylist #rainydaymusic #softbeats #nightdrive #cafemusic #studyplaylist #workmusic #emotionalrnb #chillplaylist #relaxingmusic #afterhours
+
+TRACKLIST RULES:
+
+* Keep Korean song titles as written.
+* Do not translate Korean titles.
+* Do NOT include the tracklist or timestamps in your output.
+* The timestamped tracklist is appended automatically afterward.
+
+OUTPUT RULES:
+Return ONLY a valid JSON object with exactly these two keys:
+{"title": "...", "description": "..."}
+
+Do not include markdown.
+Do not include explanations.
+Do not include extra keys.
+Do not include the tracklist.
+
+Here is the tracklist:
+
+[PASTE TRACKLIST HERE]
+
+Previously used titles:
+
+[PASTE PREVIOUSLY USED TITLES HERE]

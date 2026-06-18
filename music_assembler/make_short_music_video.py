@@ -50,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
             "the subject of the background image (use \\n for multiple lines)."
         ),
     )
+    p.add_argument(
+        "--thumbnail-bottom-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Caption drawn on TOP of the thumbnail, centered along the bottom (over the "
+            "subject). Works with or without --thumbnail-text (use \\n for multiple lines)."
+        ),
+    )
     return p
 
 
@@ -88,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     thumbnail_text = args.thumbnail_text.replace("\\n", "\n") if args.thumbnail_text else None
+    thumbnail_bottom_text = (
+        args.thumbnail_bottom_text.replace("\\n", "\n") if args.thumbnail_bottom_text else None
+    )
 
     result = assemble(
         cfg,
@@ -95,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         output_basename=basename,
         progress=True,
         thumbnail_background_text=thumbnail_text,
+        thumbnail_bottom_text=thumbnail_bottom_text,
+        move_used_image=True,
     )
     print(f"Wrote folder: {result['output_dir']}")
     for k in ("frame_png", "audio_mp3", "video_mp4", "tracklist_txt"):
@@ -102,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     if result.get("thumbnail_png"):
         print(f"  thumbnail_png: {result['thumbnail_png']}")
     print(f"  background: {result['background']}")
+    if result.get("used_image"):
+        print(f"  moved used image -> {result['used_image']}")
     print(f"  tracks in mix: {len(result['playlist'])}")
     dur = result["final_audio_duration_sec"]
     print(f"  audio duration: {dur / 60:.1f} min ({dur:.0f} s)")

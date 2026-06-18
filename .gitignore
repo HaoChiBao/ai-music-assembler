@@ -28,3 +28,14 @@ build/
 *.egg-info/
 output/
 tmp/
+
+# YouTube / Google OAuth secrets and cached tokens — never commit these
+client_secret*.json
+*.client_secret.json
+youtube_token.json
+youtube_token*.json
+token.json
+*.token.json
+
+# Local log of previously used YouTube titles (so they're never reused)
+youtube_used_titles.txt

@@ -39,6 +39,7 @@ Avoid **`pip install -e .`** on **Python 3.14+** with current setuptools: editab
 This installs the same packages as `pyproject.toml` and registers:
 
 - **`python3 -m music_assembler.make_short_music_video`** — **main command**: ~**1h15–1h30** mix from **`music/`**, random still from **`post-processed/`** → a timestamped **per-run folder** **`music-video/mv_*/`** holding **`frame.png`** (the still), **`mv_*_mix.mp3`**, **`mv_*_video.mp4`**, and a YouTube-ready **`mv_*_tracklist.txt`** (timestamp → song, for chapters). The video shows the **current song title in the bottom-left** (changes per track, equal left/bottom margins). Pass **`--thumbnail-text "..."`** to also render **`mv_*_thumbnail.png`** — the same still with that text in large letters drawn **behind the subject**, segmented at the **highest quality** (BiRefNet **`birefnet-general`** + alpha matting; downloads a ~1GB model on first use). No on-screen caption and no API keys needed.  
+- **`python3 -m music_assembler.make_and_upload_music_video`** (`upload-music-video`) — runs the **main command** above, then **generates a YouTube title + description** with **OpenAI or Gemini** (prompt in **`prompts/youtube_metadata.txt`**, timestamped tracklist appended for chapters) and **uploads the video to YouTube**. Sets the rendered `--thumbnail-text` image as the custom thumbnail when provided. Needs the optional extra `pip install ".[youtube]"`, a Google OAuth **client secret** JSON (Desktop app) in the project root (auto-discovered) or via `--client-secret`, and a metadata key: **`OPENAI_API_KEY`** or **`GEMINI_API_KEY`** (provider auto-selected; force it with `--metadata-provider {auto,openai,gemini}`). Use **`--no-upload`** to build + preview the metadata without uploading, and **`--privacy`** (`private`/`unlisted`/`public`, default `private`).  
 - `assemble-music-video` — same pipeline with full CLI flags (paths, duration, font, seed, etc.)  
 - `extend-backgrounds` — pre-processed photos → widescreen post-processed backgrounds (Gemini **image** models; default **gemini-3-pro-image-preview**)  
 - `extend-first-three` — same as `extend-backgrounds --limit 3` (handy for quick tests)  
@@ -165,6 +166,66 @@ python3 -m music_assembler.make_short_music_video
 
 No arguments needed. Each run creates its own folder **`music-video/mv_<timestamp>/`** (e.g. **`music-video/mv_20260412_143022/`**) containing **`frame.png`** (the still used for the video), **`mv_20260412_143022_mix.mp3`**, **`mv_20260412_143022_video.mp4`**, and **`mv_20260412_143022_tracklist.txt`**. The video shows the **current song title in the bottom-left** (changing per track, with equal left/bottom margins); the tracklist file maps each **timestamp → song** for YouTube chapters. Mix length is about **1h15–1h30** by design; the tool picks a **random** background and avoids playing the same logical track title back-to-back. Optional: **`--title-font-size`** to resize the song title, and **`--thumbnail-text "Late Night"`** to also write **`mv_*_thumbnail.png`** — the same still with that text drawn **behind the subject**.
 
+## Generate a video and upload it to YouTube
+
+**`upload-music-video`** runs the same pipeline, then auto-writes a YouTube **title + description** (Gemini) and **uploads** the video.
+
+One-time setup:
+
+1. Install the upload extra: `pip install ".[youtube]"`
+2. In [Google Cloud Console](https://console.cloud.google.com/): create a project, enable the **YouTube Data API v3**, configure the OAuth consent screen, and create an **OAuth client ID** of type **Desktop app**. Download its JSON and drop it in the project root (any `client_secret*.json` is auto-discovered) — it is **gitignored**, never commit it.
+3. Make sure **`OPENAI_API_KEY`** is in `.env` (used to write the title/description; **OpenAI is the default** provider). Switch with `--metadata-provider {openai,gemini,auto}` (Gemini uses `GEMINI_API_KEY`). The metadata is generated **early** — right after the tracklist, before the slow encode — so a bad key or API error fails fast instead of after rendering the video.
+
+Then:
+
+```bash
+# Build + generate metadata + upload (defaults to PRIVATE)
+python3 -m music_assembler.make_and_upload_music_video --thumbnail-text "Late Night"
+
+# Preview the generated title/description without uploading
+python3 -m music_assembler.make_and_upload_music_video --no-upload
+
+# Upload as unlisted with tags
+python3 -m music_assembler.make_and_upload_music_video --privacy unlisted --tags "lofi,chill,study"
+```
+
+- On the **first** upload a browser opens to authorize your channel; the token is cached to **`youtube_token.json`** (gitignored) for subsequent non-interactive runs.
+- The **title/description prompt** lives at **`prompts/youtube_metadata.txt`** — edit it to change tone/format. The timestamped tracklist is appended automatically so **YouTube chapters** work. Metadata is written by **OpenAI** (default model `gpt-4o-mini`, override with `OPENAI_TEXT_MODEL`) or **Gemini** (`gemini-2.5-flash`, override with `GEMINI_TEXT_MODEL`).
+- When `--thumbnail-text` is given, the rendered thumbnail is set as the video's **custom thumbnail** (requires a verified channel; otherwise it's skipped with a warning).
+- Other flags: `--privacy {private,unlisted,public}` (default `private`), `--category-id` (default `10` = Music), `--made-for-kids`, `--client-secret PATH`, `--token-file PATH`, `--metadata-prompt PATH`.
+
+## Batch: generate many videos, then schedule uploads
+
+For producing a backlog, split the work into two steps: **build N videos in parallel**, then **mass-schedule** their uploads.
+
+### 1. Generate N videos in parallel (`generate-music-videos`)
+
+```bash
+# Build 5 videos at once, each with its own progress bar + thumbnail
+generate-music-videos -n 5 --thumbnail-text "Late Night" --workers 3
+```
+
+- Each video gets a **distinct** random background (so backgrounds aren't reused within the batch), its own `music-video/<base>/` folder, and a Gemini-generated **title/description** saved as `<base>_title.txt` / `<base>_description.txt`.
+- A live **per-video progress bar** shows each build's status; failures are isolated (one bad video won't stop the rest).
+- Every built video is appended as a **`pending`** entry to a registry: **`music-video/video_registry.txt`** (JSON-lines; this is the list of generated video ids).
+- Generated titles are checked against the **used-titles log** (and against each other in the batch) so they're never reused.
+- Flags: `-n/--count` (required), `--workers` (default `min(count, 3)`), `--thumbnail-text`, `--title-font-size`, `--registry PATH`, `--metadata-prompt PATH`, `--used-titles-file PATH`, `--no-metadata`.
+
+### 2. Mass-schedule the uploads (`schedule-music-videos`)
+
+```bash
+# Preview the schedule without uploading
+schedule-music-videos --start "2026-06-20 09:00" --interval-hours 24 --dry-run
+
+# Upload all pending videos, scheduled to publish 1/day starting that date
+schedule-music-videos --start "2026-06-20 09:00" --interval-hours 24
+```
+
+- Reads the **`pending`** entries from the registry and uploads each to YouTube.
+- By default it **schedules** them: each video is uploaded private and set to go **public** at a staggered time (`--start` + `--interval-hours` × index). Use **`--no-schedule`** to upload immediately at `--privacy`.
+- On success, each entry is flipped to **`uploaded`** in the registry with its **YouTube id**, watch URL, and scheduled publish time, and its title is appended to the used-titles log.
+- Flags: `--start "'YYYY-MM-DD HH:MM'"` (local time; default tomorrow 09:00), `--interval-hours` (default `24`), `--limit N`, `--no-schedule`, `--privacy`, `--category-id`, `--tags`, `--made-for-kids`, `--client-secret PATH`, `--token-file PATH`, `--registry PATH`, `--dry-run`.
+
 ### Full CLI (`assemble-music-video`)
 
 For custom folders, mix length, fixed seed, and song-title fonts, use **`assemble-music-video`**:
@@ -262,6 +323,13 @@ print(result["thumbnail_png"])  # None unless thumbnail_background_text was give
 | `music_assembler/pipeline.py` | `assemble()` orchestrates the full run. |
 | `music_assembler/cli.py` | `assemble-music-video` CLI. |
 | `music_assembler/make_short_music_video.py` | **`python3 -m music_assembler.make_short_music_video`** — opinionated defaults → **`music-video/`**. |
+| `music_assembler/make_and_upload_music_video.py` | **`upload-music-video`** — build the video, generate metadata, upload to YouTube. |
+| `music_assembler/make_music_videos.py` | **`generate-music-videos`** — build N videos in parallel (per-video progress bars) → registry. |
+| `music_assembler/schedule_music_videos.py` | **`schedule-music-videos`** — mass-upload pending registry videos on a publish schedule, mark uploaded. |
+| `music_assembler/video_registry.py` | JSON-lines registry of generated videos + upload status (`music-video/video_registry.txt`). |
+| `music_assembler/progress_bars.py` | Thread-safe multi-line progress bars for parallel jobs. |
+| `music_assembler/youtube_metadata.py` | OpenAI/Gemini YouTube title/description (+ appended tracklist chapters), unique-title tracking. |
+| `music_assembler/youtube_upload.py` | OAuth + resumable YouTube Data API v3 upload (custom thumbnail, scheduled `publishAt`). |
 | `music_assembler/extend_backgrounds.py` | `extend-backgrounds` — Gemini `generate_content` with prompt + image; saves first image part. |
 | `music_assembler/extend_first_three.py` | `extend-first-three` — first three images only (`--limit 3`). |
 | `music_assembler/bottom_text_overlay.py` | Shared bottom-center overlay using `TextOverlayStyle` + `render_image_with_text`. |

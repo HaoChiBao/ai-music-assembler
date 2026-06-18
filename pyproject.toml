@@ -13,6 +13,16 @@ dependencies = [
 [project.optional-dependencies]
 # Subject segmentation for `add-text-behind-subject` (pulls onnxruntime, numpy, etc.).
 segmentation = ["rembg>=2.0.0", "onnxruntime>=1.16.0"]
+# Use OpenAI (instead of the built-in Gemini) to write YouTube titles/descriptions.
+openai = ["openai>=1.0.0"]
+# YouTube upload for `upload-music-video` (OAuth + Data API v3). Includes OpenAI so the
+# metadata step can use either provider.
+youtube = [
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    "openai>=1.0.0",
+]
 
 [project.scripts]
 assemble-music-video = "music_assembler.cli:main"
@@ -22,6 +32,11 @@ add-bottom-text = "music_assembler.add_bottom_text:main"
 add-text = "music_assembler.add_text:main"
 add-text-behind-subject = "music_assembler.add_text_behind_subject:main"
 make-short-music-video = "music_assembler.make_short_music_video:main"
+generate-music-videos = "music_assembler.make_music_videos:main"
+schedule-music-videos = "music_assembler.schedule_music_videos:main"
+list-youtube-videos = "music_assembler.list_youtube_videos:main"
+upload-music-video = "music_assembler.make_and_upload_music_video:main"
+upload-video-test = "music_assembler.upload_test:main"
 
 [build-system]
 requires = ["setuptools>=61"]

@@ -13,7 +13,7 @@ import random
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from music_assembler import __version__
 from music_assembler.bottom_text_overlay import resolve_font_key
@@ -237,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
+    load_dotenv(find_dotenv(usecwd=True))
     parser = build_parser()
     args = parser.parse_args(argv)
     root = args.project_root.resolve()

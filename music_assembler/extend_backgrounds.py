@@ -5,6 +5,11 @@ Extend photos to widescreen backgrounds with the Gemini API (image-capable model
 Flow: load **prompts/background_master.txt**, open each source image, call **generate_content**
 with text + image, save the first returned image (optionally resized to **~1600px** wide). No composites or masks.
 
+Images are processed **in parallel** (``--workers``) with **per-image error isolation** and
+**retries with exponential backoff** (``--retries`` / ``--retry-backoff``) for transient
+failures; content-policy blocks are reported but not retried, and a single failure never
+aborts the whole batch.
+
 Requires ``GEMINI_API_KEY`` in the environment (e.g. from ``.env``).
 """
 
@@ -14,9 +19,12 @@ import argparse
 import io
 import os
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from PIL import Image as PILImage
 
 from music_assembler import __version__
@@ -29,6 +37,21 @@ DEFAULT_ASPECT_RATIO = "16:9"
 # then resize to ~1600px wide so the saved PNG matches the target width without upscaling from 1K.
 DEFAULT_IMAGE_SIZE = "2K"
 DEFAULT_OUTPUT_WIDTH = 1600
+DEFAULT_WORKERS = 4
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_BACKOFF = 2.0
+
+# Serializes terminal output across worker threads so log lines don't interleave.
+_PRINT_LOCK = threading.Lock()
+
+
+def _log(msg: str, *, err: bool = False) -> None:
+    with _PRINT_LOCK:
+        print(msg, file=sys.stderr if err else sys.stdout, flush=True)
+
+
+class ContentBlockedError(RuntimeError):
+    """Raised when Gemini refuses an image for policy reasons (not worth retrying)."""
 
 
 def _iter_response_parts(response) -> list:
@@ -134,15 +157,48 @@ def extend_one(
     )
     if not _save_first_image(response, out_path, output_width=output_width):
         fb = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(fb, "block_reason", None) if fb else None
         dbg = _response_debug_text(response)
         extra = f" prompt_feedback={fb}" if fb else ""
-        raise RuntimeError(
-            f"No image in model response for {image_path.name}.{extra}\n{_text_preview(dbg)}"
-        )
+        msg = f"No image in model response for {image_path.name}.{extra}\n{_text_preview(dbg)}"
+        # A content-policy block won't change on retry; mark it so callers skip retries.
+        if block_reason is not None:
+            raise ContentBlockedError(msg)
+        raise RuntimeError(msg)
+
+
+def extend_one_with_retry(
+    *,
+    retries: int,
+    retry_backoff: float,
+    **kwargs,
+) -> None:
+    """Call :func:`extend_one`, retrying transient failures with exponential backoff.
+
+    Content-policy blocks (:class:`ContentBlockedError`) are never retried.
+    """
+    image_path: Path = kwargs["image_path"]
+    attempts = max(1, retries)
+    for attempt in range(1, attempts + 1):
+        try:
+            extend_one(**kwargs)
+            return
+        except ContentBlockedError:
+            raise
+        except Exception as e:
+            if attempt >= attempts:
+                raise
+            delay = retry_backoff * (2 ** (attempt - 1))
+            _log(
+                f"  retry {attempt}/{attempts - 1} for {image_path.name} after error: "
+                f"{e} (waiting {delay:.1f}s)",
+                err=True,
+            )
+            time.sleep(delay)
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
+    load_dotenv(find_dotenv(usecwd=True))
     parser = argparse.ArgumentParser(
         prog="extend-backgrounds",
         description=(
@@ -208,6 +264,31 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Process at most N images (for testing).",
     )
+    parser.add_argument(
+        "--workers",
+        "-j",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of images to extend in parallel (default: {DEFAULT_WORKERS}).",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=(
+            f"Max attempts per image on transient errors (default: {DEFAULT_RETRIES}). "
+            "Content-policy blocks are never retried."
+        ),
+    )
+    parser.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=DEFAULT_RETRY_BACKOFF,
+        help=(
+            "Base seconds for exponential backoff between retries "
+            f"(default: {DEFAULT_RETRY_BACKOFF}; waits base, base*2, base*4, …)."
+        ),
+    )
     args = parser.parse_args(argv)
     out_w = args.output_width if args.output_width > 0 else None
 
@@ -234,21 +315,36 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     client = genai.Client(api_key=api_key)
-    ok = 0
+
+    # Decide up front which images need work; skip ones already generated.
+    tasks: list[tuple[Path, Path]] = []
     skipped = 0
     for src in images:
-        out_name = src.stem + ".png"
-        dest = out_dir / out_name
+        dest = out_dir / (src.stem + ".png")
         if dest.is_file() and not args.force:
             print(f"skip (exists): {dest.name}")
             skipped += 1
             continue
-        print(
-            f"extend: {src.name} -> {dest.name} "
-            f"(model={args.model}, image_size={args.image_size}, output_width={out_w or 'native'})"
-        )
+        tasks.append((src, dest))
+
+    if not tasks:
+        print(f"Done. wrote 0, skipped {skipped}, failed 0.")
+        return 0
+
+    workers = max(1, min(args.workers, len(tasks)))
+    _log(
+        f"Extending {len(tasks)} image(s) with {workers} worker(s) "
+        f"(model={args.model}, image_size={args.image_size}, output_width={out_w or 'native'}, "
+        f"retries={args.retries})."
+    )
+
+    def _process(src: Path, dest: Path) -> tuple[Path, bool, str | None, bool]:
+        """Returns (src, ok, error_message, blocked)."""
+        _log(f"extend: {src.name} -> {dest.name}")
         try:
-            extend_one(
+            extend_one_with_retry(
+                retries=args.retries,
+                retry_backoff=args.retry_backoff,
                 client=client,
                 model=args.model,
                 prompt=prompt,
@@ -258,13 +354,35 @@ def main(argv: list[str] | None = None) -> int:
                 image_size=args.image_size,
                 output_width=out_w,
             )
-            ok += 1
+            _log(f"ok: {src.name}")
+            return (src, True, None, False)
+        except ContentBlockedError as e:
+            return (src, False, str(e), True)
         except Exception as e:
-            print(f"error: {src.name}: {e}", file=sys.stderr)
-            return 1
+            return (src, False, str(e), False)
 
-    print(f"Done. wrote {ok}, skipped {skipped}.")
-    return 0
+    ok = 0
+    failures: list[tuple[str, str, bool]] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process, src, dest): src for src, dest in tasks}
+        for fut in as_completed(futures):
+            src, succeeded, err, blocked = fut.result()
+            if succeeded:
+                ok += 1
+            else:
+                tag = "blocked" if blocked else "error"
+                _log(f"{tag}: {src.name}: {err}", err=True)
+                failures.append((src.name, err or "unknown error", blocked))
+
+    failed = len(failures)
+    print(f"Done. wrote {ok}, skipped {skipped}, failed {failed}.")
+    if failures:
+        print("Failed images:", file=sys.stderr)
+        for name, err, blocked in failures:
+            reason = "content blocked" if blocked else err.splitlines()[0]
+            print(f"  - {name}: {reason}", file=sys.stderr)
+    # Non-zero only if nothing succeeded; one bad image shouldn't fail an otherwise good run.
+    return 1 if (ok == 0 and failed > 0) else 0
 
 
 if __name__ == "__main__":
