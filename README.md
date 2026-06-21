@@ -69,15 +69,15 @@ The video commands (**`make_short_music_video`**, **`assemble-music-video`**) ne
 
 | Path | Purpose |
 |------|---------|
-| `music/` | **MP3 library** (or point `--songs-dir` anywhere). |
-| `pre-processed/` | **Photo dump** — raw images before any AI step (git ignores contents). |
-| `post-processed/` | **Backgrounds for the video** — 16:9 images after `extend-backgrounds` (default input for the assembler). |
+| `music/` | **MP3 library** — use category subfolders (e.g. `music/korean/`). |
+| `pre-processed/` | **Photo dump** — raw images before any AI step (git ignores contents). After `extend-backgrounds`, successful sources move to `pre-processed/used/`. |
+| `post-processed/` | **Backgrounds for the video** — category subfolders (e.g. `post-processed/korean/`). |
 | `post-text-processed/` | Optional **captioned** stills after `add-text` (git ignores contents). |
 | `layer-text-image/` | Optional **text-behind-subject** composites after `add-text-behind-subject` (git ignores contents). |
 | `prompts/background_master.txt` | **Master prompt** for Gemini: extend to widescreen + style hints (see file). |
 | `fonts/` | Optional **`.ttf` / `.otf`** files; file stem becomes a `--font` key. |
 | `output/` | Generated mix, final MP4, and tracklist when using **`assemble-music-video`** defaults. |
-| `music-video/` | Default output for **`make_short_music_video`** — one **`mv_*/`** folder per run (`frame.png`, `mv_*_mix.mp3`, `mv_*_video.mp4`, `mv_*_tracklist.txt`, and `mv_*_thumbnail.png` when `--thumbnail-text` is used). |
+| `music-video/` | Default output for **`make_short_music_video`** — per category (e.g. `music-video/korean/mv_*/`) with `frame_*.png`, mix, video, tracklist, and optional thumbnail. Use **`--category korean`** when inputs live in category subfolders. |
 
 **Everything under `music/`**, **`pre-processed/`**, **`post-processed/`**, **`post-text-processed/`**, and **`music-video/`** is ignored by git except each folder’s `.gitkeep`, so large assets are not committed by accident.
 
@@ -96,6 +96,8 @@ That processes **all** supported files in `pre-processed/` (`.png`, `.jpg`, `.jp
 ```bash
 extend-backgrounds --force
 ```
+
+After each successful extend, the source photo is moved to **`pre-processed/used/`** so it is not picked up again. Use **`--no-move-used`** to leave sources in place.
 
 If the script is not on your `PATH`, use:
 
@@ -156,8 +158,8 @@ Use **`--force`** to overwrite outputs. **Placement:** **`--h-align`**, **`--v-a
 
 ## Quick start: generate a video
 
-1. Add many `.mp3` files under **`music/`**.
-2. Put **16:9** images in **`post-processed/`** (export them yourself or run **`extend-backgrounds`** first).
+1. Add many `.mp3` files under **`music/korean/`** (or another category subfolder).
+2. Put **16:9** images in **`post-processed/korean/`** (export them yourself or run **`extend-backgrounds`** first).
 3. From the **repository root**, run:
 
 ```bash

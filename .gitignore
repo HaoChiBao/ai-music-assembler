@@ -7,14 +7,20 @@ venv/
 # Local music library: ignore all files in music/ but keep the folder (see music/.gitkeep)
 music/*
 !music/.gitkeep
+!music/*/
+!music/*/.gitkeep
 music-video/*
 !music-video/.gitkeep
+!music-video/*/
+!music-video/*/.gitkeep
 
 # Photo dump + Gemini outputs (keep folders only)
 pre-processed/*
 !pre-processed/.gitkeep
 post-processed/*
 !post-processed/.gitkeep
+!post-processed/*/
+!post-processed/*/.gitkeep
 post-text-processed/*
 !post-text-processed/.gitkeep
 layer-text-image/*

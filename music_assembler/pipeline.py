@@ -1,7 +1,7 @@
 """End-to-end: random mix MP3 → background still + per-song bottom-left titles → MP4.
 
 Each run writes a self-contained folder ``output_dir/<base>/`` holding the still
-(``frame.png``), the audio mix, the music video, the tracklist transcript, and —
+(``frame_<background-stem>.png``), the audio mix, the music video, the tracklist transcript, and —
 when ``thumbnail_background_text`` is given — a thumbnail with that text drawn
 *behind* the subject of the background image.
 """
@@ -87,6 +87,11 @@ def pick_background_image(images_dir: Path, name: str | None, seed: int | None) 
     return rng.choice(files)
 
 
+def frame_copy_path(run_dir: Path, background: Path) -> Path:
+    """Path for the run-local copy of the chosen background still."""
+    return run_dir / f"frame_{background.stem}.png"
+
+
 def assemble(
     cfg: AssemblerConfig,
     *,
@@ -124,7 +129,7 @@ def assemble(
     Build one music video into its own folder ``output_dir/<base>/``:
 
     1) Mix random MP3s into ``<base>_mix.mp3``.
-    2) Pick a background image, save it as ``frame.png``, and write a YouTube tracklist.
+    2) Pick a background image, save it as ``frame_<stem>.png``, and write a YouTube tracklist.
     3) Encode ``<base>_video.mp4``: the still + the current song title (bottom-left).
     4) If ``thumbnail_background_text`` is given, render ``<base>_thumbnail.png``: the
        same still with that text drawn *behind* the segmented subject. The subject is
@@ -148,7 +153,6 @@ def assemble(
     audio_mp3 = run_dir / f"{base}_mix.mp3"
     video_mp4 = run_dir / f"{base}_video.mp4"
     tracklist_txt = run_dir / f"{base}_tracklist.txt"
-    frame_png = run_dir / "frame.png"
     thumbnail_png = run_dir / f"{base}_thumbnail.png"
     title_txt = run_dir / f"{base}_title.txt"
     description_txt = run_dir / f"{base}_description.txt"
@@ -176,8 +180,9 @@ def assemble(
     if emit:
         emit(51.0, "Choosing background…")
     bg = pick_background_image(cfg.paths.images_dir, image_filename, cfg.seed)
-    # Persist the chosen still as frame.png so the folder is self-contained; this is
-    # also the exact image used by both the video and the thumbnail.
+    frame_png = frame_copy_path(run_dir, bg)
+    # Persist the chosen still so the run folder is self-contained; the filename
+    # includes the original background stem for quick identification.
     Image.open(bg).convert("RGB").save(frame_png, format="PNG")
 
     if emit:
@@ -289,8 +294,8 @@ def assemble(
     )
 
     # Video (and thumbnail) are done: retire the source background into <images_dir>/used/
-    # so it isn't picked again on future runs. frame.png in the run folder is a copy, so
-    # moving the original doesn't affect the outputs.
+    # so it isn't picked again on future runs. The frame copy in the run folder is
+    # independent, so moving the original doesn't affect the outputs.
     moved_to: Path | None = None
     if move_used_image:
         used_dir = cfg.paths.images_dir.resolve() / "used"

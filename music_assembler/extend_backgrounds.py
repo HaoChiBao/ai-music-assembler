@@ -8,7 +8,8 @@ with text + image, save the first returned image (optionally resized to **~1600p
 Images are processed **in parallel** (``--workers``) with **per-image error isolation** and
 **retries with exponential backoff** (``--retries`` / ``--retry-backoff``) for transient
 failures; content-policy blocks are reported but not retried, and a single failure never
-aborts the whole batch.
+aborts the whole batch. After a successful extend, the source photo is moved into
+``<input-dir>/used/`` so it is not processed again.
 
 Requires ``GEMINI_API_KEY`` in the environment (e.g. from ``.env``).
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import shutil
 import sys
 import threading
 import time
@@ -116,10 +118,26 @@ def _load_prompt(path: Path) -> str:
 def _discover_images(input_dir: Path) -> list[Path]:
     if not input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
-    files = sorted(p for p in input_dir.iterdir() if p.suffix in IMAGE_EXTS and p.is_file())
+    files = sorted(
+        p for p in input_dir.iterdir() if p.suffix in IMAGE_EXTS and p.is_file()
+    )
     if not files:
         raise ValueError(f"No images found in {input_dir} (supported: {', '.join(sorted(IMAGE_EXTS))})")
     return files
+
+
+def _move_to_used(src: Path, input_dir: Path) -> Path | None:
+    """Move a successfully extended source image into ``<input_dir>/used/``."""
+    used_dir = input_dir / "used"
+    used_dir.mkdir(parents=True, exist_ok=True)
+    dest = used_dir / src.name
+    try:
+        if dest.exists():
+            dest.unlink()
+        return Path(shutil.move(str(src), str(dest)))
+    except OSError as e:
+        _log(f"warning: could not move {src.name} to {used_dir}: {e}", err=True)
+        return None
 
 
 def _text_preview(s: str, limit: int = 800) -> str:
@@ -203,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="extend-backgrounds",
         description=(
             "Send each photo in pre-processed/ to Gemini (image model) with the master prompt; "
-            "save PNGs to post-processed/."
+            "save PNGs to post-processed/ and move successful sources to pre-processed/used/."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -289,6 +307,11 @@ def main(argv: list[str] | None = None) -> int:
             f"(default: {DEFAULT_RETRY_BACKOFF}; waits base, base*2, base*4, …)."
         ),
     )
+    parser.add_argument(
+        "--no-move-used",
+        action="store_true",
+        help="Keep successfully extended source images in the input folder (default: move to <input-dir>/used/).",
+    )
     args = parser.parse_args(argv)
     out_w = args.output_width if args.output_width > 0 else None
 
@@ -307,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(2) from e
 
     prompt = _load_prompt(args.prompt_file)
-    images = _discover_images(args.input_dir.resolve())
+    input_dir = args.input_dir.resolve()
+    images = _discover_images(input_dir)
     if args.limit is not None:
         images = images[: max(0, args.limit)]
 
@@ -338,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         f"retries={args.retries})."
     )
 
+    move_used = not args.no_move_used
+
     def _process(src: Path, dest: Path) -> tuple[Path, bool, str | None, bool]:
         """Returns (src, ok, error_message, blocked)."""
         _log(f"extend: {src.name} -> {dest.name}")
@@ -354,7 +380,14 @@ def main(argv: list[str] | None = None) -> int:
                 image_size=args.image_size,
                 output_width=out_w,
             )
-            _log(f"ok: {src.name}")
+            if move_used:
+                moved = _move_to_used(src, input_dir)
+                if moved is not None:
+                    _log(f"ok: {src.name} (moved to used/{moved.name})")
+                else:
+                    _log(f"ok: {src.name}")
+            else:
+                _log(f"ok: {src.name}")
             return (src, True, None, False)
         except ContentBlockedError as e:
             return (src, False, str(e), True)

@@ -36,6 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument(
+        "--category",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Genre/category subfolder under music/, post-processed/, and music-video/ "
+            "(e.g. korean). Default: use those dirs at repo root."
+        ),
+    )
+    p.add_argument(
         "--title-font-size",
         type=int,
         default=DEFAULT_TITLE_FONT_SIZE,
@@ -77,11 +86,20 @@ def main(argv: list[str] | None = None) -> int:
     basename = datetime.now().strftime("mv_%Y%m%d_%H%M%S")
     font_key = resolve_font_key(project_root, None, weight=DEFAULT_TITLE_FONT_WEIGHT)
 
+    category = args.category.strip("/") if args.category else None
+    songs_dir = project_root / DEFAULT_SONGS_DIR
+    images_dir = project_root / DEFAULT_IMAGES_DIR
+    output_dir = project_root / DEFAULT_OUTPUT_DIR
+    if category:
+        songs_dir = songs_dir / category
+        images_dir = images_dir / category
+        output_dir = output_dir / category
+
     cfg = AssemblerConfig(
         paths=AssemblerPaths(
-            songs_dir=(project_root / DEFAULT_SONGS_DIR).resolve(),
-            images_dir=(project_root / DEFAULT_IMAGES_DIR).resolve(),
-            output_dir=(project_root / DEFAULT_OUTPUT_DIR).resolve(),
+            songs_dir=songs_dir.resolve(),
+            images_dir=images_dir.resolve(),
+            output_dir=output_dir.resolve(),
             project_root=project_root,
         ),
         duration=DurationBounds(min_sec=DEFAULT_MIN_SEC, max_sec=DEFAULT_MAX_SEC),

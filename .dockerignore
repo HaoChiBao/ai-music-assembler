@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+.env
+music/
+pre-processed/
+post-processed/
+post-text-processed/
+music-video/
+layer-text-image/
+backgrounds/
+client_secret*.json
+youtube_token.json
