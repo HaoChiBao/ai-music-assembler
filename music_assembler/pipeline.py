@@ -75,7 +75,11 @@ def pick_background_image(images_dir: Path, name: str | None, seed: int | None) 
     if not images_dir.is_dir():
         raise FileNotFoundError(f"Images directory does not exist: {images_dir}")
     exts = (".png", ".jpg", ".jpeg", ".webp", ".PNG", ".JPG", ".JPEG", ".WEBP")
-    files = [p for p in images_dir.iterdir() if p.suffix in exts and p.is_file()]
+    files = [
+        p
+        for p in images_dir.iterdir()
+        if p.is_file() and p.suffix in exts and p.name != ".gitkeep"
+    ]
     if not files:
         raise ValueError(f"No image files found under {images_dir}")
     if name:
@@ -293,9 +297,9 @@ def assemble(
         on_progress=video_progress if emit else None,
     )
 
-    # Video (and thumbnail) are done: retire the source background into <images_dir>/used/
-    # so it isn't picked again on future runs. The frame copy in the run folder is
-    # independent, so moving the original doesn't affect the outputs.
+    # Video encode finished: retire the source background into <images_dir>/used/
+    # so it isn't picked again. Copy frame into the run folder first; moving the
+    # original does not affect outputs.
     moved_to: Path | None = None
     if move_used_image:
         used_dir = cfg.paths.images_dir.resolve() / "used"

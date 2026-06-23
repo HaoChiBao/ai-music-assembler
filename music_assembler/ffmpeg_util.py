@@ -66,11 +66,10 @@ def run_ffmpeg_with_progress(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
+        bufsize=0,
     )
     assert proc.stdout is not None
-    stderr_chunks: list[str] = []
+    stderr_chunks: list[bytes] = []
 
     def drain_stderr() -> None:
         if proc.stderr:
@@ -80,8 +79,8 @@ def run_ffmpeg_with_progress(
     t.start()
     last_emit = -1.0
     try:
-        for line in proc.stdout:
-            line = line.strip()
+        for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if "=" not in line:
                 continue
             k, _, v = line.partition("=")
@@ -100,7 +99,10 @@ def run_ffmpeg_with_progress(
     finally:
         proc.wait()
         t.join(timeout=30.0)
-    err_text = "".join(stderr_chunks)
+    err_text = "".join(
+        chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk
+        for chunk in stderr_chunks
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {err_text}")
 

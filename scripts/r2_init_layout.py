@@ -12,7 +12,10 @@ from botocore.config import Config
 
 def main() -> int:
     bucket = os.environ.get("CLOUDFLARE_R2_BUCKET", "").strip()
-    endpoint = os.environ.get("CLOUDFLARE_R2_ENDPOINT", "").strip()
+    endpoint = (
+        os.environ.get("CLOUDFLARE_R2_ENDPOINT", "").strip()
+        or os.environ.get("CLOUDFLARE_R2_ENDPOINT_URL", "").strip()
+    )
     access_key = os.environ.get("CLOUDFLARE_R2_ACCESS_KEY_ID", "").strip()
     secret_key = os.environ.get("CLOUDFLARE_R2_SECRET_ACCESS_KEY", "").strip()
     category = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ASSEMBLY_CATEGORY", "korean")).strip("/")
@@ -21,7 +24,7 @@ def main() -> int:
         name
         for name, val in (
             ("CLOUDFLARE_R2_BUCKET", bucket),
-            ("CLOUDFLARE_R2_ENDPOINT", endpoint),
+            ("CLOUDFLARE_R2_ENDPOINT or CLOUDFLARE_R2_ENDPOINT_URL", endpoint),
             ("CLOUDFLARE_R2_ACCESS_KEY_ID", access_key),
             ("CLOUDFLARE_R2_SECRET_ACCESS_KEY", secret_key),
         )
@@ -33,6 +36,8 @@ def main() -> int:
 
     keys = [
         f"music/{category}/.gitkeep",
+        f"pre-processed/{category}/.gitkeep",
+        f"pre-processed/{category}/used/.gitkeep",
         f"post-processed/{category}/.gitkeep",
         f"post-processed/{category}/used/.gitkeep",
         f"music-video/{category}/.gitkeep",
@@ -53,7 +58,12 @@ def main() -> int:
         client.put_object(Bucket=bucket, Key=key, Body=b"", ContentType="application/octet-stream")
 
     print("==> Done")
-    for prefix in (f"music/{category}/", f"post-processed/{category}/", f"music-video/{category}/"):
+    for prefix in (
+        f"music/{category}/",
+        f"pre-processed/{category}/",
+        f"post-processed/{category}/",
+        f"music-video/{category}/",
+    ):
         resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=10)
         print(f"  {prefix}: {resp.get('KeyCount', 0)} object(s)")
     return 0

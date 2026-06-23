@@ -63,9 +63,21 @@ echo "==> Sync outputs to s3://${CLOUDFLARE_R2_BUCKET}/music-video/${CATEGORY}/"
 "${S3[@]}" sync "$WORK/music-video/" "s3://${CLOUDFLARE_R2_BUCKET}/music-video/${CATEGORY}/"
 
 if [[ -d "$WORK/post-processed/used" ]]; then
-  echo "==> Sync used backgrounds"
-  "${S3[@]}" sync "$WORK/post-processed/used/" \
-    "s3://${CLOUDFLARE_R2_BUCKET}/post-processed/${CATEGORY}/used/"
+  echo "==> Retire used backgrounds on R2 (copy to used/, delete original)"
+  shopt -s nullglob
+  for f in "$WORK/post-processed/used"/*; do
+    [[ -f "$f" ]] || continue
+    name=$(basename "$f")
+    src="s3://${CLOUDFLARE_R2_BUCKET}/post-processed/${CATEGORY}/${name}"
+    dest="s3://${CLOUDFLARE_R2_BUCKET}/post-processed/${CATEGORY}/used/${name}"
+    if "${S3[@]}" ls "$src" &>/dev/null; then
+      "${S3[@]}" mv "$src" "$dest"
+      echo "    $name -> used/"
+    else
+      "${S3[@]}" cp "$f" "$dest"
+      echo "    uploaded $name to used/ (source not on R2)"
+    fi
+  done
 fi
 
 echo "==> Done"

@@ -1,9 +1,8 @@
-# Assembly worker — same pipeline as `make-short-music-video`.
+# Cloud Run assembly worker — `assemble-from-r2` (boto3 + ffmpeg + rembg).
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    awscli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -11,12 +10,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY music_assembler ./music_assembler
 COPY fonts ./fonts
+COPY prompts ./prompts
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir ".[segmentation]"
-
-COPY scripts/assemble-job.sh /app/scripts/assemble-job.sh
-RUN chmod +x /app/scripts/assemble-job.sh
+    && pip install --no-cache-dir .
 
 ENV WORK_DIR=/work
-ENTRYPOINT ["/app/scripts/assemble-job.sh"]
+ENTRYPOINT ["assemble-from-r2", "--work-dir", "/work"]

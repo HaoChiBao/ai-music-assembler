@@ -9,14 +9,13 @@ from datetime import datetime
 from pathlib import Path
 
 from music_assembler import __version__
+from music_assembler.assemble_options import add_duration_arguments, resolve_duration_bounds
 from music_assembler.bottom_text_overlay import resolve_font_key
-from music_assembler.config import AssemblerConfig, AssemblerPaths, DurationBounds, TextOverlayStyle
+from music_assembler.config import AssemblerConfig, AssemblerPaths, TextOverlayStyle
 from music_assembler.ffmpeg_util import FFmpegNotFoundError, find_ffmpeg, find_ffprobe
 from music_assembler.pipeline import assemble
 
 # Target total mix length: 1 hour 15 min .. 1 hour 30 min (not mm:ss).
-DEFAULT_MIN_SEC = 75 * 60.0  # 1h15m = 4500 s
-DEFAULT_MAX_SEC = 90 * 60.0  # 1h30m = 5400 s
 DEFAULT_SONGS_DIR = Path("music")
 DEFAULT_OUTPUT_DIR = Path("music-video")
 DEFAULT_IMAGES_DIR = Path("post-processed")
@@ -44,6 +43,25 @@ def build_parser() -> argparse.ArgumentParser:
             "(e.g. korean). Default: use those dirs at repo root."
         ),
     )
+    p.add_argument(
+        "--folder",
+        default=None,
+        metavar="NAME",
+        help="Shorthand for --category (same subfolder for music and backgrounds).",
+    )
+    p.add_argument(
+        "--music-folder",
+        default=None,
+        metavar="NAME",
+        help="Subfolder under music/ only (default: --category or --folder).",
+    )
+    p.add_argument(
+        "--images-folder",
+        default=None,
+        metavar="NAME",
+        help="Subfolder under post-processed/ only (default: --category or --folder).",
+    )
+    add_duration_arguments(p)
     p.add_argument(
         "--title-font-size",
         type=int,
@@ -86,14 +104,26 @@ def main(argv: list[str] | None = None) -> int:
     basename = datetime.now().strftime("mv_%Y%m%d_%H%M%S")
     font_key = resolve_font_key(project_root, None, weight=DEFAULT_TITLE_FONT_WEIGHT)
 
-    category = args.category.strip("/") if args.category else None
+    category = (args.category or args.folder or "").strip("/") or None
+    music_sub = (args.music_folder or category or "").strip("/") or None
+    images_sub = (args.images_folder or category or "").strip("/") or None
+
     songs_dir = project_root / DEFAULT_SONGS_DIR
     images_dir = project_root / DEFAULT_IMAGES_DIR
     output_dir = project_root / DEFAULT_OUTPUT_DIR
+    if music_sub:
+        songs_dir = songs_dir / music_sub
+    if images_sub:
+        images_dir = images_dir / images_sub
     if category:
-        songs_dir = songs_dir / category
-        images_dir = images_dir / category
         output_dir = output_dir / category
+
+    duration = resolve_duration_bounds(
+        duration_sec=args.duration,
+        variance_sec=args.variance,
+        min_sec=args.min_sec,
+        max_sec=args.max_sec,
+    )
 
     cfg = AssemblerConfig(
         paths=AssemblerPaths(
@@ -102,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=output_dir.resolve(),
             project_root=project_root,
         ),
-        duration=DurationBounds(min_sec=DEFAULT_MIN_SEC, max_sec=DEFAULT_MAX_SEC),
+        duration=duration,
         text=TextOverlayStyle(
             font_key=font_key,
             font_size_px=args.title_font_size,

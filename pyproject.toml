@@ -1,6 +1,6 @@
 [project]
 name = "music-video-assembler"
-version = "0.1.0"
+version = "0.1.1"
 description = "Assemble long MP3 mixes from a library and mux with a titled still image into MP4."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,12 +8,16 @@ dependencies = [
     "Pillow>=10.0.0",
     "google-genai>=1.0.0",
     "python-dotenv>=1.0.0",
+    "boto3>=1.28.0",
+    "rembg>=2.0.0",
+    "onnxruntime>=1.16.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
-# Subject segmentation for `add-text-behind-subject` (pulls onnxruntime, numpy, etc.).
+# Backwards compatibility; rembg/onnxruntime are core dependencies now.
 segmentation = ["rembg>=2.0.0", "onnxruntime>=1.16.0"]
-# Use OpenAI (instead of the built-in Gemini) to write YouTube titles/descriptions.
+# Backwards compatibility; openai is a core dependency now.
 openai = ["openai>=1.0.0"]
 # YouTube upload for `upload-music-video` (OAuth + Data API v3). Includes OpenAI so the
 # metadata step can use either provider.
@@ -22,6 +26,16 @@ youtube = [
     "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
     "openai>=1.0.0",
+]
+# Cloudflare R2 sync — boto3 is a core dependency; kept for explicit installs.
+r2 = ["boto3>=1.28.0"]
+# Legacy alias (all deps are core now).
+cloud = ["boto3>=1.28.0", "rembg>=2.0.0", "onnxruntime>=1.16.0"]
+# Music Assembly control API (FastAPI + Cloud Run Jobs client).
+api = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "google-cloud-run>=0.10.0",
 ]
 
 [project.scripts]
@@ -32,11 +46,14 @@ add-bottom-text = "music_assembler.add_bottom_text:main"
 add-text = "music_assembler.add_text:main"
 add-text-behind-subject = "music_assembler.add_text_behind_subject:main"
 make-short-music-video = "music_assembler.make_short_music_video:main"
+assemble-from-r2 = "music_assembler.assemble_from_r2:main"
+extend-from-r2 = "music_assembler.extend_from_r2:main"
 generate-music-videos = "music_assembler.make_music_videos:main"
 schedule-music-videos = "music_assembler.schedule_music_videos:main"
 list-youtube-videos = "music_assembler.list_youtube_videos:main"
 upload-music-video = "music_assembler.make_and_upload_music_video:main"
 upload-video-test = "music_assembler.upload_test:main"
+assembly-api = "music_assembler.api.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61"]

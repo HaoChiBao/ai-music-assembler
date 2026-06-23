@@ -2,7 +2,30 @@
 
 Living document summarizing the production workflow, lessons learned, and planned next steps for the **ai-music-assembler** pipeline.
 
-Last updated: 2026-06-18
+Last updated: 2026-06-23
+
+> **Linear:** [Production status — June 2026](https://linear.app/yangspace/document/production-status-june-2026-c5db29e1b5b9) · **Notion:** [Project Wiki](https://app.notion.com/p/387850bd5b0881c1a746d84960d54fbf) — keep in sync with the Linear doc above.
+
+---
+
+## Current production status (2026-06-23)
+
+Hosted pipeline is **live** on GCP + Cloudflare R2.
+
+| Service | Type | URL |
+|---------|------|-----|
+| **music-assembly-api** | Cloud Run Service | https://music-assembly-api-17161979106.northamerica-northeast2.run.app (`00008-d8p`) |
+| **music-assemble** | Cloud Run Job | `northamerica-northeast2` |
+| **youtuber-uploader-app** | Cloud Run Service | https://youtuber-uploader-app-q3uklh4a6a-pd.a.run.app |
+
+- **R2 bucket:** `music-assembly-data` · **Category:** `korean`
+- **Control API:** dashboard, parallel assembly (1–10), extend backgrounds, progress bars, channel picker — Linear **YAN-52**, **YAN-56**
+- **Output paths:** `music-video/{category}/{channel}/mv_*/` when channel selected; legacy flat `music-video/{category}/mv_*/` still supported
+- **Channel list (interim):** `ASSEMBLY_CHANNELS` env + R2 discovery via `GET /v1/channels`
+- **Channel list (target):** youtube-uploader `GET /v1/channels` → assembly dashboard proxy (**YAN-54**, **YAN-55**)
+- **Auth:** `ASSEMBLY_DASHBOARD_PASSWORD` + `ASSEMBLY_API_KEY`
+- **Active:** confirm full dashboard encode (**YAN-45**), uploader register (**YAN-48**)
+- **Deferred:** Cloud Scheduler (**YAN-46**), local batch CLI channel flag (**YAN-50** canceled)
 
 ---
 
@@ -75,10 +98,10 @@ Move from “run commands on a Mac” to a **hosted production platform**: asset
 ```mermaid
 flowchart TB
   subgraph storage [Object storage — S3 / GCS / R2]
-    S_MU["s3://bucket/music/{channel}/"]
-    S_PP["s3://bucket/backgrounds/pre-processed/"]
-    S_PO["s3://bucket/backgrounds/post-processed/{channel}/"]
-    S_MV["s3://bucket/videos/{channel}/mv_*/"]
+    S_MU["s3://bucket/music/{category}/"]
+    S_PRE["s3://bucket/pre-processed/{category}/"]
+    S_PO["s3://bucket/post-processed/{category}/"]
+    S_MV["s3://bucket/music-video/{category}/mv_*/"]
     S_REG["s3://bucket/state/{channel}/video_registry.txt"]
     S_TOK["secrets/{channel}/youtube_token.json"]
   end
@@ -156,10 +179,11 @@ flowchart TB
 
 | Asset | Target path | Notes |
 |-------|-------------|-------|
-| Raw photos | `backgrounds/pre-processed/` | Input to `extend-backgrounds` |
-| Extended backgrounds | `backgrounds/post-processed/{channel}/` | Per-channel art direction |
-| Used backgrounds | `backgrounds/post-processed/{channel}/used/` | Same semantics as local `used/` |
-| Rendered runs | `videos/{channel}/mv_{timestamp}_{nn}/` | `frame.png`, mix, mp4, thumbnail, metadata txt |
+| Raw photos | `pre-processed/{category}/` | Input to `extend-backgrounds` |
+| Extended backgrounds | `post-processed/{category}/` | Per-category art direction |
+| Used raw photos | `pre-processed/{category}/used/` | Retired after successful extend |
+| Used backgrounds | `post-processed/{category}/used/` | Same semantics as local `used/` |
+| Rendered runs | `music-video/{category}/mv_{timestamp}/` | `frame.png`, mix, mp4, thumbnail, metadata txt |
 | Registry | `state/{channel}/video_registry.txt` | JSON-lines; `pending` / `uploaded` |
 | Used titles | `state/{channel}/youtube_used_titles.txt` | Per-channel title dedup |
 | Prompts | `config/{channel}/youtube_metadata.txt` | Optional per-channel metadata tone |
@@ -604,7 +628,8 @@ Details are in [Target hosting architecture](#target-hosting-architecture) above
 
 ### Hosting / scale
 
-- [ ] **S3 (or R2) bucket layout** — implement sync scripts for music, backgrounds, videos, state.
+- [X] **R2 bucket layout** — `music/`, `pre-processed/`, `post-processed/`, `music-video/` per category; see `docs/r2-bucket-layout.md`
+- [ ] **extend-from-r2 CLI** — sync pre-processed down, run `extend-backgrounds`, sync post-processed + used back
 - [ ] **Secrets manager integration** — per-channel `youtube_token.json`, API keys.
 - [ ] **Weekly `extend-backgrounds` cron** — separate from daily video job.
 - [ ] **Separate thumbnail pass** — generate thumbnails sequentially, then encode (reduces peak RAM).

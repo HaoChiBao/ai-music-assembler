@@ -46,6 +46,14 @@ This installs the same packages as `pyproject.toml` and registers:
 - `add-bottom-text` — overlay caption text on **one** image; placement and outline are configurable (uses **`fonts/`** when present)  
 - `add-text` — same text on the **first three** images in **`post-processed/`** → **`post-text-processed/`** (defaults: **96px**, **no outline**, **bottom center**)  
 - `add-text-behind-subject` — separate an image's **subject** from its **background** into two layers, draw **large text behind the subject**, and composite the subject back on top → **`layer-text-image/`**. Uses a **random** image from **`post-processed/`** (or `--input`). Segmentation backends via **`--segmenter`**: **`rembg`** (default, local; needs the optional extra `pip install ".[segmentation]"`, downloads a model on first use) or **`gemini`** (Google Gemini segmentation via `GEMINI_API_KEY`, default model **`gemini-3-flash-preview`**; override with `--gemini-model` and target with `--subject-prompt`). **Edge quality:** default rembg model is **`isnet-general-use`** (finer hair than u2net); switch with **`--rembg-model`** (e.g. `birefnet-general` for the best hair, `u2net_human_seg` for people, `u2net` for speed). For natural, non-hand-cut edges the subject mask is eroded by **`--shrink`** px (removes the background halo) then feathered with **`--feather`** px (Gaussian blur, default **1.5**; try 2-4 for soft hair), and **`--alpha-matting`** adds matte-based soft edges. Use **`--text-opacity`** (e.g. 85) to let the background show through the letters for a more integrated look.  
+- `assemble-from-r2` — sync MP3s + backgrounds from **Cloudflare R2**, assemble one video (with YouTube title/description by default), sync outputs back. See [Cloudflare R2](#cloudflare-r2-production-storage).
+- `extend-from-r2` — pull a pre-processed photo from R2, extend with Gemini, upload to `post-processed/`, move source to `pre-processed/used/` on R2 (needs `GEMINI_API_KEY`).
+
+Install optional extras as needed:
+
+```bash
+pip install ".[youtube]"      # YouTube upload (OAuth + Data API)
+```
 
 ### Environment variables (`.env`)
 
@@ -55,6 +63,12 @@ This installs the same packages as `pyproject.toml` and registers:
 
 | Variable | Required | Used by |
 |----------|----------|---------|
+| `CLOUDFLARE_R2_BUCKET` | For **R2** workflows | Cloudflare R2 bucket name |
+| `CLOUDFLARE_R2_ENDPOINT` | For **R2** workflows | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
+| `CLOUDFLARE_R2_ACCESS_KEY_ID` | For **R2** workflows | R2 API token access key |
+| `CLOUDFLARE_R2_SECRET_ACCESS_KEY` | For **R2** workflows | R2 API token secret |
+| `ASSEMBLY_CATEGORY` | For **R2** assembly | Genre subfolder (e.g. `korean`) under `music/`, `pre-processed/`, `post-processed/` |
+| `THUMBNAIL_TEXT` | No | Default `--thumbnail-text` for `assemble-from-r2` / Cloud Run job |
 | `GEMINI_API_KEY` | For **`extend-backgrounds` only** | [Google AI Studio](https://aistudio.google.com/apikey) (same key works with the Gemini API) |
 | `GEMINI_IMAGE_MODEL` | No | Image model id (default: `gemini-3-pro-image-preview`). Use another id from the [Gemini API model list](https://ai.google.dev/gemini-api/docs/models) if you prefer (e.g. `gemini-2.5-flash-image`). |
 | `GEMINI_ASPECT_RATIO` | No | Output aspect ratio for the image config (default: `16:9`) |
@@ -80,6 +94,45 @@ The video commands (**`make_short_music_video`**, **`assemble-music-video`**) ne
 | `music-video/` | Default output for **`make_short_music_video`** — per category (e.g. `music-video/korean/mv_*/`) with `frame_*.png`, mix, video, tracklist, and optional thumbnail. Use **`--category korean`** when inputs live in category subfolders. |
 
 **Everything under `music/`**, **`pre-processed/`**, **`post-processed/`**, **`post-text-processed/`**, and **`music-video/`** is ignored by git except each folder’s `.gitkeep`, so large assets are not committed by accident.
+
+## Cloudflare R2 (production storage)
+
+For hosted assembly, assets live in a **Cloudflare R2** bucket with the same category layout as local folders. Full tree and upload examples: **[docs/r2-bucket-layout.md](docs/r2-bucket-layout.md)**.
+
+```
+s3://{bucket}/
+├── music/{category}/
+├── pre-processed/{category}/ + used/
+├── post-processed/{category}/ + used/
+└── music-video/{category}/mv_*/
+```
+
+**Initialize** empty category folders (after filling `CLOUDFLARE_R2_*` in `.env`):
+
+```bash
+./scripts/r2-init-layout.sh          # uses ASSEMBLY_CATEGORY from .env
+./scripts/r2-init-layout.sh korean   # or pass category explicitly
+```
+
+**Assemble one video from R2** (download → encode → upload):
+
+```bash
+pip install ".[r2]"
+assemble-from-r2                     # uses .env CLOUDFLARE_R2_* + ASSEMBLY_CATEGORY
+assemble-from-r2 --category korean --keep-work-dir
+assemble-from-r2 --download-only     # sync inputs only
+```
+
+**Background extension on R2:**
+
+```powershell
+pip install ".[r2]"
+extend-from-r2                     # one image per run (default)
+extend-from-r2 --all               # process every pending photo
+extend-from-r2 --limit 3           # batch of three
+```
+
+Cloud Run job entrypoint: `scripts/assemble-job.sh` — see [deploy/cloud-run-job.md](deploy/cloud-run-job.md).
 
 ## Workflow: backgrounds (optional)
 
@@ -325,6 +378,9 @@ print(result["thumbnail_png"])  # None unless thumbnail_background_text was give
 | `music_assembler/pipeline.py` | `assemble()` orchestrates the full run. |
 | `music_assembler/cli.py` | `assemble-music-video` CLI. |
 | `music_assembler/make_short_music_video.py` | **`python3 -m music_assembler.make_short_music_video`** — opinionated defaults → **`music-video/`**. |
+| `music_assembler/assemble_from_r2.py` | **`assemble-from-r2`** — R2 sync → assemble → sync back. |
+| `music_assembler/extend_from_r2.py` | **`extend-from-r2`** — R2 pre-processed → Gemini extend → post-processed on R2. |
+| `music_assembler/r2_storage.py` | boto3 helpers for Cloudflare R2 prefix sync. |
 | `music_assembler/make_and_upload_music_video.py` | **`upload-music-video`** — build the video, generate metadata, upload to YouTube. |
 | `music_assembler/make_music_videos.py` | **`generate-music-videos`** — build N videos in parallel (per-video progress bars) → registry. |
 | `music_assembler/schedule_music_videos.py` | **`schedule-music-videos`** — mass-upload pending registry videos on a publish schedule, mark uploaded. |

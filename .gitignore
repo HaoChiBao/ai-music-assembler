@@ -34,6 +34,8 @@ build/
 *.egg-info/
 output/
 tmp/
+.r2-extend-work/
+.r2-work-test/
 
 # YouTube / Google OAuth secrets and cached tokens — never commit these
 client_secret*.json
@@ -43,5 +45,8 @@ youtube_token*.json
 token.json
 *.token.json
 
-# Local log of previously used YouTube titles (so they're never reused)
-youtube_used_titles.txt
+# GCP service account keys — never commit
+*service-account*.json
+music-assembly-api*.json
+youtube-uploader-499603*.json
+.assembly-api-key.local

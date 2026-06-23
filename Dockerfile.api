@@ -1,0 +1,17 @@
+# Music Assembly control API — Cloud Run Service
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY music_assembler ./music_assembler
+COPY prompts ./prompts
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir ".[api]"
+
+ENV ASSEMBLY_API_HOST=0.0.0.0
+ENV ASSEMBLY_API_PORT=8080
+
+EXPOSE 8080
+CMD ["assembly-api"]
