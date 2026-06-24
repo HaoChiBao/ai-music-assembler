@@ -40,7 +40,9 @@ Store R2 keys in [Secret Manager](https://cloud.google.com/secret-manager) and r
 gcloud run jobs execute music-assemble --region "$REGION" --wait
 ```
 
-Output appears under `s3://your-bucket/music-video/{category}/mv_*/`.
+Output appears under `s3://your-bucket/music-video/{channel}/mv_*/`.
+
+The control API passes per-run env overrides: ``ASSEMBLY_EXECUTION_ID``, ``ASSEMBLY_CATEGORY`` (music MP3s), optional ``ASSEMBLY_IMAGES_FOLDER`` (``post-processed/{folder}/`` backgrounds), ``ASSEMBLY_CHANNEL``, duration, and queue flags.
 
 Service accounts for a hosted control API and optional worker identity:
 [deploy/music-assembly-iam.md](music-assembly-iam.md) (`music-assembly-api`, `music-assembly-worker`).

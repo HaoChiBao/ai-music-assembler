@@ -191,7 +191,8 @@ def resolve_r2_assembly_prefixes(
         raise SystemExit("error: set ASSEMBLY_CATEGORY, --category, or folder flags")
 
     music = (music_folder or base).strip().strip("/")
-    images = (images_folder or base).strip().strip("/")
+    env_images = os.environ.get("ASSEMBLY_IMAGES_FOLDER", "").strip().strip("/")
+    images = (images_folder or env_images or base).strip().strip("/")
     output = (output_folder or base).strip().strip("/")
 
     if not music or not images or not output:

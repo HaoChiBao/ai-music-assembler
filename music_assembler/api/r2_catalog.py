@@ -173,6 +173,21 @@ def list_categories(client, bucket: str) -> list[str]:
     return sorted(seen)
 
 
+def list_background_folders(client, bucket: str) -> list[str]:
+    """Discover subfolders under ``post-processed/`` (assembly background pools)."""
+    seen: set[str] = set()
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix="post-processed/", Delimiter="/"):
+        for prefix in page.get("CommonPrefixes", []):
+            p = prefix.get("Prefix", "")
+            parts = p.strip("/").split("/")
+            if len(parts) >= 2 and parts[0] == "post-processed":
+                seen.add(parts[1])
+    if not seen:
+        seen.add(r2_config_from_env().category)
+    return sorted(seen)
+
+
 def category_inventory(client, bucket: str, category: str) -> dict[str, int]:
     """Count objects in each assembly prefix (6 R2 list scans)."""
     prefixes = {

@@ -246,8 +246,9 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "description": (
             "Queues one or more assembly runs. For each job:\n"
             "1. Writes ``jobs/asm_*/meta.json`` and ``progress.json`` on R2.\n"
-            "2. Starts a ``music-assemble`` GCP execution with env vars (category for inputs, channel for output path, etc.).\n"
-            "3. Each parallel job claims a unique ``post-processed/`` background.\n\n"
+            "2. Starts a ``music-assemble`` GCP execution with env vars (category for music, "
+            "``images_folder`` for ``post-processed/`` backgrounds, channel for output path, etc.).\n"
+            "3. Each parallel job claims a unique ``post-processed/{images_folder}/`` background.\n\n"
             "Set ``count`` > 1 to render multiple videos in parallel (separate Cloud Run executions).\n\n"
             "By default ``queue_youtube`` is **true**: each finished video is registered on the "
             "youtube-uploader pending queue after R2 upload (worker needs ``UPLOADER_API_URL`` + "
@@ -256,6 +257,7 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "request_example": {
             "category": "korean",
             "channel": "lofi-beats",
+            "images_folder": "korean",
             "thumbnail_text": "OMYO",
             "duration_min": 90,
             "variance_min": 15,
@@ -450,6 +452,15 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "summary": "List R2 category folders",
         "description": "Discovers top-level categories from R2 keys (e.g. ``korean``, ``jazz``).",
         "response_example": {"categories": ["korean", "jazz"]},
+    },
+    "GET /v1/background-folders": {
+        "tags": ["Catalog"],
+        "summary": "List post-processed background folders",
+        "description": (
+            "Discovers subfolders under ``post-processed/`` on R2. Use as ``images_folder`` when "
+            "starting assembly jobs to pick which background pool to claim from."
+        ),
+        "response_example": {"folders": ["korean", "japanese"], "count": 2},
     },
     "GET /v1/categories/{category}/inventory": {
         "tags": ["Catalog"],

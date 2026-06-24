@@ -41,6 +41,19 @@ class TestChannelPaths(unittest.TestCase):
         self.assertEqual(p.channel, "night-drive")
         self.assertEqual(p.output_prefix, "music-video/night-drive/")
         self.assertEqual(p.music_prefix, "music/korean/")
+        self.assertEqual(p.images_prefix, "post-processed/korean/")
+
+    def test_resolve_prefixes_images_folder_override(self) -> None:
+        p = resolve_r2_assembly_prefixes(
+            category="korean",
+            music_folder=None,
+            images_folder="japanese",
+            output_folder=None,
+            channel="nappabeats",
+        )
+        self.assertEqual(p.music_prefix, "music/korean/")
+        self.assertEqual(p.images_prefix, "post-processed/japanese/")
+        self.assertEqual(p.images_folder, "japanese")
 
     def test_resolve_prefixes_requires_channel(self) -> None:
         with self.assertRaises(SystemExit):

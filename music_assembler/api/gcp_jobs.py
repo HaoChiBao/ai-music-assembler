@@ -183,6 +183,7 @@ def start_assembly_job(
     execution_id: str,
     category: str,
     channel: str | None = None,
+    images_folder: str | None = None,
     thumbnail_text: str | None = None,
     duration_min: int | None = None,
     variance_min: int | None = None,
@@ -194,6 +195,8 @@ def start_assembly_job(
         run_v2.EnvVar(name="ASSEMBLY_EXECUTION_ID", value=execution_id),
         run_v2.EnvVar(name="ASSEMBLY_CATEGORY", value=category),
     ]
+    if images_folder and images_folder.strip():
+        env.append(run_v2.EnvVar(name="ASSEMBLY_IMAGES_FOLDER", value=images_folder.strip()))
     if channel:
         env.append(run_v2.EnvVar(name="ASSEMBLY_CHANNEL", value=channel))
     if thumbnail_text:

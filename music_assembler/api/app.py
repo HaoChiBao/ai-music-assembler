@@ -58,6 +58,11 @@ class StartJobRequest(BaseModel):
         description="YouTube channel slug — output path music-video/{channel}/.",
         examples=["nappabeats"],
     )
+    images_folder: str | None = Field(
+        default=None,
+        description="R2 subfolder under post-processed/ for background stills (defaults to category).",
+        examples=["korean"],
+    )
     thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["OMYO"])
     duration_min: int | None = Field(default=None, ge=15, le=240, description="Target mix length in minutes.")
     variance_min: int | None = Field(default=None, ge=0, le=60, description="Random length variance (+/- minutes).")
@@ -76,6 +81,16 @@ class StartJobRequest(BaseModel):
         if value is None or not str(value).strip():
             return None
         return normalize_channel(value)
+
+    @field_validator("images_folder")
+    @classmethod
+    def _validate_images_folder(cls, value: str | None) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        folder = value.strip().strip("/")
+        if not folder or ".." in folder or "/" in folder or "\\" in folder:
+            raise ValueError("images_folder must be a single folder name under post-processed/")
+        return folder
 
 
 class StartExtendRequest(BaseModel):
@@ -335,6 +350,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/observability",
             "GET /v1/categories",
             "GET /v1/categories/{category}/inventory",
+            "GET /v1/background-folders",
             "GET /v1/channels",
         ],
     }
@@ -369,6 +385,7 @@ def start_job(
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
     category = (body.category or settings.default_category).strip()
+    images_folder = body.images_folder
     channel = body.channel
     if not channel or not str(channel).strip():
         raise HTTPException(
@@ -377,6 +394,8 @@ def start_job(
         )
     client, bucket = _r2()
     _invalidate_category_cache(category)
+    if images_folder and images_folder != category:
+        _invalidate_category_cache(images_folder)
 
     jobs: list[dict[str, Any]] = []
     assigned_gcp: set[str] = set()
@@ -388,6 +407,7 @@ def start_job(
             execution_id,
             category=category,
             channel=channel,
+            images_folder=images_folder,
             duration_min=body.duration_min,
             variance_min=body.variance_min,
             thumbnail_text=body.thumbnail_text,
@@ -407,6 +427,7 @@ def start_job(
                 execution_id=execution_id,
                 category=category,
                 channel=channel,
+                images_folder=images_folder,
                 thumbnail_text=body.thumbnail_text,
                 duration_min=body.duration_min,
                 variance_min=body.variance_min,
@@ -884,6 +905,14 @@ def job_progress(
 def list_cats(_auth: None = Depends(require_api_auth)) -> dict[str, Any]:
     client, bucket = _r2()
     return {"categories": r2_catalog.list_categories(client, bucket)}
+
+
+@app.get("/v1/background-folders")
+def list_background_folders(_auth: None = Depends(require_api_auth)) -> dict[str, Any]:
+    """Subfolders under ``post-processed/`` — selectable background pools for assembly."""
+    client, bucket = _r2()
+    folders = r2_catalog.list_background_folders(client, bucket)
+    return {"folders": folders, "count": len(folders)}
 
 
 @app.get("/v1/categories/{category}/inventory")
@@ -1627,6 +1656,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </label></p>
       <p><label>Or new channel slug <input id="runChannelCustom" placeholder="e.g. nappabeats"/></label></p>
       <p class="muted">Finished videos upload to <code>music-video/{channel}/mv_*/</code>.</p>
+      <p><label>Background folder
+        <select id="runImagesFolder" required><option value="">Loading…</option></select>
+      </label></p>
+      <p class="muted">Claims a still from <code>post-processed/{folder}/</code> (MP3s still use <code>music/{category}/</code>).</p>
       <p><label><input type="checkbox" id="runQueueYoutube" checked/> Add to YouTube upload queue when done</label></p>
       <p class="muted">Registers with youtube-uploader after R2 upload (worker needs <code>UPLOADER_API_*</code>).</p>
       <p><label>Thumbnail text <input id="runThumb" value="OMYO"/></label></p>
@@ -1641,7 +1674,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <option value="10">10 videos</option>
         </select>
       </label></p>
-      <p class="muted">Each job claims a unique background from <code>post-processed/</code>. Jobs with no image left exit immediately.</p>
+      <p class="muted">Each job claims a unique background from the selected <code>post-processed/</code> folder. Jobs with no image left exit immediately.</p>
       <button id="runBtn" class="btn-voltage">Start job →</button>
       <div class="json-block">
         <div class="json-block-header">
@@ -1863,6 +1896,28 @@ function runChannel() {
 }
 function videoChannelFilter() {
   return document.getElementById('videoChannel').value.trim();
+}
+
+async function loadBackgroundFolders() {
+  const el = document.getElementById('runImagesFolder');
+  const keep = el.value;
+  try {
+    const d = await api('/v1/background-folders');
+    const folders = d.folders || [];
+    el.innerHTML = folders.length
+      ? ''
+      : '<option value="">No folders on R2</option>';
+    for (const f of folders) {
+      el.innerHTML += '<option value="' + esc(f) + '">' + esc(f) + '</option>';
+    }
+    const def = '__DEFAULT_CATEGORY__';
+    if (keep && folders.includes(keep)) el.value = keep;
+    else if (folders.includes(def)) el.value = def;
+    else if (folders.length) el.value = folders[0];
+  } catch (e) {
+    console.warn('background-folders', e);
+    el.innerHTML = '<option value="__DEFAULT_CATEGORY__">__DEFAULT_CATEGORY__</option>';
+  }
 }
 
 async function loadChannelOptions() {
@@ -2385,10 +2440,13 @@ document.getElementById('runBtn').onclick = async () => {
   const btn = document.getElementById('runBtn');
   const channel = runChannel();
   if (!channel) { alert('Select or enter a YouTube channel'); return; }
+  const imagesFolder = document.getElementById('runImagesFolder').value.trim();
+  if (!imagesFolder) { alert('Select a background folder'); return; }
   btn.disabled = true;
   try {
     const r = await api('/v1/assembly/jobs', { method: 'POST', body: JSON.stringify({
       channel: channel,
+      images_folder: imagesFolder,
       thumbnail_text: document.getElementById('runThumb').value,
       duration_min: parseInt(document.getElementById('runDuration').value, 10),
       variance_min: parseInt(document.getElementById('runVariance').value, 10),
@@ -2444,6 +2502,7 @@ document.getElementById('videoChannel').addEventListener('change', () => {
   loadVersionInfo();
   try {
     await loadChannelOptions();
+    await loadBackgroundFolders();
     await pollSnapshot({ includeStats: false });
     refreshStats().then(applyInventory).catch(e => console.warn('stats', e));
   } catch (e) { console.error(e); }
