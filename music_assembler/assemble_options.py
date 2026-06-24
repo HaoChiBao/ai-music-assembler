@@ -22,7 +22,7 @@ _CHANNEL_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def normalize_channel(value: str | None) -> str | None:
-    """Normalize a YouTube channel slug for R2 paths (``music-video/{category}/{channel}/``)."""
+    """Normalize a YouTube channel slug for R2 paths (``music-video/{channel}/``)."""
     if value is None:
         return None
     raw = value.strip()
@@ -45,15 +45,12 @@ def resolve_channel_arg(value: str | None) -> str | None:
     return normalize_channel(env) if env else None
 
 
-def video_output_prefix(category: str, channel: str | None = None) -> str:
-    """R2 prefix for finished assembly runs under ``music-video/``."""
-    cat = category.strip().strip("/")
-    if not cat:
-        raise ValueError("category cannot be empty")
-    ch = normalize_channel(channel) if channel else None
-    if ch:
-        return f"music-video/{cat}/{ch}/"
-    return f"music-video/{cat}/"
+def video_output_prefix(channel: str) -> str:
+    """R2 prefix for finished assembly runs: ``music-video/{channel}/``."""
+    ch = normalize_channel(channel)
+    if not ch:
+        raise ValueError("channel is required for music-video output path")
+    return f"music-video/{ch}/"
 
 
 def parse_duration(value: str) -> float:
@@ -201,14 +198,19 @@ def resolve_r2_assembly_prefixes(
         raise SystemExit("error: music, images, and output folder names cannot be empty")
 
     ch = resolve_channel_arg(channel)
+    if not ch:
+        raise SystemExit(
+            "error: --channel (YouTube channel slug) is required for music-video output "
+            "(set ASSEMBLY_CHANNEL or pass --channel)"
+        )
     return R2AssemblyPrefixes(
         music_prefix=f"music/{music}/",
         images_prefix=f"post-processed/{images}/",
         used_images_prefix=f"post-processed/{images}/used/",
-        output_prefix=video_output_prefix(output, ch),
+        output_prefix=video_output_prefix(ch),
         music_folder=music,
         images_folder=images,
-        output_folder=output,
+        output_folder=ch,
         channel=ch,
     )
 
@@ -220,7 +222,7 @@ def add_r2_folder_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="NAME",
         help=(
-            "Subfolder name for music/, post-processed/, and music-video/ "
+            "Subfolder name for music/ and post-processed/ "
             "(e.g. korean). Default: ASSEMBLY_CATEGORY from .env."
         ),
     )
@@ -246,15 +248,15 @@ def add_r2_folder_arguments(parser: argparse.ArgumentParser) -> None:
         "--output-folder",
         default=None,
         metavar="NAME",
-        help="R2 subfolder under music-video/ (default: --category or --folder).",
+        help="Deprecated — output path is music-video/{channel}/; use --channel instead.",
     )
     parser.add_argument(
         "--channel",
         default=None,
         metavar="SLUG",
         help=(
-            "YouTube channel subfolder under music-video/{category}/ "
-            "(default: ASSEMBLY_CHANNEL env). Omit for legacy flat layout."
+            "YouTube channel slug for music-video/{channel}/ output "
+            "(required; default: ASSEMBLY_CHANNEL env)."
         ),
     )
 

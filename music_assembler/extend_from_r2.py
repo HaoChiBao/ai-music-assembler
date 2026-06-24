@@ -42,36 +42,17 @@ from music_assembler.extend_backgrounds import (
     _move_to_used,
     extend_one_with_retry,
 )
-from music_assembler.extend_backgrounds import IMAGE_EXTS
 from music_assembler.r2_storage import (
-    list_object_keys,
+    claim_pre_processed_on_r2,
+    list_claimable_pre_processed_keys,
     move_object,
+    pre_processed_in_flight_key,
     r2_client,
     r2_config_from_env,
+    release_pre_processed_claim,
+    retire_claimed_pre_processed_on_r2,
     upload_file,
 )
-
-
-def _is_image_name(name: str) -> bool:
-    return Path(name).suffix in IMAGE_EXTS
-
-
-def _post_processed_stems(client, bucket: str, images_prefix: str) -> set[str]:
-    """Stems of PNGs already in post-processed/ (one list call, no per-image HEAD)."""
-    stems: set[str] = set()
-    for key in list_object_keys(
-        client,
-        bucket,
-        images_prefix,
-        exclude_relative_prefixes=("used/", "in-flight/"),
-    ):
-        name = Path(key).name
-        if name.startswith(".") or not name.lower().endswith(".png"):
-            continue
-        if "/" in key[len(images_prefix) :]:
-            continue
-        stems.add(Path(name).stem)
-    return stems
 
 
 def pending_r2_sources(
@@ -81,22 +62,13 @@ def pending_r2_sources(
     force: bool,
 ) -> list[str]:
     """Full R2 keys for pre-processed images that still need extending."""
-    keys = list_object_keys(
+    return list_claimable_pre_processed_keys(
         client,
         cfg.bucket,
-        cfg.pre_processed_prefix,
-        exclude_relative_prefixes=("used/",),
+        pre_processed_prefix=cfg.pre_processed_prefix,
+        images_prefix=cfg.images_prefix,
+        force=force,
     )
-    existing = set() if force else _post_processed_stems(client, cfg.bucket, cfg.images_prefix)
-    pending: list[str] = []
-    for key in keys:
-        name = Path(key).name
-        if name.startswith(".") or not _is_image_name(name):
-            continue
-        if not force and Path(name).stem in existing:
-            continue
-        pending.append(key)
-    return pending
 
 
 def _resolve_work_dir(arg: Path | None) -> tuple[Path, bool]:
@@ -441,8 +413,278 @@ def run_extend_from_r2(
     }
 
 
+def _extend_gemini_settings(
+    *,
+    prompt_file: Path | None,
+    model: str | None,
+    aspect_ratio: str | None,
+    image_size: str | None,
+    output_width: int | None,
+    retries: int | None,
+    retry_backoff: float | None,
+) -> dict[str, Any]:
+    prompt_path = prompt_file or Path("prompts/background_master.txt")
+    out_w = (
+        output_width
+        if output_width is not None
+        else int(os.environ.get("GEMINI_OUTPUT_WIDTH", str(DEFAULT_OUTPUT_WIDTH)))
+    )
+    return {
+        "prompt": _load_prompt(prompt_path.resolve()),
+        "out_w": out_w if out_w > 0 else None,
+        "model": model or os.environ.get("GEMINI_IMAGE_MODEL", DEFAULT_MODEL),
+        "aspect": aspect_ratio or os.environ.get("GEMINI_ASPECT_RATIO", DEFAULT_ASPECT_RATIO),
+        "img_size": image_size or os.environ.get("GEMINI_IMAGE_SIZE", DEFAULT_IMAGE_SIZE),
+        "retries": retries if retries is not None else DEFAULT_RETRIES,
+        "backoff": retry_backoff if retry_backoff is not None else DEFAULT_RETRY_BACKOFF,
+    }
+
+
+def extend_one_claimed_on_r2(
+    *,
+    client,
+    cfg,
+    execution_id: str,
+    filename: str,
+    work_dir: Path,
+    gemini_client: Any,
+    gemini_settings: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Extend a single photo already claimed under pre-processed/.../in-flight/{execution_id}/."""
+    in_flight_key = pre_processed_in_flight_key(cfg.pre_processed_prefix, execution_id, filename)
+    input_dir = work_dir / "pre-processed"
+    output_dir = work_dir / "post-processed"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    local_src = input_dir / filename
+    local_out = output_dir / f"{Path(filename).stem}.png"
+    client.download_file(cfg.bucket, in_flight_key, str(local_src))
+    try:
+        extend_one_with_retry(
+            retries=gemini_settings["retries"],
+            retry_backoff=gemini_settings["backoff"],
+            client=gemini_client,
+            model=gemini_settings["model"],
+            prompt=gemini_settings["prompt"],
+            image_path=local_src,
+            out_path=local_out,
+            aspect_ratio=gemini_settings["aspect"],
+            image_size=gemini_settings["img_size"],
+            output_width=gemini_settings["out_w"],
+        )
+    except Exception as exc:
+        release_pre_processed_claim(
+            client,
+            cfg.bucket,
+            pre_processed_prefix=cfg.pre_processed_prefix,
+            execution_id=execution_id,
+            filename=filename,
+        )
+        return False, str(exc)
+
+    upload_file(client, cfg.bucket, f"{cfg.images_prefix}{local_out.name}", local_out)
+    retire_claimed_pre_processed_on_r2(
+        client,
+        cfg.bucket,
+        pre_processed_prefix=cfg.pre_processed_prefix,
+        used_pre_processed_prefix=cfg.used_pre_processed_prefix,
+        execution_id=execution_id,
+        filename=filename,
+    )
+    return True, None
+
+
+def run_extend_cloud_worker(
+    execution_id: str,
+    *,
+    category: str | None = None,
+    max_images: int | None = None,
+    force: bool = False,
+    work_dir: Path | None = None,
+    prompt_file: Path | None = None,
+    model: str | None = None,
+    aspect_ratio: str | None = None,
+    image_size: str | None = None,
+    output_width: int | None = None,
+    retries: int | None = None,
+    retry_backoff: float | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Claim and extend photos on R2 until the queue is empty or ``max_images`` is reached."""
+    def _cancelled() -> bool:
+        return should_cancel is not None and should_cancel()
+
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing GEMINI_API_KEY in environment.")
+
+    cfg = r2_config_from_env(category=category)
+    client = r2_client(cfg)
+    work_dir, is_temp = _resolve_work_dir(work_dir)
+
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError('Install dependencies: pip install google-genai ".[r2]"') from exc
+
+    gemini = genai.Client(api_key=api_key)
+    gemini_settings = _extend_gemini_settings(
+        prompt_file=prompt_file,
+        model=model,
+        aspect_ratio=aspect_ratio,
+        image_size=image_size,
+        output_width=output_width,
+        retries=retries,
+        retry_backoff=retry_backoff,
+    )
+
+    ok = 0
+    failed = 0
+    failures: list[dict[str, str]] = []
+    processed = 0
+
+    if on_progress:
+        on_progress(0, "Waiting for work…")
+
+    while True:
+        if _cancelled():
+            if on_progress:
+                on_progress(0, "Cancelled")
+            return {
+                "ok": ok,
+                "failed": failed,
+                "processed": processed,
+                "failures": failures,
+                "cancelled": True,
+            }
+        if max_images is not None and processed >= max_images:
+            break
+
+        filename = claim_pre_processed_on_r2(
+            client,
+            cfg.bucket,
+            pre_processed_prefix=cfg.pre_processed_prefix,
+            images_prefix=cfg.images_prefix,
+            execution_id=execution_id,
+            force=force,
+        )
+        if filename is None:
+            break
+
+        processed += 1
+        if on_progress:
+            on_progress(
+                min(95.0, (processed - 1) / max(max_images or processed, 1) * 90 + 5),
+                f"Extending {filename}…",
+            )
+        succeeded, err = extend_one_claimed_on_r2(
+            client=client,
+            cfg=cfg,
+            execution_id=execution_id,
+            filename=filename,
+            work_dir=work_dir,
+            gemini_client=gemini,
+            gemini_settings=gemini_settings,
+        )
+        if succeeded:
+            ok += 1
+            if on_progress:
+                on_progress(
+                    min(99.0, processed / max(max_images or processed, 1) * 90 + 5),
+                    f"Extended {filename} ({ok} ok)",
+                )
+        else:
+            failed += 1
+            failures.append({"filename": filename, "error": err or "unknown"})
+            _log(f"error: {filename}: {err}", err=True)
+
+    if is_temp:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    if processed == 0 and not _cancelled():
+        if on_progress:
+            on_progress(100, "No pending images")
+        return {
+            "ok": 0,
+            "failed": 0,
+            "processed": 0,
+            "failures": [],
+            "cancelled": False,
+            "empty": True,
+        }
+
+    return {
+        "ok": ok,
+        "failed": failed,
+        "processed": processed,
+        "failures": failures,
+        "cancelled": False,
+        "empty": False,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(find_dotenv(usecwd=True))
+
+    execution_id = os.environ.get("EXTEND_EXECUTION_ID", "").strip()
+    if execution_id:
+        from music_assembler.job_progress import write_progress_json
+
+        category = os.environ.get("ASSEMBLY_CATEGORY", "").strip() or None
+        force = os.environ.get("EXTEND_FORCE", "").strip().lower() in ("1", "true", "yes")
+        max_raw = os.environ.get("EXTEND_MAX_IMAGES", "").strip()
+        max_images = int(max_raw) if max_raw.isdigit() else None
+        cfg = r2_config_from_env(category=category)
+        client = r2_client(cfg)
+        bucket = cfg.bucket
+        cat = category or cfg.category
+
+        def on_progress(pct: float, stage: str, *, status: str = "running") -> None:
+            write_progress_json(
+                client,
+                bucket,
+                execution_id,
+                pct=pct,
+                stage=stage,
+                category=cat,
+                status=status,
+                extra={"job_type": "extend"},
+            )
+
+        on_progress(0, "Starting on Cloud Run…")
+        try:
+            result = run_extend_cloud_worker(
+                execution_id,
+                category=category,
+                max_images=max_images,
+                force=force,
+                on_progress=lambda pct, stage: on_progress(pct, stage),
+            )
+        except Exception as exc:
+            on_progress(0, str(exc), status="failed")
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        if result.get("cancelled"):
+            on_progress(0, "Cancelled", status="cancelled")
+            return 0
+        if result.get("empty"):
+            print(f"No pending images in s3://{cfg.bucket}/{cfg.pre_processed_prefix}")
+            on_progress(100, "No pending images", status="succeeded")
+            return 0
+        ok = int(result.get("ok", 0))
+        failed = int(result.get("failed", 0))
+        if ok == 0 and failed > 0:
+            on_progress(100, f"Failed ({failed} image(s))", status="failed")
+            return 1
+        stage = f"Done — extended {ok} image(s)"
+        if failed:
+            stage += f", failed {failed}"
+        on_progress(100, stage, status="succeeded")
+        print(stage)
+        return 1 if failed else 0
+
     args = build_parser().parse_args(argv)
 
     if args.all:

@@ -12,6 +12,7 @@ s3://{bucket}/
 ├── pre-processed/
 │   └── {category}/
 │       ├── *.jpg / *.png / …   # raw photos (input to extend-backgrounds)
+│       ├── in-flight/{execution_id}/  # claimed by parallel extend workers
 │       └── used/                # sources retired after successful extend
 ├── post-processed/
 │   └── {category}/
@@ -21,7 +22,7 @@ s3://{bucket}/
 │       │       └── {filename}
 │       └── used/                # backgrounds retired after encode
 └── music-video/
-    └── {category}/
+    └── {youtube-channel}/       # e.g. nappabeats, sapporobeats (not genre category)
         └── mv_{timestamp}/      # assembly job output
             ├── frame_{stem}.png
             ├── mv_{timestamp}_mix.mp3
@@ -30,7 +31,7 @@ s3://{bucket}/
             └── mv_{timestamp}_thumbnail.png   # when THUMBNAIL_TEXT is set
 ```
 
-**Pipeline flow:** upload raw photos to `pre-processed/{category}/` → run `extend-backgrounds` (local or future R2 job) → widescreen PNGs land in `post-processed/{category}/` → assembly reads MP3s + post-processed stills → finished runs in `music-video/{category}/`.
+**Pipeline flow:** upload raw photos to `pre-processed/{category}/` → run `extend-from-r2` (Cloud Run Job `music-extend`) → widescreen PNGs land in `post-processed/{category}/` → assembly reads MP3s + post-processed stills from `{category}` → finished runs upload to `music-video/{youtube-channel}/` (channel slug from the uploader, e.g. `nappabeats`).
 
 **First category:** `korean` — set `ASSEMBLY_CATEGORY=korean` in `.env`.
 

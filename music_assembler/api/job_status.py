@@ -97,7 +97,7 @@ def reconcile_assembly_runs(
     try:
         gcp_rows = gcp_jobs.list_executions(settings, limit=50)
         gcp_by_id = {row["execution_id"]: row for row in gcp_rows}
-    except RuntimeError:
+    except Exception:
         pass
 
     linked_gcp: set[str] = {
@@ -176,16 +176,107 @@ def reconcile_assembly_runs(
     return out
 
 
-def reconcile_extend_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def reconcile_extend_runs(
+    settings: ApiSettings,
+    client,
+    bucket: str,
+    runs: list[dict[str, Any]],
+    *,
+    patch_r2: bool = True,
+) -> list[dict[str, Any]]:
+    """Merge R2 extend progress with Cloud Run execution status."""
+    if not runs:
+        return []
+
+    gcp_rows: list[dict[str, Any]] = []
+    gcp_by_id: dict[str, dict[str, Any]] = {}
+    if settings.extend_use_gcp:
+        try:
+            gcp_rows = gcp_jobs.list_executions(
+                settings,
+                limit=50,
+                job_resource=settings.extend_job_resource,
+                job_name=settings.extend_job_name,
+            )
+            gcp_by_id = {row["execution_id"]: row for row in gcp_rows}
+        except Exception:
+            pass
+
+    linked_gcp: set[str] = {
+        r["gcp_execution_id"] for r in runs if r.get("gcp_execution_id")
+    }
+
     out: list[dict[str, Any]] = []
     for run in runs:
         row = _normalize_from_run(run)
-        if run.get("progress") is None and row["status"] == "running":
+        prog = run.get("progress")
+        terminal = row["status"] in ("succeeded", "failed", "cancelled")
+        needs_gcp = not terminal
+
+        gcp_row: dict[str, Any] | None = None
+        gcp_id = run.get("gcp_execution_id")
+        if gcp_id and gcp_id in gcp_by_id:
+            gcp_row = gcp_by_id[gcp_id]
+        elif needs_gcp and gcp_rows:
+            gcp_row = _match_gcp_by_time(
+                run.get("created_at"),
+                gcp_rows,
+                exclude=linked_gcp,
+            )
+            if gcp_row:
+                row["gcp_execution_id"] = gcp_row["execution_id"]
+                linked_gcp.add(gcp_row["execution_id"])
+                if patch_r2 and run.get("execution_id"):
+                    patch_meta_gcp_execution_id(
+                        client,
+                        bucket,
+                        run["execution_id"],
+                        gcp_row["execution_id"],
+                    )
+
+        if gcp_row and needs_gcp:
+            gcp_status = gcp_row.get("status")
+            r2_pct = float(prog.get("pct") or 0) if prog else 0.0
+            if gcp_status == "running":
+                if prog is not None and r2_pct >= _R2_TRUST_PCT:
+                    row["status_source"] = "r2"
+                else:
+                    est_pct, est_stage = _estimate_running_pct(gcp_row)
+                    row["pct"] = max(r2_pct, est_pct)
+                    if not row["stage"] or r2_pct < _R2_TRUST_PCT:
+                        row["stage"] = est_stage if r2_pct < _R2_TRUST_PCT else row["stage"]
+                    row["status"] = "running"
+                    row["status_source"] = (
+                        "r2" if prog is not None and r2_pct >= _R2_TRUST_PCT else "gcp_estimate"
+                    )
+            elif gcp_status in ("succeeded", "failed"):
+                row["status"] = gcp_status
+                row["status_source"] = "gcp"
+                if gcp_status == "succeeded":
+                    row["pct"] = max(r2_pct, 100.0)
+                    row["stage"] = row["stage"] or "Complete"
+                else:
+                    row["stage"] = row["stage"] or "Failed on Cloud Run"
+                row["updated_at"] = gcp_row.get("completion_time") or row.get("updated_at")
+                if patch_r2 and run.get("execution_id") and prog is None:
+                    write_progress_json(
+                        client,
+                        bucket,
+                        run["execution_id"],
+                        pct=row["pct"],
+                        stage=row["stage"],
+                        category=run.get("category") or "korean",
+                        status=gcp_status,
+                        extra={"job_type": "extend"},
+                    )
+
+        elif needs_gcp and prog is None and gcp_row is None:
             row["status"] = "unknown"
             row["status_source"] = "none"
             row["stage"] = "No progress on R2"
         elif row["status"] == "cancelling":
             row["stage"] = row["stage"] or "Cancelling…"
+
         out.append(row)
     return out
 

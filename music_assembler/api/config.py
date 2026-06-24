@@ -11,6 +11,14 @@ from music_assembler.assemble_options import normalize_channel
 load_dotenv(find_dotenv(usecwd=True))
 
 
+def _extend_use_gcp_from_env() -> bool:
+    raw = os.environ.get("EXTEND_USE_GCP", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # Default: extend always runs on the music-extend Cloud Run Job (local API is control plane only).
+    return True
+
+
 @dataclass(frozen=True)
 class ApiSettings:
     api_key: str | None
@@ -18,6 +26,8 @@ class ApiSettings:
     gcp_project: str
     gcp_region: str
     assembly_job_name: str
+    extend_job_name: str
+    extend_use_gcp: bool
     default_category: str
     configured_channels: tuple[str, ...]
     uploader_api_url: str | None
@@ -45,6 +55,8 @@ class ApiSettings:
             or os.environ.get("GCP_REGION", "").strip()
             or "northamerica-northeast2",
             assembly_job_name=os.environ.get("ASSEMBLY_JOB_NAME", "music-assemble").strip(),
+            extend_job_name=os.environ.get("EXTEND_JOB_NAME", "music-extend").strip(),
+            extend_use_gcp=_extend_use_gcp_from_env(),
             default_category=os.environ.get("ASSEMBLY_CATEGORY", "korean").strip(),
             configured_channels=tuple(dict.fromkeys(channels)),
             uploader_api_url=os.environ.get("UPLOADER_API_URL", "").strip() or None,
@@ -56,4 +68,11 @@ class ApiSettings:
         return (
             f"projects/{self.gcp_project}/locations/{self.gcp_region}"
             f"/jobs/{self.assembly_job_name}"
+        )
+
+    @property
+    def extend_job_resource(self) -> str:
+        return (
+            f"projects/{self.gcp_project}/locations/{self.gcp_region}"
+            f"/jobs/{self.extend_job_name}"
         )

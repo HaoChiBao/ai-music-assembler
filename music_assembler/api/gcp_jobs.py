@@ -11,8 +11,10 @@ from music_assembler.api.config import ApiSettings
 from music_assembler.api.gcp_credentials import get_gcp_credentials
 
 try:
+    from google.api_core import exceptions as gcp_exceptions
     from google.cloud import run_v2
 except ImportError:  # pragma: no cover
+    gcp_exceptions = None  # type: ignore[assignment,misc]
     run_v2 = None  # type: ignore[assignment,misc]
 
 _EXECUTION_RE = re.compile(
@@ -96,6 +98,10 @@ def execution_to_dict(execution: Any, *, job_name: str) -> dict[str, Any]:
     }
 
 
+def _wrap_gcp_error(exc: Exception) -> RuntimeError:
+    return RuntimeError(str(exc))
+
+
 def _pick_new_execution(
     executions_client: Any,
     *,
@@ -106,7 +112,13 @@ def _pick_new_execution(
 ) -> dict[str, Any] | None:
     """Find the GCP execution created for this ``run_job`` call (parallel-safe)."""
     cutoff = started_after - timedelta(seconds=10)
-    for execution in executions_client.list_executions(parent=parent):
+    try:
+        pages = executions_client.list_executions(parent=parent)
+    except Exception as exc:
+        if gcp_exceptions and isinstance(exc, gcp_exceptions.GoogleAPIError):
+            raise _wrap_gcp_error(exc) from exc
+        raise
+    for execution in pages:
         row = execution_to_dict(execution, job_name=job_name)
         if row["execution_id"] in exclude:
             continue
@@ -116,36 +128,21 @@ def _pick_new_execution(
     return None
 
 
-def start_assembly_job(
+def _run_cloud_job(
     settings: ApiSettings,
     *,
+    job_resource: str,
+    job_name: str,
+    env: list[Any],
     execution_id: str,
-    category: str,
-    channel: str | None = None,
-    thumbnail_text: str | None = None,
-    duration_min: int | None = None,
-    variance_min: int | None = None,
     exclude_gcp_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Start ``music-assemble`` with env overrides for this run."""
+    """Start a Cloud Run Job execution and return the linked GCP execution row."""
     jobs_client, executions_client = _require_client()
     exclude = exclude_gcp_ids or set()
     started_after = datetime.now(timezone.utc)
-    env = [
-        run_v2.EnvVar(name="ASSEMBLY_EXECUTION_ID", value=execution_id),
-        run_v2.EnvVar(name="ASSEMBLY_CATEGORY", value=category),
-    ]
-    if channel:
-        env.append(run_v2.EnvVar(name="ASSEMBLY_CHANNEL", value=channel))
-    if thumbnail_text:
-        env.append(run_v2.EnvVar(name="THUMBNAIL_TEXT", value=thumbnail_text))
-    if duration_min is not None:
-        env.append(run_v2.EnvVar(name="ASSEMBLY_DURATION_MIN", value=str(duration_min)))
-    if variance_min is not None:
-        env.append(run_v2.EnvVar(name="ASSEMBLY_VARIANCE_MIN", value=str(variance_min)))
-
     request = run_v2.RunJobRequest(
-        name=settings.job_resource,
+        name=job_resource,
         overrides=run_v2.RunJobRequest.Overrides(
             container_overrides=[
                 run_v2.RunJobRequest.Overrides.ContainerOverride(env=env)
@@ -156,16 +153,18 @@ def start_assembly_job(
         jobs_client.run_job(request=request)
     except Exception as exc:
         raise RuntimeError(f"RunJob failed: {exc}") from exc
-    parent = settings.job_resource
     picked: dict[str, Any] | None = None
     for _ in range(12):
-        picked = _pick_new_execution(
-            executions_client,
-            parent=parent,
-            job_name=settings.assembly_job_name,
-            started_after=started_after,
-            exclude=exclude,
-        )
+        try:
+            picked = _pick_new_execution(
+                executions_client,
+                parent=job_resource,
+                job_name=job_name,
+                started_after=started_after,
+                exclude=exclude,
+            )
+        except RuntimeError:
+            break
         if picked is not None:
             break
         time.sleep(0.4)
@@ -178,16 +177,95 @@ def start_assembly_job(
     return data
 
 
+def start_assembly_job(
+    settings: ApiSettings,
+    *,
+    execution_id: str,
+    category: str,
+    channel: str | None = None,
+    thumbnail_text: str | None = None,
+    duration_min: int | None = None,
+    variance_min: int | None = None,
+    queue_youtube: bool = True,
+    exclude_gcp_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Start ``music-assemble`` with env overrides for this run."""
+    env = [
+        run_v2.EnvVar(name="ASSEMBLY_EXECUTION_ID", value=execution_id),
+        run_v2.EnvVar(name="ASSEMBLY_CATEGORY", value=category),
+    ]
+    if channel:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_CHANNEL", value=channel))
+    if thumbnail_text:
+        env.append(run_v2.EnvVar(name="THUMBNAIL_TEXT", value=thumbnail_text))
+    if duration_min is not None:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_DURATION_MIN", value=str(duration_min)))
+    if variance_min is not None:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_VARIANCE_MIN", value=str(variance_min)))
+    env.append(
+        run_v2.EnvVar(
+            name="ASSEMBLY_QUEUE_YOUTUBE",
+            value="true" if queue_youtube else "false",
+        )
+    )
+    return _run_cloud_job(
+        settings,
+        job_resource=settings.job_resource,
+        job_name=settings.assembly_job_name,
+        env=env,
+        execution_id=execution_id,
+        exclude_gcp_ids=exclude_gcp_ids,
+    )
+
+
+def start_extend_job(
+    settings: ApiSettings,
+    *,
+    execution_id: str,
+    category: str,
+    max_images: int | None = None,
+    force: bool = False,
+    exclude_gcp_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Start ``music-extend`` with env overrides for this run."""
+    env = [
+        run_v2.EnvVar(name="EXTEND_EXECUTION_ID", value=execution_id),
+        run_v2.EnvVar(name="ASSEMBLY_CATEGORY", value=category),
+    ]
+    if max_images is not None:
+        env.append(run_v2.EnvVar(name="EXTEND_MAX_IMAGES", value=str(max_images)))
+    if force:
+        env.append(run_v2.EnvVar(name="EXTEND_FORCE", value="true"))
+    return _run_cloud_job(
+        settings,
+        job_resource=settings.extend_job_resource,
+        job_name=settings.extend_job_name,
+        env=env,
+        execution_id=execution_id,
+        exclude_gcp_ids=exclude_gcp_ids,
+    )
+
+
 def list_executions(
     settings: ApiSettings,
     *,
     limit: int = 25,
     status: str | None = None,
+    job_resource: str | None = None,
+    job_name: str | None = None,
 ) -> list[dict[str, Any]]:
+    resource = job_resource or settings.job_resource
+    name = job_name or settings.assembly_job_name
     _, executions_client = _require_client()
     out: list[dict[str, Any]] = []
-    for execution in executions_client.list_executions(parent=settings.job_resource):
-        row = execution_to_dict(execution, job_name=settings.assembly_job_name)
+    try:
+        pages = executions_client.list_executions(parent=resource)
+    except Exception as exc:
+        if gcp_exceptions and isinstance(exc, gcp_exceptions.GoogleAPIError):
+            raise _wrap_gcp_error(exc) from exc
+        raise
+    for execution in pages:
+        row = execution_to_dict(execution, job_name=name)
         if status and row["status"] != status:
             continue
         out.append(row)
@@ -196,11 +274,17 @@ def list_executions(
     return out
 
 
-def cancel_execution(settings: ApiSettings, execution_id: str) -> dict[str, Any]:
+def cancel_execution(
+    settings: ApiSettings,
+    execution_id: str,
+    *,
+    job_resource: str | None = None,
+) -> dict[str, Any]:
     """Cancel a running Cloud Run Job execution."""
+    resource = job_resource or settings.job_resource
     _, executions_client = _require_client()
     full = (
-        f"{settings.job_resource}/executions/{execution_id}"
+        f"{resource}/executions/{execution_id}"
         if "/" not in execution_id
         else execution_id
     )
@@ -211,19 +295,30 @@ def cancel_execution(settings: ApiSettings, execution_id: str) -> dict[str, Any]
     return {"execution_id": execution_id, "status": "cancelled"}
 
 
-def get_execution(settings: ApiSettings, execution_id: str) -> dict[str, Any] | None:
+def get_execution(
+    settings: ApiSettings,
+    execution_id: str,
+    *,
+    job_resource: str | None = None,
+    job_name: str | None = None,
+) -> dict[str, Any] | None:
+    resource = job_resource or settings.job_resource
+    name = job_name or settings.assembly_job_name
     _, executions_client = _require_client()
     full = (
-        f"{settings.job_resource}/executions/{execution_id}"
+        f"{resource}/executions/{execution_id}"
         if "/" not in execution_id
         else execution_id
     )
     try:
         execution = executions_client.get_execution(name=full)
     except Exception:
-        # Search by suffix
-        for row in list_executions(settings, limit=50):
-            if row["execution_id"] == execution_id or row["execution_id"].endswith(execution_id):
+        for row in list_executions(
+            settings, limit=50, job_resource=resource, job_name=name
+        ):
+            if row["execution_id"] == execution_id or row["execution_id"].endswith(
+                execution_id
+            ):
                 return row
         return None
-    return execution_to_dict(execution, job_name=settings.assembly_job_name)
+    return execution_to_dict(execution, job_name=name)

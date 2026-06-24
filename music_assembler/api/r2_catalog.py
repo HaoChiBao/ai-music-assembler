@@ -46,24 +46,37 @@ def _read_text_object(client, bucket: str, key: str) -> str | None:
         return None
 
 
-def _parse_video_relative(rel: str) -> tuple[str | None, str] | None:
-    """Return ``(channel, run_id)`` for a key relative to ``music-video/{category}/``."""
-    if not rel or rel.endswith("/"):
+def _parse_music_video_key(key: str) -> tuple[str | None, str, str] | None:
+    """Parse an R2 key into ``(channel, run_id, filename)``.
+
+    Supports:
+    - ``music-video/{channel}/mv_*/…`` (current layout)
+    - ``music-video/{category}/mv_*/…`` (legacy flat category folder)
+    - ``music-video/{category}/{channel}/mv_*/…`` (legacy nested layout)
+    """
+    if not key.startswith("music-video/") or _is_skipped_key(key):
         return None
-    parts = rel.split("/")
-    if parts[0].startswith("mv_"):
-        return None, parts[0]
-    if len(parts) >= 2 and parts[1].startswith("mv_"):
-        return parts[0], parts[1]
+    parts = key.split("/")
+    if len(parts) < 3:
+        return None
+    seg1, seg2 = parts[1], parts[2]
+    if seg1.startswith("mv_"):
+        filename = "/".join(parts[2:])
+        return None, seg1, filename
+    if seg2.startswith("mv_"):
+        filename = "/".join(parts[3:])
+        return seg1, seg2, filename
+    if len(parts) >= 4 and parts[3].startswith("mv_"):
+        filename = "/".join(parts[4:])
+        return parts[2], parts[3], filename
     return None
 
 
-def discover_channels(client, bucket: str, category: str) -> list[str]:
-    """List channel subfolders under ``music-video/{category}/`` (excludes legacy ``mv_*``)."""
+def discover_video_channels(client, bucket: str) -> list[str]:
+    """List YouTube channel folders directly under ``music-video/``."""
     seen: set[str] = set()
-    prefix = f"music-video/{category.strip().strip('/')}/"
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix="music-video/", Delimiter="/"):
         for cp in page.get("CommonPrefixes", []):
             name = cp.get("Prefix", "").rstrip("/").split("/")[-1]
             if name and not name.startswith("mv_"):
@@ -71,52 +84,67 @@ def discover_channels(client, bucket: str, category: str) -> list[str]:
     return sorted(seen)
 
 
-def _video_run_prefix(category: str, video_id: str, channel: str | None) -> str:
-    ch = normalize_channel(channel) if channel else None
-    return f"{video_output_prefix(category, ch)}{video_id}/"
+def discover_channels(client, bucket: str, category: str | None = None) -> list[str]:
+    """List channel folders under ``music-video/`` (``category`` ignored — kept for API compat)."""
+    _ = category
+    return discover_video_channels(client, bucket)
+
+
+def _video_run_prefix(channel: str, video_id: str) -> str:
+    ch = normalize_channel(channel)
+    if not ch:
+        raise ValueError("channel is required")
+    return f"{video_output_prefix(ch)}{video_id}/"
 
 
 def _scan_video_runs(
     client,
     bucket: str,
     *,
-    category: str,
     channel: str | None = None,
 ) -> dict[tuple[str | None, str], dict[str, Any]]:
-    """Index ``mv_*`` runs under ``music-video/{category}/`` (legacy + channel subfolders)."""
-    base = f"music-video/{category.strip().strip('/')}/"
+    """Index ``mv_*`` runs under ``music-video/`` (current + legacy layouts)."""
     channel_filter = normalize_channel(channel) if channel else None
     runs: dict[tuple[str | None, str], dict[str, Any]] = {}
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=base):
+    for page in paginator.paginate(Bucket=bucket, Prefix="music-video/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            rel = key[len(base) :]
-            parsed = _parse_video_relative(rel)
+            parsed = _parse_music_video_key(key)
             if parsed is None:
                 continue
-            ch, run_id = parsed
+            ch, run_id, filename = parsed
             if channel_filter is not None and ch != channel_filter:
                 continue
+            if not filename:
+                continue
+            prefix = (
+                f"music-video/{ch}/{run_id}/"
+                if ch
+                else f"music-video/{run_id}/"
+            )
             entry = runs.setdefault(
                 (ch, run_id),
                 {
                     "id": run_id,
-                    "category": category,
                     "channel": ch,
-                    "prefix": f"{base}{run_id}/" if ch is None else f"{base}{ch}/{run_id}/",
+                    "prefix": prefix,
                     "files": {},
                     "last_modified": None,
                 },
             )
-            filename = "/".join(rel.split("/")[2:]) if ch else "/".join(rel.split("/")[1:])
-            if not filename:
-                continue
             entry["files"][filename] = key
             lm = obj.get("LastModified")
             if lm and (entry["last_modified"] is None or lm > entry["last_modified"]):
                 entry["last_modified"] = lm
     return runs
+
+
+def _media_query(channel: str | None, video_id: str) -> str:
+    q = f"video_id={video_id}"
+    if channel:
+        q = f"channel={channel}&" + q
+    return q
 
 
 def _presign(client, bucket: str, key: str, *, expires: int = 3600) -> str | None:
@@ -130,23 +158,15 @@ def _presign(client, bucket: str, key: str, *, expires: int = 3600) -> str | Non
         return None
 
 
-def _media_query(category: str, video_id: str, channel: str | None) -> str:
-    q = f"category={category}&video_id={video_id}"
-    if channel:
-        q += f"&channel={channel}"
-    return q
-
-
 def list_categories(client, bucket: str) -> list[str]:
-    """Discover category subfolders under ``music-video/``."""
+    """Discover genre/category subfolders under ``music/`` (inputs, not video output)."""
     seen: set[str] = set()
     paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix="music-video/", Delimiter="/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix="music/", Delimiter="/"):
         for prefix in page.get("CommonPrefixes", []):
             p = prefix.get("Prefix", "")
-            # music-video/korean/
             parts = p.strip("/").split("/")
-            if len(parts) >= 2 and parts[0] == "music-video":
+            if len(parts) >= 2 and parts[0] == "music":
                 seen.add(parts[1])
     if not seen:
         seen.add(r2_config_from_env().category)
@@ -161,7 +181,7 @@ def category_inventory(client, bucket: str, category: str) -> dict[str, int]:
         "backgrounds_in_flight": f"post-processed/{category}/in-flight/",
         "backgrounds_used": f"post-processed/{category}/used/",
         "pre_processed": f"pre-processed/{category}/",
-        "music_videos": f"music-video/{category}/",
+        "music_videos": "music-video/",
     }
     counts: dict[str, int] = {}
     for label, prefix in prefixes.items():
@@ -186,12 +206,11 @@ def list_video_summaries(
     client,
     bucket: str,
     *,
-    category: str,
     channel: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """List ``mv_*`` folders without reading title/description objects."""
-    runs = _scan_video_runs(client, bucket, category=category, channel=channel)
+    runs = _scan_video_runs(client, bucket, channel=channel)
     out: list[dict[str, Any]] = []
     for (_ch, run_id) in sorted(runs.keys(), key=lambda k: k[1], reverse=True)[:limit]:
         entry = runs[(_ch, run_id)]
@@ -201,7 +220,6 @@ def list_video_summaries(
         out.append(
             {
                 "id": run_id,
-                "category": category,
                 "channel": _ch,
                 "has_video": video_key is not None,
                 "has_thumbnail": thumb_key is not None,
@@ -220,18 +238,15 @@ def list_videos(
     client,
     bucket: str,
     *,
-    category: str,
     channel: str | None = None,
     limit: int = 50,
     stable_media_urls: bool = False,
     summary_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """List ``mv_*`` run folders under ``music-video/{category}/`` (and channel subfolders)."""
+    """List ``mv_*`` run folders under ``music-video/{channel}/``."""
     if summary_only:
-        return list_video_summaries(
-            client, bucket, category=category, channel=channel, limit=limit
-        )
-    runs = _scan_video_runs(client, bucket, category=category, channel=channel)
+        return list_video_summaries(client, bucket, channel=channel, limit=limit)
+    runs = _scan_video_runs(client, bucket, channel=channel)
     out: list[dict[str, Any]] = []
     for (_ch, run_id) in sorted(runs.keys(), key=lambda k: k[1], reverse=True)[:limit]:
         entry = runs[(_ch, run_id)]
@@ -245,7 +260,7 @@ def list_videos(
             (files[k] for k in files if k.endswith("_thumbnail.png")),
             None,
         )
-        media_q = _media_query(category, run_id, _ch)
+        media_q = _media_query(_ch, run_id)
         if stable_media_urls and thumb_key:
             thumb_url = f"/v1/media/thumbnail?{media_q}"
         else:
@@ -258,7 +273,6 @@ def list_videos(
         out.append(
             {
                 "id": run_id,
-                "category": category,
                 "channel": _ch,
                 "title": title,
                 "description": description,
@@ -277,43 +291,24 @@ def get_video(
     client,
     bucket: str,
     *,
-    category: str,
     video_id: str,
     channel: str | None = None,
 ) -> dict[str, Any] | None:
     ch = normalize_channel(channel) if channel else None
-    if ch is not None:
-        prefixes = [_video_run_prefix(category, video_id, ch)]
-    else:
-        prefixes = [
-            _video_run_prefix(category, video_id, None),
-        ]
-        for discovered in discover_channels(client, bucket, category):
-            prefixes.append(_video_run_prefix(category, video_id, discovered))
-
-    files: dict[str, str] = {}
-    resolved_channel = ch
-    resolved_prefix = ""
-    for prefix in prefixes:
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                if _is_skipped_key(key):
-                    continue
-                name = key[len(prefix) :]
-                if name:
-                    files[name] = key
-        if files:
-            resolved_prefix = prefix
-            if ch is None:
-                rel = prefix[len(f"music-video/{category.strip().strip('/')}/") :]
-                parts = rel.strip("/").split("/")
-                resolved_channel = parts[0] if len(parts) == 2 else None
-            break
-
-    if not files:
+    runs = _scan_video_runs(client, bucket, channel=ch)
+    entry = runs.get((ch, video_id))
+    if entry is None and ch is None:
+        for (run_ch, run_id), candidate in runs.items():
+            if run_id == video_id:
+                entry = candidate
+                ch = run_ch
+                break
+    if entry is None:
         return None
+
+    files = entry["files"]
+    resolved_prefix = entry["prefix"]
+    resolved_channel = ch or entry.get("channel")
 
     title = _read_text_object(client, bucket, files.get(f"{video_id}_title.txt", ""))
     description = _read_text_object(
@@ -338,10 +333,9 @@ def get_video(
             kind = "image"
         file_rows.append({"name": name, "key": key, "kind": kind, "size": None})
 
-    media_q = _media_query(category, video_id, resolved_channel)
+    media_q = _media_query(resolved_channel, video_id)
     return {
         "id": video_id,
-        "category": category,
         "channel": resolved_channel,
         "title": title,
         "description": description,
@@ -359,11 +353,10 @@ def find_thumbnail_key(
     client,
     bucket: str,
     *,
-    category: str,
     video_id: str,
     channel: str | None = None,
 ) -> str | None:
-    row = get_video(client, bucket, category=category, video_id=video_id, channel=channel)
+    row = get_video(client, bucket, video_id=video_id, channel=channel)
     if not row:
         return None
     return next(
@@ -376,11 +369,10 @@ def find_video_key(
     client,
     bucket: str,
     *,
-    category: str,
     video_id: str,
     channel: str | None = None,
 ) -> str | None:
-    row = get_video(client, bucket, category=category, video_id=video_id, channel=channel)
+    row = get_video(client, bucket, video_id=video_id, channel=channel)
     if not row:
         return None
     return next(

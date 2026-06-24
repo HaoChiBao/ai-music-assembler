@@ -32,20 +32,19 @@ class PendingR2SourcesTests(unittest.TestCase):
             f"post-processed/korean/a.png",
         ]
 
-        def fake_list(_client, bucket, prefix, exclude_relative_prefixes=()):
-            if prefix == cfg.pre_processed_prefix:
-                return pre
-            if prefix == cfg.images_prefix:
-                return post
+        def fake_list(_client, bucket, pre_processed_prefix, images_prefix, force=False):
+            if pre_processed_prefix == cfg.pre_processed_prefix:
+                return [pre[1], pre[2]]
             return []
 
         with unittest.mock.patch(
-            "music_assembler.extend_from_r2.list_object_keys", side_effect=fake_list
+            "music_assembler.extend_from_r2.list_claimable_pre_processed_keys",
+            side_effect=fake_list,
         ) as list_mock:
             pending = pending_r2_sources(client, cfg, force=False)
 
         self.assertEqual(pending, [pre[1], pre[2]])
-        self.assertEqual(list_mock.call_count, 2)
+        self.assertEqual(list_mock.call_count, 1)
         client.head_object.assert_not_called()
 
     def test_force_includes_all_images(self) -> None:
@@ -54,7 +53,7 @@ class PendingR2SourcesTests(unittest.TestCase):
         pre = [f"pre-processed/korean/a.jpg"]
 
         with unittest.mock.patch(
-            "music_assembler.extend_from_r2.list_object_keys",
+            "music_assembler.extend_from_r2.list_claimable_pre_processed_keys",
             return_value=pre,
         ):
             pending = pending_r2_sources(client, cfg, force=True)

@@ -29,17 +29,14 @@ gcloud run deploy music-assembly-api \
 ASSEMBLY_GCP_PROJECT=${PROJECT_ID},\
 ASSEMBLY_GCP_REGION=${REGION},\
 ASSEMBLY_JOB_NAME=music-assemble,\
+EXTEND_JOB_NAME=music-extend,\
 ASSEMBLY_CATEGORY=korean,\
 ASSEMBLY_API_KEY=your-secret-key"
 ```
 
-Add R2 vars (`CLOUDFLARE_R2_*`) and `GEMINI_API_KEY` via `--set-env-vars` or Secret Manager.
+Add R2 vars (`CLOUDFLARE_R2_*`) via `--set-env-vars` or Secret Manager. Gemini keys live on the **`music-extend`** job (not required on the API service).
 
-Extend runs execute inside the API service (background task). Set request timeout ≥ 15 min for large batches:
-
-```bash
-gcloud run deploy music-assembly-api ... --timeout 900
-```
+Extend runs on the **`music-extend`** Cloud Run Job (see [cloud-run-job.md](cloud-run-job.md)). The API only queues executions and tracks R2 progress. Set `EXTEND_USE_GCP=false` only for in-process extend on the API machine.
 
 ## Local dev
 

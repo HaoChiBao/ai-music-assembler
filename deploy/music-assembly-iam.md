@@ -39,6 +39,13 @@ gcloud run jobs add-iam-policy-binding music-assemble \
   --member="serviceAccount:music-assembly-api@${PROJECT_ID}.iam.gserviceaccount.com" \
   --role="roles/run.developer"
 
+# Same for the extend job
+gcloud run jobs add-iam-policy-binding music-extend \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --member="serviceAccount:music-assembly-api@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/run.developer"
+
 # Optional: read execution status without run.developer (narrower)
 # roles/run.viewer on the job + roles/run.developer only on :run
 ```

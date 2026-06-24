@@ -1,0 +1,14 @@
+# Cloud Run extend worker — `extend-from-r2` (boto3 + google-genai).
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY music_assembler ./music_assembler
+COPY prompts ./prompts
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+ENV WORK_DIR=/work
+ENTRYPOINT ["extend-from-r2", "--work-dir", "/work"]

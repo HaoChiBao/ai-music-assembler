@@ -1,4 +1,4 @@
-"""Request cancellation for assembly (GCP) and extend (in-process) jobs."""
+"""Request cancellation for assembly and extend Cloud Run jobs."""
 
 from __future__ import annotations
 
@@ -83,14 +83,18 @@ def cancel_job(
 
     gcp_cancelled = False
     gcp_error: str | None = None
-    if job_type == "assembly":
-        gcp_id = meta.get("gcp_execution_id")
-        if gcp_id:
-            try:
-                gcp_jobs.cancel_execution(settings, gcp_id)
-                gcp_cancelled = True
-            except Exception as exc:
-                gcp_error = str(exc)
+    gcp_id = meta.get("gcp_execution_id")
+    if gcp_id:
+        job_resource = (
+            settings.extend_job_resource
+            if job_type == "extend"
+            else settings.job_resource
+        )
+        try:
+            gcp_jobs.cancel_execution(settings, gcp_id, job_resource=job_resource)
+            gcp_cancelled = True
+        except Exception as exc:
+            gcp_error = str(exc)
 
     write_progress_json(
         client,

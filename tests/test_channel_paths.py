@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from music_assembler.api.r2_catalog import _parse_music_video_key
 from music_assembler.assemble_options import (
     normalize_channel,
     resolve_r2_assembly_prefixes,
@@ -22,12 +23,12 @@ class TestChannelPaths(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_channel("../evil")
 
-    def test_video_output_prefix_without_channel(self) -> None:
-        self.assertEqual(video_output_prefix("korean"), "music-video/korean/")
-        self.assertEqual(
-            video_output_prefix("korean", "my-channel"),
-            "music-video/korean/my-channel/",
-        )
+    def test_video_output_prefix(self) -> None:
+        self.assertEqual(video_output_prefix("nappabeats"), "music-video/nappabeats/")
+
+    def test_video_output_prefix_requires_channel(self) -> None:
+        with self.assertRaises(ValueError):
+            video_output_prefix("")
 
     def test_resolve_prefixes_with_channel(self) -> None:
         p = resolve_r2_assembly_prefixes(
@@ -38,8 +39,32 @@ class TestChannelPaths(unittest.TestCase):
             channel="night-drive",
         )
         self.assertEqual(p.channel, "night-drive")
-        self.assertEqual(p.output_prefix, "music-video/korean/night-drive/")
+        self.assertEqual(p.output_prefix, "music-video/night-drive/")
         self.assertEqual(p.music_prefix, "music/korean/")
+
+    def test_resolve_prefixes_requires_channel(self) -> None:
+        with self.assertRaises(SystemExit):
+            resolve_r2_assembly_prefixes(
+                category="korean",
+                music_folder=None,
+                images_folder=None,
+                output_folder=None,
+                channel=None,
+            )
+
+    def test_parse_music_video_key_current_layout(self) -> None:
+        parsed = _parse_music_video_key("music-video/nappabeats/mv_20260101_120000/mv_20260101_120000_video.mp4")
+        self.assertEqual(parsed, ("nappabeats", "mv_20260101_120000", "mv_20260101_120000_video.mp4"))
+
+    def test_parse_music_video_key_legacy_nested(self) -> None:
+        parsed = _parse_music_video_key(
+            "music-video/korean/nappabeats/mv_20260101_120000/mv_20260101_120000_video.mp4"
+        )
+        self.assertEqual(parsed, ("nappabeats", "mv_20260101_120000", "mv_20260101_120000_video.mp4"))
+
+    def test_parse_music_video_key_legacy_flat(self) -> None:
+        parsed = _parse_music_video_key("music-video/korean/mv_20260101_120000/mv_20260101_120000_video.mp4")
+        self.assertEqual(parsed, ("korean", "mv_20260101_120000", "mv_20260101_120000_video.mp4"))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ Bucket layout: see ``docs/r2-bucket-layout.md``.
 
 Required ``.env`` keys: ``CLOUDFLARE_R2_*`` and ``ASSEMBLY_CATEGORY`` (or folder flags).
 Optional: ``THUMBNAIL_TEXT``, ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` for YouTube metadata.
+Optional: ``--queue-youtube`` / ``ASSEMBLY_QUEUE_YOUTUBE`` to register on the youtube-uploader
+pending queue after R2 upload (needs ``UPLOADER_API_URL`` + ``UPLOADER_API_KEY``).
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -55,6 +58,19 @@ from music_assembler.youtube_metadata import (
     load_used_titles,
     record_used_title,
 )
+
+try:
+    from music_assembler.api.uploader_client import (
+        register_youtube_upload,
+        resolve_queue_youtube,
+        r2_object_uri,
+        uploader_credentials_from_env,
+    )
+except ImportError:  # pragma: no cover
+    register_youtube_upload = None  # type: ignore[misc, assignment]
+    resolve_queue_youtube = None  # type: ignore[misc, assignment]
+    r2_object_uri = None  # type: ignore[misc, assignment]
+    uploader_credentials_from_env = None  # type: ignore[misc, assignment]
 
 DEFAULT_TITLE_FONT_SIZE = 46
 DEFAULT_TITLE_FONT_WEIGHT = 400
@@ -151,11 +167,107 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip YouTube title/description generation.",
     )
+    p.add_argument(
+        "--queue-youtube",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "After R2 upload, register the video on the youtube-uploader pending queue "
+            "(default: on; set ASSEMBLY_QUEUE_YOUTUBE=false or --no-queue-youtube to skip). "
+            "Requires channel, metadata, and UPLOADER_API_URL + UPLOADER_API_KEY."
+        ),
+    )
     return p
 
 
 def _format_duration_range(bounds) -> str:
     return f"{bounds.min_sec / 60:.0f}-{bounds.max_sec / 60:.0f} min"
+
+
+def _read_text_file(path: Path | None) -> str:
+    if path is None or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _maybe_queue_youtube_upload(
+    *,
+    enabled: bool,
+    bucket: str,
+    output_prefix: str,
+    channel: str | None,
+    basename: str,
+    result: dict,
+    no_upload: bool,
+) -> dict[str, Any] | None:
+    """Register the finished run with youtube-uploader; returns API response or None."""
+    if not enabled:
+        return None
+    if register_youtube_upload is None:
+        print(
+            "warning: --queue-youtube requested but uploader client is unavailable",
+            file=sys.stderr,
+        )
+        return None
+    if no_upload:
+        print(
+            "warning: --queue-youtube skipped because --no-upload was set (video not on R2)",
+            file=sys.stderr,
+        )
+        return None
+    if not channel:
+        print(
+            "warning: --queue-youtube skipped because no YouTube channel was set",
+            file=sys.stderr,
+        )
+        return None
+
+    api_url, api_key = uploader_credentials_from_env()
+    if not api_url or not api_key:
+        print(
+            "warning: --queue-youtube skipped — set UPLOADER_API_URL and UPLOADER_API_KEY",
+            file=sys.stderr,
+        )
+        return None
+
+    meta = result.get("youtube_metadata")
+    title = meta.title if meta else _read_text_file(result.get("title_txt"))
+    description = meta.description if meta else _read_text_file(result.get("description_txt"))
+    if not title:
+        print(
+            "warning: --queue-youtube skipped — no title (use metadata generation, not --no-metadata)",
+            file=sys.stderr,
+        )
+        return None
+
+    video_key = f"{output_prefix}{basename}/{basename}_video.mp4"
+    video_uri = r2_object_uri(bucket, video_key)
+    thumbnail_uri = ""
+    thumb_path = result.get("thumbnail_png")
+    if thumb_path is not None:
+        thumbnail_uri = r2_object_uri(bucket, f"{output_prefix}{basename}/{Path(thumb_path).name}")
+
+    print(f"==> Register YouTube upload queue ({channel})")
+    print(f"    video: {video_uri}")
+    try:
+        response = register_youtube_upload(
+            api_url=api_url,
+            api_key=api_key,
+            channel=channel,
+            title=title,
+            description=description,
+            video_uri=video_uri,
+            thumbnail_uri=thumbnail_uri,
+            job_id=basename,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"warning: YouTube queue register failed: {exc}", file=sys.stderr)
+        return None
+
+    job_id = response.get("job_id") or basename
+    status = response.get("status") or "pending"
+    print(f"    queued job_id={job_id} status={status}")
+    return response
 
 
 def _resolve_work_dir(arg: Path | None) -> tuple[Path, bool]:
@@ -524,6 +636,19 @@ def main(argv: list[str] | None = None) -> int:
             progress_write(96, "Uploading outputs to R2…")
         uploaded = sync_dir_to_prefix(client, cfg_r2.bucket, output_dir, prefixes.output_prefix)
         print(f"    uploaded {uploaded} object(s)")
+
+    queue_youtube = resolve_queue_youtube(args.queue_youtube) if resolve_queue_youtube else False
+    queue_result = _maybe_queue_youtube_upload(
+        enabled=queue_youtube,
+        bucket=cfg_r2.bucket,
+        output_prefix=prefixes.output_prefix,
+        channel=prefixes.channel,
+        basename=basename,
+        result=result,
+        no_upload=args.no_upload,
+    )
+    if queue_result and progress_write:
+        progress_write(99, f"YouTube queue: {queue_result.get('job_id', basename)}")
 
     if execution_id:
         if progress_write:

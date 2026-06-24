@@ -59,6 +59,10 @@ class R2Config:
         return f"post-processed/{self.category}/in-flight/"
 
     @property
+    def in_flight_pre_processed_prefix(self) -> str:
+        return f"pre-processed/{self.category}/in-flight/"
+
+    @property
     def output_prefix(self) -> str:
         return f"music-video/{self.category}/"
 
@@ -220,6 +224,162 @@ def _is_image_key(key: str) -> bool:
 
 def in_flight_key(images_prefix: str, execution_id: str, filename: str) -> str:
     return f"{_normalize_prefix(images_prefix)}in-flight/{execution_id}/{filename}"
+
+
+def pre_processed_in_flight_key(
+    pre_processed_prefix: str, execution_id: str, filename: str
+) -> str:
+    return f"{_normalize_prefix(pre_processed_prefix)}in-flight/{execution_id}/{filename}"
+
+
+def list_in_flight_pre_processed_names(
+    client, bucket: str, pre_processed_prefix: str
+) -> set[str]:
+    """Filenames reserved under ``pre-processed/{category}/in-flight/*/``."""
+    prefix = f"{_normalize_prefix(pre_processed_prefix)}in-flight/"
+    names: set[str] = set()
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel = key[len(prefix) :]
+            if "/" not in rel:
+                continue
+            filename = rel.split("/", 1)[1]
+            if _is_image_key(filename):
+                names.add(filename)
+    return names
+
+
+def _post_processed_png_stems(client, bucket: str, images_prefix: str) -> set[str]:
+    stems: set[str] = set()
+    for key in list_object_keys(
+        client,
+        bucket,
+        images_prefix,
+        exclude_relative_prefixes=("used/", "in-flight/"),
+    ):
+        name = key.rsplit("/", 1)[-1]
+        if name.startswith(".") or not name.lower().endswith(".png"):
+            continue
+        rel = key[len(_normalize_prefix(images_prefix)) :]
+        if "/" in rel:
+            continue
+        stems.add(Path(name).stem)
+    return stems
+
+
+def list_claimable_pre_processed_keys(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+    images_prefix: str,
+    force: bool = False,
+) -> list[str]:
+    """Keys in the pre-processed pool available to claim (not used, in-flight, or already extended)."""
+    pre_processed_prefix = _normalize_prefix(pre_processed_prefix)
+    reserved = list_in_flight_pre_processed_names(client, bucket, pre_processed_prefix)
+    existing_stems = set() if force else _post_processed_png_stems(client, bucket, images_prefix)
+    keys: list[str] = []
+    for key in list_object_keys(
+        client,
+        bucket,
+        pre_processed_prefix,
+        exclude_relative_prefixes=("used/", "in-flight/"),
+    ):
+        rel = key[len(pre_processed_prefix) :]
+        if "/" in rel or rel.endswith(".gitkeep"):
+            continue
+        if not _is_image_key(rel):
+            continue
+        if rel in reserved:
+            continue
+        if not force and Path(rel).stem in existing_stems:
+            continue
+        keys.append(key)
+    return keys
+
+
+def claim_pre_processed_on_r2(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+    images_prefix: str,
+    execution_id: str,
+    force: bool = False,
+) -> str | None:
+    """Atomically reserve one pre-processed photo for extend (copy → in-flight/, delete source).
+
+    Returns the claimed filename, or ``None`` when nothing is available.
+  Safe for parallel workers: races retry the next candidate.
+    """
+    available = list_claimable_pre_processed_keys(
+        client,
+        bucket,
+        pre_processed_prefix=pre_processed_prefix,
+        images_prefix=images_prefix,
+        force=force,
+    )
+    if not available:
+        return None
+    random.shuffle(available)
+    for src_key in available:
+        filename = src_key.rsplit("/", 1)[-1]
+        dest_key = pre_processed_in_flight_key(pre_processed_prefix, execution_id, filename)
+        if not object_exists(client, bucket, src_key):
+            continue
+        try:
+            copy_then_delete_object(client, bucket, src_key, dest_key)
+        except client.exceptions.ClientError:
+            continue
+        if object_exists(client, bucket, dest_key):
+            return filename
+    return None
+
+
+def release_pre_processed_claim(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+    execution_id: str,
+    filename: str,
+) -> bool:
+    """Return a claimed pre-processed photo to the pool after a failed extend."""
+    src = pre_processed_in_flight_key(pre_processed_prefix, execution_id, filename)
+    dest = f"{_normalize_prefix(pre_processed_prefix)}{filename}"
+    if not object_exists(client, bucket, src):
+        return object_exists(client, bucket, dest)
+    try:
+        copy_then_delete_object(client, bucket, src, dest)
+        return True
+    except client.exceptions.ClientError:
+        return False
+
+
+def retire_claimed_pre_processed_on_r2(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+    used_pre_processed_prefix: str,
+    execution_id: str,
+    filename: str,
+) -> bool:
+    """Move a claimed pre-processed source from in-flight to ``used/`` after success."""
+    in_flight = pre_processed_in_flight_key(pre_processed_prefix, execution_id, filename)
+    dest_key = f"{_normalize_prefix(used_pre_processed_prefix)}{filename}"
+    if not object_exists(client, bucket, in_flight):
+        return object_exists(client, bucket, dest_key)
+    if object_exists(client, bucket, dest_key):
+        client.delete_object(Bucket=bucket, Key=in_flight)
+    else:
+        copy_then_delete_object(client, bucket, in_flight, dest_key)
+    return object_exists(client, bucket, dest_key) and not object_exists(client, bucket, in_flight)
 
 
 def list_in_flight_background_names(client, bucket: str, images_prefix: str) -> set[str]:

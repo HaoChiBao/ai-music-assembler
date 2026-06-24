@@ -5,16 +5,16 @@ from __future__ import annotations
 import os
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from music_assembler import __version__
-
+from music_assembler.assemble_options import normalize_channel
 from music_assembler.api.auth import require_api_auth
 from music_assembler.api.config import ApiSettings
 from music_assembler.api.dashboard_auth import (
@@ -28,27 +28,47 @@ from music_assembler.api import job_cancel
 from music_assembler.api import job_runs
 from music_assembler.api import job_status
 from music_assembler.api import r2_catalog
+from music_assembler.api import uploader_client
 from music_assembler.api.cache import dashboard_cache
 from music_assembler.api.media import stream_r2_object
+from music_assembler.api.openapi_docs import install_openapi_docs
 from music_assembler.api.progress_store import read_progress_json, write_meta_json, write_progress_json
 from music_assembler.api.progress_store import patch_meta_gcp_execution_id
-from music_assembler.extend_from_r2 import count_pending_r2_sources, pending_r2_sources
+from music_assembler.extend_from_r2 import count_pending_r2_sources
 from music_assembler.r2_storage import r2_client, r2_config_from_env
 
 app = FastAPI(
     title="Music Assembly API",
-    description="Trigger Cloud Run assembly jobs, monitor progress, browse R2 outputs.",
-    version="0.1.0",
+    description="Trigger Cloud Run assembly/extend jobs, monitor progress, browse R2 outputs.",
+    version=__version__,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 
 class StartJobRequest(BaseModel):
-    category: str | None = None
-    channel: str | None = None
-    thumbnail_text: str | None = None
-    duration_min: int | None = Field(default=None, ge=15, le=240)
-    variance_min: int | None = Field(default=None, ge=0, le=60)
-    count: int = Field(default=1, ge=1, le=10)
+    category: str | None = Field(
+        default=None,
+        description="R2 category folder (defaults to ASSEMBLY_CATEGORY).",
+        examples=["korean"],
+    )
+    channel: str | None = Field(
+        default=None,
+        description="YouTube channel slug — output path music-video/{channel}/.",
+        examples=["nappabeats"],
+    )
+    thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["OMYO"])
+    duration_min: int | None = Field(default=None, ge=15, le=240, description="Target mix length in minutes.")
+    variance_min: int | None = Field(default=None, ge=0, le=60, description="Random length variance (+/- minutes).")
+    count: int = Field(default=1, ge=1, le=10, description="Parallel assembly jobs to start (one video each).")
+    queue_youtube: bool = Field(
+        default=True,
+        description=(
+            "After encode + R2 upload, register the video on the youtube-uploader pending queue "
+            "(default on; set false to skip). Requires UPLOADER_API_* on the music-assemble worker."
+        ),
+    )
 
     @field_validator("channel")
     @classmethod
@@ -59,19 +79,22 @@ class StartJobRequest(BaseModel):
 
 
 class StartExtendRequest(BaseModel):
-    category: str | None = None
-    limit: int | None = Field(default=1, ge=1, le=20)
-    process_all: bool = False
-    force: bool = False
-    parallel: bool = True
+    category: str | None = Field(default=None, description="R2 category (defaults to ASSEMBLY_CATEGORY).")
+    limit: int | None = Field(default=1, ge=1, le=20, description="Images per batch when process_all is false.")
+    process_all: bool = Field(default=False, description="Extend every pending pre-processed image.")
+    force: bool = Field(default=False, description="Include images that would normally be skipped.")
+    parallel: bool = Field(
+        default=True,
+        description="When limit>1, start one Cloud Run Job per image (recommended).",
+    )
 
 
 class DashboardLoginRequest(BaseModel):
-    password: str
+    password: str = Field(description="Value of ASSEMBLY_DASHBOARD_PASSWORD.")
 
 
 class CancelJobRequest(BaseModel):
-    confirm: bool = False
+    confirm: bool = Field(default=False, description="Set true to cancel; false returns a preview only.")
 
 
 def _settings() -> ApiSettings:
@@ -114,57 +137,147 @@ def _invalidate_category_cache(category: str) -> None:
     dashboard_cache.invalidate_prefix(_cache_key("assets", category))
 
 
-def _queue_extend_job(
-    background_tasks: BackgroundTasks | None,
+def _queue_extend_job_local(
     client,
     bucket: str,
     *,
     execution_id: str,
     category: str,
-    source_keys: list[str],
+    max_images: int | None,
     force: bool,
-    image_name: str | None = None,
-    spawn_thread: bool = False,
 ) -> dict[str, Any]:
-    stage = f"Queued — {image_name or source_keys[0].rsplit('/', 1)[-1]}…"
+    label = (
+        f"{max_images} image(s)"
+        if max_images is not None and max_images != 1
+        else "next pending image"
+    )
     write_meta_json(
         client,
         bucket,
         execution_id,
         category=category,
         job_type="extend",
-        limit=1,
-        process_all=False,
+        limit=max_images,
+        process_all=max_images is None,
     )
     write_progress_json(
         client,
         bucket,
         execution_id,
         pct=0,
-        stage=stage,
+        stage=f"Queued locally — {label}…",
         category=category,
         status="running",
-        extra={"job_type": "extend", "source_key": source_keys[0] if source_keys else None},
+        extra={"job_type": "extend", "host": "local"},
     )
-    task_kwargs = dict(
-        execution_id=execution_id,
-        category=category,
-        limit=1,
-        process_all=False,
-        force=force,
-        source_keys=source_keys,
-    )
-    if spawn_thread:
-        threading.Thread(target=run_extend_job, kwargs=task_kwargs, daemon=True).start()
-    elif background_tasks is not None:
-        background_tasks.add_task(run_extend_job, **task_kwargs)
-    else:
-        threading.Thread(target=run_extend_job, kwargs=task_kwargs, daemon=True).start()
+    threading.Thread(
+        target=run_extend_job,
+        kwargs={
+            "execution_id": execution_id,
+            "category": category,
+            "max_images": max_images,
+            "force": force,
+        },
+        daemon=True,
+    ).start()
     return {
         "execution_id": execution_id,
         "status": "running",
         "category": category,
-        "source_key": source_keys[0] if source_keys else None,
+        "max_images": max_images,
+        "host": "local",
+    }
+
+
+def _queue_extend_job(
+    client,
+    bucket: str,
+    settings: ApiSettings,
+    *,
+    execution_id: str,
+    category: str,
+    max_images: int | None,
+    force: bool,
+    exclude_gcp_ids: set[str],
+) -> dict[str, Any]:
+    if not settings.extend_use_gcp:
+        return _queue_extend_job_local(
+            client,
+            bucket,
+            execution_id=execution_id,
+            category=category,
+            max_images=max_images,
+            force=force,
+        )
+    label = (
+        f"{max_images} image(s)"
+        if max_images is not None and max_images != 1
+        else "next pending image"
+    )
+    write_meta_json(
+        client,
+        bucket,
+        execution_id,
+        category=category,
+        job_type="extend",
+        limit=max_images,
+        process_all=max_images is None,
+    )
+    write_progress_json(
+        client,
+        bucket,
+        execution_id,
+        pct=0,
+        stage=f"Queued on Cloud Run — {label}…",
+        category=category,
+        status="running",
+        extra={"job_type": "extend"},
+    )
+    try:
+        result = gcp_jobs.start_extend_job(
+            settings,
+            execution_id=execution_id,
+            category=category,
+            max_images=max_images,
+            force=force,
+            exclude_gcp_ids=exclude_gcp_ids,
+        )
+    except Exception as e:
+        write_progress_json(
+            client,
+            bucket,
+            execution_id,
+            pct=0,
+            stage=f"Failed to start: {e}",
+            category=category,
+            status="failed",
+            extra={"job_type": "extend"},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to start Cloud Run extend job ({execution_id}): {e}",
+        ) from e
+    gcp_id = result.get("gcp_execution_id")
+    if gcp_id:
+        exclude_gcp_ids.add(gcp_id)
+        patch_meta_gcp_execution_id(client, bucket, execution_id, gcp_id)
+        write_progress_json(
+            client,
+            bucket,
+            execution_id,
+            pct=1,
+            stage="Cloud Run execution started…",
+            category=category,
+            status="running",
+            extra={"job_type": "extend"},
+        )
+    return {
+        "execution_id": execution_id,
+        "status": "running",
+        "category": category,
+        "gcp_execution_id": gcp_id,
+        "max_images": max_images,
+        "host": "cloud_run",
     }
 
 
@@ -192,6 +305,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
         "gcp_project": settings.gcp_project,
         "gcp_region": settings.gcp_region,
         "assembly_job": settings.assembly_job_name,
+        "extend_job": settings.extend_job_name,
         "default_category": settings.default_category,
         "configured_channels": list(settings.configured_channels),
         "auth": {
@@ -238,7 +352,7 @@ def dashboard_summary(
         jobs = gcp_jobs.list_executions(settings, limit=10)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    videos = r2_catalog.list_videos(client, bucket, category=cat, limit=5)
+    videos = r2_catalog.list_videos(client, bucket, limit=5)
     inventory = r2_catalog.category_inventory(client, bucket, cat)
     return {
         "category": cat,
@@ -256,6 +370,11 @@ def start_job(
 ) -> dict[str, Any]:
     category = (body.category or settings.default_category).strip()
     channel = body.channel
+    if not channel or not str(channel).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="channel is required (YouTube channel slug for music-video/{channel}/ output)",
+        )
     client, bucket = _r2()
     _invalidate_category_cache(category)
 
@@ -291,6 +410,7 @@ def start_job(
                 thumbnail_text=body.thumbnail_text,
                 duration_min=body.duration_min,
                 variance_min=body.variance_min,
+                queue_youtube=body.queue_youtube,
                 exclude_gcp_ids=assigned_gcp,
             )
         except Exception as e:
@@ -382,17 +502,16 @@ def list_r2_runs(
 
 @app.get("/v1/media/thumbnail")
 def media_thumbnail(
-    category: str,
+    channel: str,
     video_id: str,
-    channel: str | None = None,
     _auth: None = Depends(require_api_auth),
 ) -> Response:
     """Stable thumbnail URL for the dashboard (avoids presigned URL churn)."""
     client, bucket = _r2()
-    ch = normalize_channel(channel) if channel else None
-    key = r2_catalog.find_thumbnail_key(
-        client, bucket, category=category, video_id=video_id, channel=ch
-    )
+    ch = normalize_channel(channel)
+    if not ch:
+        raise HTTPException(status_code=400, detail="Invalid channel")
+    key = r2_catalog.find_thumbnail_key(client, bucket, video_id=video_id, channel=ch)
     if not key:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     resp = client.get_object(Bucket=bucket, Key=key)
@@ -406,17 +525,16 @@ def media_thumbnail(
 @app.get("/v1/media/video")
 def media_video(
     request: Request,
-    category: str,
+    channel: str,
     video_id: str,
-    channel: str | None = None,
     _auth: None = Depends(require_api_auth),
 ) -> Response:
     """Stream MP4 with Range support for in-browser preview."""
     client, bucket = _r2()
-    ch = normalize_channel(channel) if channel else None
-    key = r2_catalog.find_video_key(
-        client, bucket, category=category, video_id=video_id, channel=ch
-    )
+    ch = normalize_channel(channel)
+    if not ch:
+        raise HTTPException(status_code=400, detail="Invalid channel")
+    key = r2_catalog.find_video_key(client, bucket, video_id=video_id, channel=ch)
     if not key:
         raise HTTPException(status_code=404, detail="Video not found")
     return stream_r2_object(
@@ -527,7 +645,7 @@ def dashboard_snapshot(
     category: str | None = None,
     light: bool = Query(default=False, description="Jobs only — skip stats"),
     refresh: bool = Query(default=False, description="Bypass stats cache; reconcile GCP job status"),
-    job_limit: int = Query(default=25, ge=1, le=100),
+    job_limit: int = Query(default=100, ge=1, le=200),
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> JSONResponse:
@@ -535,12 +653,22 @@ def dashboard_snapshot(
     cat = category or settings.default_category
     client, bucket = _r2()
 
-    asm_raw = job_runs.list_r2_job_runs(client, bucket, id_prefix="asm_", limit=job_limit)
-    ext_raw = job_runs.list_r2_job_runs(client, bucket, id_prefix="ext_", limit=job_limit)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        asm_future = pool.submit(
+            job_runs.list_r2_job_runs, client, bucket, id_prefix="asm_", limit=job_limit
+        )
+        ext_future = pool.submit(
+            job_runs.list_r2_job_runs, client, bucket, id_prefix="ext_", limit=job_limit
+        )
+        asm_raw = asm_future.result()
+        ext_raw = ext_future.result()
+
     assembly_runs = job_status.reconcile_assembly_runs(
         settings, client, bucket, asm_raw, patch_r2=True
     )
-    extend_runs = job_status.reconcile_extend_runs(ext_raw)
+    extend_runs = job_status.reconcile_extend_runs(
+        settings, client, bucket, ext_raw, patch_r2=True
+    )
     has_running = job_status.has_running_jobs(assembly_runs) or job_status.has_running_jobs(
         extend_runs
     )
@@ -581,42 +709,34 @@ def dashboard_snapshot(
 @app.post("/v1/extend/jobs")
 def start_extend(
     body: StartExtendRequest,
-    background_tasks: BackgroundTasks,
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
-    if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
-        raise HTTPException(
-            status_code=503,
-            detail="GEMINI_API_KEY is not configured on this API service",
-        )
     category = (body.category or settings.default_category).strip()
     client, bucket = _r2()
     _invalidate_category_cache(category)
     cfg = r2_config_from_env(category=category)
-    pending_keys = pending_r2_sources(client, cfg, force=body.force)
-    pending = len(pending_keys)
+    pending = count_pending_r2_sources(client, cfg, force=body.force)
     if pending == 0:
         raise HTTPException(status_code=409, detail="No pending pre-processed images on R2")
 
     batch = pending if body.process_all else min(body.limit or 1, pending)
-    batch_keys = pending_keys[:batch]
+    assigned_gcp: set[str] = set()
+    jobs: list[dict[str, Any]] = []
 
-    if body.parallel and len(batch_keys) > 1:
-        jobs: list[dict[str, Any]] = []
-        for key in batch_keys:
+    if body.parallel and batch > 1:
+        for _ in range(batch):
             execution_id = _new_extend_id()
             jobs.append(
                 _queue_extend_job(
-                    background_tasks,
                     client,
                     bucket,
+                    settings,
                     execution_id=execution_id,
                     category=category,
-                    source_keys=[key],
+                    max_images=1,
                     force=body.force,
-                    image_name=Path(key).name,
-                    spawn_thread=True,
+                    exclude_gcp_ids=assigned_gcp,
                 )
             )
         return {
@@ -625,28 +745,27 @@ def start_extend(
             "batch_size": len(jobs),
             "category": category,
             "pending": pending,
+            "host": "cloud_run",
         }
 
     execution_id = _new_extend_id()
+    max_images = None if body.process_all else batch
     job = _queue_extend_job(
-        background_tasks,
         client,
         bucket,
+        settings,
         execution_id=execution_id,
         category=category,
-        source_keys=batch_keys,
+        max_images=max_images,
         force=body.force,
-        image_name=(
-            f"{len(batch_keys)} image(s)"
-            if len(batch_keys) != 1
-            else Path(batch_keys[0]).name
-        ),
+        exclude_gcp_ids=assigned_gcp,
     )
     return {
         **job,
         "parallel": False,
         "pending": pending,
-        "batch_size": len(batch_keys),
+        "batch_size": batch,
+        "host": "cloud_run",
     }
 
 
@@ -782,44 +901,50 @@ def list_channels(
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
-    """Configured + R2-discovered YouTube channel folders for a category."""
+    """YouTube uploader channels + R2-discovered folders for assembly ``channel`` slugs."""
     cat = category or settings.default_category
     client, bucket = _r2()
-    discovered = r2_catalog.discover_channels(client, bucket, cat)
-    merged = sorted(set(settings.configured_channels) | set(discovered))
+    discovered = r2_catalog.discover_video_channels(client, bucket)
+    uploader_rows = uploader_client.fetch_uploader_channels(settings)
+    channels, channel_details = uploader_client.merge_channel_list(
+        uploader_channels=uploader_rows,
+        configured=settings.configured_channels,
+        discovered=discovered,
+    )
     return {
         "category": cat,
-        "channels": merged,
+        "channels": channels,
+        "channel_details": channel_details,
         "configured": list(settings.configured_channels),
         "discovered": discovered,
+        "uploader": {
+            "configured": bool(settings.uploader_api_url and settings.uploader_api_key),
+            "count": len(uploader_rows),
+        },
     }
 
 
 @app.get("/v1/videos")
 def list_videos(
-    category: str | None = None,
     channel: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     summary: bool = Query(default=True, description="Metadata only — no title/description reads"),
     _auth: None = Depends(require_api_auth),
-    settings: ApiSettings = Depends(_settings),
 ) -> JSONResponse:
-    cat = category or settings.default_category
     ch = normalize_channel(channel) if channel else None
-    cache_key = _cache_key("videos", cat, ch or "all", "summary" if summary else "full", str(limit))
+    cache_key = _cache_key("videos", ch or "all", "summary" if summary else "full", str(limit))
 
     def load() -> dict[str, Any]:
         client, bucket = _r2()
         videos = r2_catalog.list_videos(
             client,
             bucket,
-            category=cat,
             channel=ch,
             limit=limit,
             stable_media_urls=True,
             summary_only=summary,
         )
-        return {"category": cat, "channel": ch, "videos": videos, "count": len(videos), "summary": summary}
+        return {"channel": ch, "videos": videos, "count": len(videos), "summary": summary}
 
     data, hit = dashboard_cache.get_or_set(cache_key, 60.0 if summary else 30.0, load)
     return JSONResponse(
@@ -831,15 +956,12 @@ def list_videos(
 @app.get("/v1/videos/{video_id}")
 def get_video(
     video_id: str,
-    category: str | None = None,
     channel: str | None = None,
     _auth: None = Depends(require_api_auth),
-    settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
-    cat = category or settings.default_category
     ch = normalize_channel(channel) if channel else None
     client, bucket = _r2()
-    row = r2_catalog.get_video(client, bucket, category=cat, video_id=video_id, channel=ch)
+    row = r2_catalog.get_video(client, bucket, video_id=video_id, channel=ch)
     if row is None:
         raise HTTPException(status_code=404, detail="Video not found")
     return row
@@ -867,14 +989,14 @@ def dashboard_logout() -> JSONResponse:
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def dashboard_page(
     request: Request,
     settings: ApiSettings = Depends(_settings),
 ) -> str:
     if not has_dashboard_session(request, settings):
         return _LOGIN_HTML
-    return _DASHBOARD_HTML
+    return _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category)
 
 
 _LOGIN_HTML = """<!DOCTYPE html>
@@ -883,49 +1005,99 @@ _LOGIN_HTML = """<!DOCTYPE html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Music Assembly</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@300;400&display=swap" rel="stylesheet"/>
   <style>
+    /* Style per DESIGN.md */
+    :root {
+      --color-linen: #fafffa;
+      --color-obsidian-ink: #121613;
+      --color-pure-black: #000000;
+      --color-bark: #232924;
+      --color-sage: #516254;
+      --color-mist: #c8d2c8;
+      --color-voltage: #2bee4b;
+      --font-ui: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      --font-editorial: 'Playfair Display', Georgia, serif;
+      --radius-cards: 14px;
+      --radius-buttons: 10px;
+      --shadow-cta: rgba(16, 94, 29, 0.45) 1px 8px 20px 0px, rgba(18, 146, 39, 0.25) 1px 8px 20px 0px;
+    }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      background: #000;
-      color: #fff;
-      font-family: system-ui, sans-serif;
+      background: var(--color-linen);
+      color: var(--color-obsidian-ink);
+      font-family: var(--font-ui);
+      font-size: 16px;
+      line-height: 1.4;
+      letter-spacing: -0.32px;
       display: flex;
       align-items: center;
       justify-content: center;
+      padding: 50px 20px;
     }
-    .box { text-align: center; width: min(320px, 90vw); }
-    h1 { font-size: 1.25rem; font-weight: 500; margin: 0 0 1.5rem; letter-spacing: 0.02em; }
+    .login-wrap { width: min(420px, 100%); }
+    .wordmark {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      margin: 0 0 40px;
+    }
+    .wordmark-a { color: var(--color-obsidian-ink); }
+    .wordmark-b { color: var(--color-voltage); }
+    h1 {
+      font-family: var(--font-editorial);
+      font-size: 48px;
+      font-weight: 300;
+      line-height: 0.9;
+      letter-spacing: -0.48px;
+      margin: 0 0 20px;
+      color: var(--color-obsidian-ink);
+    }
+    .lead { color: var(--color-sage); font-size: 16px; font-weight: 400; margin: 0 0 32px; }
     input {
       width: 100%;
-      background: #000;
-      color: #fff;
-      border: 1px solid #fff;
-      padding: 0.75rem 1rem;
+      background: var(--color-linen);
+      color: var(--color-obsidian-ink);
+      border: 1px solid var(--color-mist);
+      border-radius: var(--radius-buttons);
+      padding: 14px 16px;
       font: inherit;
-      margin-bottom: 1rem;
+      margin-bottom: 20px;
     }
-    input:focus { outline: 1px solid #fff; outline-offset: 2px; }
-    button {
+    input:focus {
+      outline: none;
+      border-color: var(--color-obsidian-ink);
+    }
+    .btn-voltage {
       width: 100%;
-      background: #fff;
-      color: #000;
+      background: var(--color-voltage);
+      color: var(--color-obsidian-ink);
       border: none;
-      padding: 0.75rem 1rem;
-      font: inherit;
+      border-radius: var(--radius-buttons);
+      padding: 20px 50px;
+      font-size: 14px;
       font-weight: 600;
+      letter-spacing: 0.14px;
+      text-transform: uppercase;
       cursor: pointer;
+      box-shadow: var(--shadow-cta);
     }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    #err { color: #fff; font-size: 0.85rem; margin-top: 1rem; min-height: 1.2em; opacity: 0.85; }
+    .btn-voltage:hover { filter: brightness(1.03); }
+    .btn-voltage:disabled { opacity: 0.45; cursor: not-allowed; }
+    #err { color: var(--color-sage); font-size: 14px; margin-top: 20px; min-height: 1.2em; }
   </style>
 </head>
 <body>
-  <div class="box">
-    <h1>Enter password</h1>
+  <div class="login-wrap">
+    <p class="wordmark"><span class="wordmark-a">Music</span><span class="wordmark-b">Assembly</span></p>
+    <h1>Sign in</h1>
+    <p class="lead">Enter your dashboard password to continue.</p>
     <form id="loginForm">
-      <input type="password" id="password" autocomplete="current-password" autofocus />
-      <button type="submit" id="submitBtn">Continue</button>
+      <input type="password" id="password" autocomplete="current-password" autofocus placeholder="Password" />
+      <button type="submit" class="btn-voltage" id="submitBtn">Continue →</button>
     </form>
     <p id="err"></p>
   </div>
@@ -965,102 +1137,498 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Music Assembly</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@300;400&display=swap" rel="stylesheet"/>
   <style>
-    :root { --bg:#fff; --card:#fff; --text:#000; --muted:#666; --border:#000; --bar-bg:#e5e5e5; }
-    * { box-sizing:border-box; }
-    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin:0 auto; padding:1.5rem; max-width:1200px; width:100%; box-sizing:border-box; }
-    h1, h2 { font-weight:600; }
-    h1 { margin:0 0 .5rem; font-size:1.5rem; }
-    h2 { margin:0 0 .75rem; font-size:1.1rem; }
-    .muted { color: var(--muted); font-size:.9rem; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:1rem; margin:1rem 0; }
-    .card { background:var(--card); border:1px solid var(--border); padding:1rem; }
-    button, select, input { background:#fff; color:var(--text); border:1px solid var(--border); padding:.5rem .75rem; font:inherit; }
-    button { cursor:pointer; background:#000; color:#fff; border-color:#000; font-weight:600; }
-    button:hover { background:#333; }
-    button:disabled { opacity:.4; cursor:not-allowed; }
-    button.secondary { background:#fff; color:#000; border:1px solid #000; }
-    button.secondary:hover { background:#f0f0f0; }
-    table { width:100%; border-collapse:collapse; font-size:.85rem; }
-    th, td { text-align:left; padding:.5rem; border-bottom:1px solid #ccc; }
-    th { border-bottom:2px solid #000; font-weight:600; }
-    .bar { height:6px; background:var(--bar-bg); overflow:hidden; margin-top:.25rem; border:1px solid #ccc; }
-    .bar > span { display:block; height:100%; background:#000; transition:width .3s; }
-    .status-running { font-weight:600; }
-    .status-succeeded { font-weight:600; }
-    .status-failed { font-weight:600; text-decoration:underline; }
-    .status-cancelled { font-weight:600; color:var(--muted); }
-    .status-cancelling { font-weight:600; }
-    .status-unknown { color:var(--muted); }
+    /* Style per DESIGN.md — see repo DESIGN.md for tokens and component rules */
+    :root {
+      --color-linen: #fafffa;
+      --color-obsidian-ink: #121613;
+      --color-pure-black: #000000;
+      --color-bark: #232924;
+      --color-sage: #516254;
+      --color-mist: #c8d2c8;
+      --color-voltage: #2bee4b;
+      --color-moss-glow: #93b799;
+      --color-pollen: #c4e4c9;
+      --font-ui: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      --font-editorial: 'Playfair Display', Georgia, serif;
+      --radius-cards: 14px;
+      --radius-images: 14px;
+      --radius-buttons: 10px;
+      --radius-small: 5px;
+      --shadow-cta: rgba(16, 94, 29, 0.45) 1px 8px 20px 0px, rgba(18, 146, 39, 0.25) 1px 8px 20px 0px;
+      --page-max-width: 1440px;
+      --section-gap: 36px;
+      --card-padding: 14px;
+      --element-gap: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: var(--font-ui);
+      font-size: 16px;
+      line-height: 1.4;
+      letter-spacing: -0.32px;
+      background: var(--color-linen);
+      color: var(--color-obsidian-ink);
+      margin: 0;
+      padding: 0 0 56px;
+    }
+    .page {
+      max-width: var(--page-max-width);
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+    h2, h3 {
+      font-family: var(--font-editorial);
+      font-weight: 300;
+      color: var(--color-obsidian-ink);
+    }
+    h2 {
+      font-size: clamp(22px, 3vw, 30px);
+      line-height: 0.95;
+      letter-spacing: -0.3px;
+      margin: 0 0 12px;
+    }
+    h2::after {
+      content: '';
+      display: block;
+      width: 40px;
+      height: 2px;
+      background: var(--color-voltage);
+      margin-top: 10px;
+    }
+    h3 {
+      font-size: 16px;
+      line-height: 1.3;
+      letter-spacing: -0.16px;
+      margin: 12px 0 8px;
+    }
+    h3::after { display: none; }
+    .muted {
+      color: var(--color-sage);
+      font-size: 14px;
+      line-height: 1.4;
+      letter-spacing: -0.28px;
+    }
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 12px 0;
+      margin-bottom: 8px;
+    }
+    .wordmark {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      margin: 0;
+    }
+    .wordmark-a { color: var(--color-obsidian-ink); }
+    .wordmark-b { color: var(--color-voltage); }
+    .nav-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .nav-mark { color: var(--color-voltage); font-size: 14px; font-weight: 600; letter-spacing: -0.05em; }
+    .hero { margin-bottom: 0; }
+    .hero-display {
+      font-family: var(--font-editorial);
+      font-size: clamp(28px, 4.5vw, 44px);
+      font-weight: 300;
+      line-height: 0.95;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+      color: var(--color-obsidian-ink);
+    }
+    .page-lead { margin: 0; max-width: 36rem; font-size: 14px; }
+    .section-divider {
+      border: 0;
+      height: 0;
+      border-top: 1px solid var(--color-mist);
+      margin: var(--section-gap) 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: var(--element-gap);
+      margin-bottom: 0;
+    }
+    .card {
+      background: var(--color-linen);
+      border: none;
+      border-radius: var(--radius-cards);
+      box-shadow: none;
+      padding: var(--card-padding);
+    }
+    .card label {
+      display: block;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.11px;
+      color: var(--color-sage);
+      margin-bottom: 12px;
+    }
+    .card p { margin: 0 0 12px; }
+    button, select, input {
+      font-family: var(--font-ui);
+      font-size: 14px;
+      letter-spacing: -0.28px;
+      border-radius: var(--radius-buttons);
+    }
+    select, input {
+      background: var(--color-linen);
+      color: var(--color-obsidian-ink);
+      border: 1px solid var(--color-mist);
+      padding: 8px 12px;
+      width: 100%;
+      margin-top: 4px;
+    }
+    select:focus, input:focus {
+      outline: none;
+      border-color: var(--color-obsidian-ink);
+    }
+    button {
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      padding: 0;
+      font-weight: 400;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-voltage, #runBtn {
+      display: inline-block;
+      background: var(--color-voltage);
+      color: var(--color-obsidian-ink);
+      border: none;
+      border-radius: var(--radius-buttons);
+      padding: 12px 28px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.14px;
+      text-transform: uppercase;
+      box-shadow: var(--shadow-cta);
+    }
+    .btn-voltage:hover, #runBtn:hover { filter: brightness(1.03); }
+    .btn-ghost, button.secondary, .tab, .subtab, button.copy-btn, button.danger {
+      background: transparent;
+      color: var(--color-obsidian-ink);
+      border: none;
+      padding: 4px 0;
+      font-size: 14px;
+      font-weight: 400;
+      text-decoration: none;
+      text-underline-offset: 3px;
+    }
+    .btn-ghost:hover, button.secondary:hover, .tab:hover, .subtab:hover,
+    button.copy-btn:hover, button.danger:hover:not(:disabled) {
+      text-decoration: underline;
+    }
+    button.danger:disabled { text-decoration: none; opacity: 0.4; }
+    .tab, .subtab { padding: 8px 0; margin-right: 20px; }
+    .tab.active, .subtab.active {
+      color: var(--color-voltage);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td {
+      text-align: left;
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--color-mist);
+      vertical-align: top;
+    }
+    th {
+      font-weight: 600;
+      color: var(--color-sage);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.11px;
+    }
+    .bar {
+      height: 6px;
+      background: var(--color-pollen);
+      overflow: hidden;
+      margin-top: 8px;
+      border-radius: var(--radius-small);
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      background: var(--color-voltage);
+      transition: width 0.3s;
+    }
+    .status-running { font-weight: 600; color: var(--color-obsidian-ink); }
+    .status-succeeded { font-weight: 500; color: var(--color-bark); }
+    .status-failed { font-weight: 600; color: var(--color-bark); text-decoration: underline; }
+    .status-cancelled { font-weight: 400; color: var(--color-sage); }
+    .status-cancelling { font-weight: 600; color: var(--color-bark); }
+    .status-unknown { color: var(--color-sage); }
     tr.is-running .bar > span { animation: barPulse 1.6s ease-in-out infinite; }
-    @keyframes barPulse { 0%,100% { opacity:1; } 50% { opacity:0.45; } }
-    .job-stage { display:block; font-size:.78rem; margin-top:.2rem; max-width:320px; word-break:break-word; }
-    .job-updated { font-size:.72rem; color:var(--muted); }
-    .videos { display:grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap:1rem; }
-    .videos .video-card img { width:100%; aspect-ratio:16/9; object-fit:cover; background:#eee; border:1px solid #ccc; }
-    #authError { display:none; margin:.75rem 0; padding:.75rem 1rem; border:1px solid #000; background:#f5f5f5; }
-    #authError.visible { display:block; }
-    .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
-    .logout { background:#fff; color:#000; border:1px solid #000; font-size:.85rem; padding:.35rem .75rem; }
-    code { background:#f0f0f0; padding:.1em .35em; font-size:.9em; }
-    pre { white-space:pre-wrap; word-break:break-word; }
-    .tabs { display:flex; gap:.5rem; flex-wrap:wrap; margin:1rem 0; border-bottom:2px solid #000; padding-bottom:.5rem; }
-    .tab { background:#fff; color:#000; border:1px solid #000; padding:.4rem .9rem; font-size:.9rem; }
-    .tab.active { background:#000; color:#fff; }
-    .panel { display:none; }
-    .panel.active { display:block; }
-    .obs-bar { position:sticky; bottom:0; margin:1.5rem -1.5rem -1.5rem; padding:.6rem 1.5rem; background:#111; color:#eee; font-size:.75rem; border-top:1px solid #333; display:flex; flex-wrap:wrap; align-items:center; gap:.25rem 1rem; }
-    .obs-bar span { margin-right:0; }
-    .obs-version { margin-left:auto; color:#aaa; font-family: ui-monospace, monospace; font-size:.7rem; white-space:nowrap; }
-    .obs-hit { color:#8f8; }
-    .obs-miss { color:#fa8; }
-    .list-row { display:flex; justify-content:space-between; align-items:center; padding:.5rem 0; border-bottom:1px solid #ddd; cursor:pointer; gap:.5rem; }
-    .list-row:hover { background:#f8f8f8; }
-    .badges { display:flex; gap:.35rem; flex-wrap:wrap; }
-    .badge { font-size:.7rem; border:1px solid #999; padding:.1rem .4rem; border-radius:2px; }
-    .detail { display:none; padding:.75rem 0 .5rem; border-bottom:2px solid #000; margin-bottom:.5rem; }
-    .detail.open { display:block; }
-    .detail video { width:100%; max-height:420px; background:#000; margin:.5rem 0; }
-    .detail .desc { max-height:200px; overflow:auto; font-size:.85rem; white-space:pre-wrap; background:#f5f5f5; padding:.5rem; border:1px solid #ddd; }
-    .asset-table { max-height:400px; overflow:auto; }
-    .modal { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center; justify-content:center; z-index:100; padding:1rem; }
-    .modal.open { display:flex; }
-    .modal-inner { background:#fff; max-width:min(960px,100%); max-height:90vh; overflow:auto; padding:1rem; position:relative; }
-    .modal img { max-width:100%; height:auto; display:block; }
-    .modal-close { position:absolute; top:.5rem; right:.5rem; background:#000; color:#fff; border:none; width:2rem; height:2rem; cursor:pointer; }
-    .subtabs { display:flex; gap:.35rem; flex-wrap:wrap; margin-bottom:.75rem; }
-    .subtab { font-size:.8rem; padding:.25rem .6rem; }
-    .subtab.active { background:#000; color:#fff; }
-    .loading { color:var(--muted); font-style:italic; }
-    .cancel-confirm { display:flex; gap:.35rem; flex-wrap:wrap; align-items:center; margin-top:.35rem; }
-    .cancel-confirm .warn { font-size:.78rem; color:#900; }
-    button.danger { background:#900; border-color:#900; }
-    button.danger:hover { background:#b00; }
+    @keyframes barPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    .job-stage { display: block; font-size: 12px; margin-top: 4px; word-break: break-word; white-space: pre-wrap; color: var(--color-sage); }
+    .job-updated { font-size: 12px; color: var(--color-sage); }
+    .videos { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
+    .videos .video-card img {
+      width: 100%;
+      aspect-ratio: 16/9;
+      object-fit: cover;
+      background: var(--color-mist);
+      border: none;
+      border-radius: var(--radius-images);
+      filter: grayscale(100%);
+    }
+    #authError {
+      display: none;
+      margin: 0 0 20px;
+      padding: 16px 20px;
+      border-radius: var(--radius-cards);
+      background: var(--color-pollen);
+      color: var(--color-bark);
+    }
+    #authError.visible { display: block; }
+    code {
+      font-family: ui-monospace, monospace;
+      font-size: 13px;
+      color: var(--color-bark);
+    }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .tabs {
+      display: flex;
+      gap: 0;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 0;
+      border: none;
+    }
+    .panel { display: none; margin-bottom: 0; }
+    .panel.active { display: block; }
+    .obs-bar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 12px 50px;
+      background: var(--color-linen);
+      color: var(--color-sage);
+      font-size: 11px;
+      letter-spacing: 0.11px;
+      border-top: 1px solid var(--color-mist);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px 20px;
+      z-index: 50;
+    }
+    .obs-bar strong { color: var(--color-obsidian-ink); font-weight: 600; }
+    .obs-version {
+      margin-left: auto;
+      color: var(--color-sage);
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .obs-hit { color: var(--color-voltage); }
+    .obs-miss { color: var(--color-moss-glow); }
+    .list-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--color-mist);
+      cursor: pointer;
+      gap: 20px;
+    }
+    .list-row:hover { opacity: 0.85; }
+    .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    .badge {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.11px;
+      padding: 2px 0;
+      color: var(--color-sage);
+      background: transparent;
+      border: none;
+    }
+    .detail {
+      display: none;
+      padding: 16px 0 12px;
+      border-bottom: 1px solid var(--color-mist);
+      margin-bottom: 12px;
+    }
+    .detail.open { display: block; }
+    .detail video {
+      width: 100%;
+      max-height: 420px;
+      background: var(--color-obsidian-ink);
+      margin: 12px 0;
+      border-radius: var(--radius-images);
+    }
+    .detail .desc {
+      max-height: 200px;
+      overflow: auto;
+      font-size: 14px;
+      white-space: pre-wrap;
+      background: transparent;
+      padding: 0;
+      border: none;
+      color: var(--color-sage);
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+    .asset-table { max-height: 400px; overflow: auto; }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(18, 22, 19, 0.35);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .modal.open { display: flex; }
+    .modal-inner {
+      background: var(--color-linen);
+      max-width: min(960px, 100%);
+      max-height: 90vh;
+      overflow: auto;
+      padding: 20px;
+      position: relative;
+      border: none;
+      border-radius: var(--radius-cards);
+      box-shadow: none;
+    }
+    .modal img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      border-radius: var(--radius-images);
+      filter: grayscale(100%);
+    }
+    .modal-close {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: transparent;
+      color: var(--color-obsidian-ink);
+      border: none;
+      width: auto;
+      height: auto;
+      cursor: pointer;
+      font-size: 24px;
+      line-height: 1;
+      padding: 0;
+    }
+    .subtabs { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+    .subtab { font-size: 14px; }
+    .loading { color: var(--color-sage); font-style: italic; }
+    .cancel-confirm { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    .cancel-confirm .warn { font-size: 12px; color: var(--color-sage); }
+    .job-table-wrap {
+      max-height: min(75vh, 900px);
+      overflow: auto;
+      border: none;
+      border-radius: 0;
+      margin-top: 12px;
+      background: transparent;
+    }
+    .job-table-wrap.expanded { max-height: none; }
+    .job-table-wrap table { margin: 0; }
+    .job-table-wrap thead th {
+      position: sticky;
+      top: 0;
+      background: var(--color-linen);
+      z-index: 1;
+    }
+    .job-table-wrap td.job-progress { min-width: 12rem; max-width: 28rem; vertical-align: top; }
+    .json-block {
+      margin-top: 12px;
+      border: none;
+      border-radius: var(--radius-cards);
+      background: transparent;
+      overflow: hidden;
+    }
+    .json-block-header {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 20px;
+      padding: 0 0 8px;
+      border: none;
+      background: transparent;
+    }
+    .json-block pre {
+      margin: 0;
+      padding: 16px 0 0;
+      max-height: min(50vh, 480px);
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.4;
+      background: transparent;
+      color: var(--color-bark);
+      font-family: ui-monospace, monospace;
+      border-top: 1px solid var(--color-mist);
+    }
+    .json-block.expanded pre { max-height: none; }
+    button.copy-btn { font-size: 14px; }
+    button.copy-btn.copied { color: var(--color-voltage); font-weight: 600; }
+    .job-toolbar {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .job-toolbar label {
+      font-size: 14px;
+      color: var(--color-obsidian-ink);
+      margin: 0;
+      text-transform: none;
+      letter-spacing: -0.28px;
+    }
+    .job-toolbar select { width: auto; margin-top: 0; margin-left: 8px; }
+    .job-check-th, .job-check { width: 2.25rem; text-align: center; vertical-align: middle; }
+    .job-check input, .job-check-th input { cursor: pointer; width: 1rem; height: 1rem; margin: 0; }
+    .section-card { margin-bottom: 0; }
+    a { color: var(--color-voltage); text-decoration: underline; text-underline-offset: 3px; }
+    @media (max-width: 720px) {
+      .page { padding: 0 20px; }
+      .obs-bar { padding: 12px 20px; }
+      .btn-voltage, #runBtn { width: 100%; text-align: center; }
+    }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <div>
-      <h1>Music Assembly</h1>
-      <p class="muted">Trigger jobs, track progress, browse outputs on R2.</p>
+  <div class="page">
+  <header class="site-header" aria-label="Dashboard">
+    <p class="wordmark"><span class="wordmark-a">Music</span><span class="wordmark-b">Assembly</span></p>
+    <div class="nav-actions">
+      <button type="button" class="btn-ghost" id="refreshBtn" title="Reload jobs, inventory, and active tab">Refresh</button>
+      <span class="nav-mark" aria-hidden="true">||</span>
+      <button type="button" class="btn-ghost" id="logoutBtn">Sign out</button>
     </div>
-    <div style="display:flex;gap:.5rem;align-items:flex-start">
-      <button type="button" class="secondary" id="refreshBtn" title="Reload jobs, inventory, and active tab">Refresh</button>
-      <button type="button" class="logout" id="logoutBtn">Sign out</button>
-    </div>
-  </div>
+  </header>
+  <section class="hero">
+    <h1 class="hero-display">Trigger. Track. Publish.</h1>
+    <p class="page-lead muted">Jobs, progress, and R2 outputs for the assembly pipeline.</p>
+  </section>
   <div id="authError" class="muted"></div>
+
+  <hr class="section-divider" aria-hidden="true"/>
 
   <div class="grid">
     <div class="card">
       <h2>Run assembly</h2>
       <p class="muted">Starts <code>music-assemble</code> on Cloud Run.</p>
-      <p><label>Category <input id="runCategory" value="korean"/></label></p>
       <p><label>YouTube channel
-        <select id="runChannel"><option value="">(legacy root — no subfolder)</option></select>
+        <select id="runChannel" required><option value="">Select channel…</option></select>
       </label></p>
-      <p><label>Or new channel slug <input id="runChannelCustom" placeholder="e.g. lofi-beats"/></label></p>
-      <p class="muted">Finished videos upload to <code>music-video/{category}/{channel}/mv_*/</code>. Parallel jobs share the same channel.</p>
+      <p><label>Or new channel slug <input id="runChannelCustom" placeholder="e.g. nappabeats"/></label></p>
+      <p class="muted">Finished videos upload to <code>music-video/{channel}/mv_*/</code>.</p>
+      <p><label><input type="checkbox" id="runQueueYoutube" checked/> Add to YouTube upload queue when done</label></p>
+      <p class="muted">Registers with youtube-uploader after R2 upload (worker needs <code>UPLOADER_API_*</code>).</p>
       <p><label>Thumbnail text <input id="runThumb" value="OMYO"/></label></p>
       <p><label>Duration (min) <input id="runDuration" type="number" value="90"/></label></p>
       <p><label>Variance (min) <input id="runVariance" type="number" value="15"/></label></p>
@@ -1074,8 +1642,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </select>
       </label></p>
       <p class="muted">Each job claims a unique background from <code>post-processed/</code>. Jobs with no image left exit immediately.</p>
-      <button id="runBtn">Start job</button>
-      <pre id="runResult" class="muted"></pre>
+      <button id="runBtn" class="btn-voltage">Start job →</button>
+      <div class="json-block">
+        <div class="json-block-header">
+          <button type="button" class="secondary expand-btn" data-expand-target="runResult">Expand</button>
+          <button type="button" class="secondary copy-btn" data-copy-target="runResult">Copy</button>
+        </div>
+        <pre id="runResult" class="muted"></pre>
+      </div>
     </div>
     <div class="card">
       <h2>Extend backgrounds</h2>
@@ -1091,25 +1665,55 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <option value="all">All pending</option>
         </select>
       </label></p>
-      <button id="extendBtn" class="secondary">Start extend</button>
-      <pre id="extendResult" class="muted"></pre>
+      <button id="extendBtn" class="btn-ghost">Start extend</button>
+      <div class="json-block">
+        <div class="json-block-header">
+          <button type="button" class="secondary expand-btn" data-expand-target="extendResult">Expand</button>
+          <button type="button" class="secondary copy-btn" data-copy-target="extendResult">Copy</button>
+        </div>
+        <pre id="extendResult" class="muted"></pre>
+      </div>
     </div>
     <div class="card">
       <h2>Inventory</h2>
-      <pre id="inventory" class="muted">Loading…</pre>
+      <div class="json-block" style="margin-top:0">
+        <div class="json-block-header">
+          <button type="button" class="secondary expand-btn" data-expand-target="inventory">Expand</button>
+          <button type="button" class="secondary copy-btn" data-copy-target="inventory">Copy</button>
+        </div>
+        <pre id="inventory" class="muted">Loading…</pre>
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Assembly jobs</h2>
-    <label>Filter <select id="jobFilter"><option value="">All</option><option>running</option><option>succeeded</option><option>failed</option></select></label>
-    <table><thead><tr><th>Execution</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
+  <hr class="section-divider" aria-hidden="true"/>
+
+  <div class="card section-card">
+    <h2>Assembly jobs <span class="muted" id="assemblyJobCount" style="font-weight:400"></span></h2>
+    <div class="job-toolbar">
+      <label>Filter <select id="jobFilter"><option value="">All</option><option>running</option><option>succeeded</option><option>failed</option></select></label>
+      <button type="button" class="secondary" id="expandAssemblyTable">Expand table</button>
+      <button type="button" class="danger" id="cancelSelectedAssembly" disabled>Cancel selected</button>
+    </div>
+    <div class="job-table-wrap" id="assemblyTableWrap">
+      <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllAssembly" title="Select all visible running jobs" aria-label="Select all visible running assembly jobs"></th><th>Execution</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Extend jobs</h2>
-    <table><thead><tr><th>Run</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
+  <hr class="section-divider" aria-hidden="true"/>
+
+  <div class="card section-card">
+    <h2>Extend jobs <span class="muted" id="extendJobCount" style="font-weight:400"></span></h2>
+    <div class="job-toolbar">
+      <button type="button" class="secondary" id="expandExtendTable">Expand table</button>
+      <button type="button" class="danger" id="cancelSelectedExtend" disabled>Cancel selected</button>
+    </div>
+    <div class="job-table-wrap" id="extendTableWrap">
+      <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllExtend" title="Select all visible running jobs" aria-label="Select all visible running extend jobs"></th><th>Run</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
+    </div>
   </div>
+
+  <hr class="section-divider" aria-hidden="true"/>
 
   <nav class="tabs" role="tablist">
     <button type="button" class="tab" data-tab="videos">Music videos</button>
@@ -1141,7 +1745,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="panelObs" class="panel card">
     <h2>Observability</h2>
     <pre id="obsDetail" class="muted">Loading…</pre>
-    <h3 style="font-size:.95rem">Recent API calls</h3>
+    <h3>Recent API calls</h3>
     <table><thead><tr><th>Time</th><th>Endpoint</th><th>ms</th><th>Cache</th></tr></thead><tbody id="obsFetches"></tbody></table>
   </div>
 
@@ -1150,6 +1754,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <button type="button" class="modal-close" id="modalClose" aria-label="Close">×</button>
       <div id="modalBody"></div>
     </div>
+  </div>
+
   </div>
 
   <div class="obs-bar" id="obsBar">
@@ -1172,6 +1778,7 @@ const ui = {
   videoDetails: new Map(),
   videoChannels: new Map(),
   cancelPending: null,
+  selectedJobs: new Set(),
 };
 const obs = { fetches: [], hits: 0, misses: 0, polls: 0, lastMs: null, lastError: null };
 
@@ -1205,6 +1812,39 @@ async function api(path, opts={}) {
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 }
+function copyFromPre(preId, btn) {
+  const el = document.getElementById(preId);
+  if (!el || !el.textContent.trim()) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1200);
+  }).catch(() => {});
+}
+document.querySelectorAll('.copy-btn[data-copy-target]').forEach(btn => {
+  btn.onclick = () => copyFromPre(btn.dataset.copyTarget, btn);
+});
+function toggleExpandBlock(targetId, btn) {
+  const pre = document.getElementById(targetId);
+  const block = pre?.closest('.json-block');
+  if (!block) return;
+  const expanded = block.classList.toggle('expanded');
+  if (btn) btn.textContent = expanded ? 'Collapse' : 'Expand';
+}
+document.querySelectorAll('.expand-btn[data-expand-target]').forEach(btn => {
+  btn.onclick = () => toggleExpandBlock(btn.dataset.expandTarget, btn);
+});
+function toggleTableExpand(wrapId, btnId) {
+  const wrap = document.getElementById(wrapId);
+  const btn = document.getElementById(btnId);
+  if (!wrap || !btn) return;
+  const expanded = wrap.classList.toggle('expanded');
+  btn.textContent = expanded ? 'Collapse table' : 'Expand table';
+}
+document.getElementById('expandAssemblyTable').onclick = () => toggleTableExpand('assemblyTableWrap', 'expandAssemblyTable');
+document.getElementById('expandExtendTable').onclick = () => toggleTableExpand('extendTableWrap', 'expandExtendTable');
 function fmtTime(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
@@ -1215,7 +1855,7 @@ function fmtBytes(n) {
   if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
   return (n/1048576).toFixed(1) + ' MB';
 }
-function cat() { return document.getElementById('runCategory').value.trim() || 'korean'; }
+function cat() { return '__DEFAULT_CATEGORY__'; }
 function runChannel() {
   const custom = document.getElementById('runChannelCustom').value.trim();
   if (custom) return custom;
@@ -1228,15 +1868,21 @@ function videoChannelFilter() {
 async function loadChannelOptions() {
   try {
     const d = await api('/v1/channels?category=' + encodeURIComponent(cat()));
+    const rows = (d.channel_details && d.channel_details.length)
+      ? d.channel_details
+      : (d.channels || []).map(id => ({ id, name: id }));
     for (const selId of ['runChannel', 'videoChannel']) {
       const el = document.getElementById(selId);
       const keep = el.value;
       const allOpt = selId === 'videoChannel'
         ? '<option value="">All channels</option>'
-        : '<option value="">(legacy root — no subfolder)</option>';
+        : '<option value="">Select channel…</option>';
       el.innerHTML = allOpt;
-      for (const ch of d.channels || []) {
-        el.innerHTML += '<option value="' + esc(ch) + '">' + esc(ch) + '</option>';
+      for (const ch of rows) {
+        const id = ch.id || ch;
+        const name = ch.name || id;
+        const label = name === id ? id : (name + ' (' + id + ')');
+        el.innerHTML += '<option value="' + esc(id) + '">' + esc(label) + '</option>';
       }
       if (keep) el.value = keep;
     }
@@ -1248,6 +1894,17 @@ function renderObsBar() {
   document.getElementById('obsLastMs').textContent = obs.lastMs != null ? obs.lastMs + 'ms' : '—';
   document.getElementById('obsHits').textContent = obs.hits + ' hit';
   document.getElementById('obsMiss').textContent = obs.misses + ' miss';
+}
+async function loadVersionInfo() {
+  try {
+    const v = await api('/v1/version');
+    const label = v.dashboard || ('v' + (v.version || '?') + ' · ' + (v.revision || 'local'));
+    const el = document.getElementById('obsVersion');
+    el.textContent = label;
+    el.title = 'music-assembly-api ' + label + (v.build && v.build !== v.revision ? ' (build ' + v.build + ')' : '');
+  } catch (_) {
+    document.getElementById('obsVersion').textContent = 'v?';
+  }
 }
 function renderObsPanel() {
   const tb = document.getElementById('obsFetches');
@@ -1279,10 +1936,99 @@ async function refreshStats() {
   return d;
 }
 
+function isCancellableStatus(st) {
+  return st === 'running' || st === 'cancelling' || st === 'unknown';
+}
+function jobCheckboxHtml(row) {
+  const id = row.execution_id;
+  if (!isCancellableStatus(row.status || '')) {
+    return '<td class="job-check muted">—</td>';
+  }
+  const checked = ui.selectedJobs.has(id) ? ' checked' : '';
+  return '<td class="job-check"><input type="checkbox" class="job-select-cb" data-id="' + esc(id) + '"' + checked + ' aria-label="Select ' + esc(id) + '"></td>';
+}
+function selectedRunningInMap(map) {
+  return [...ui.selectedJobs].filter(id => {
+    const tr = map.get(id);
+    return tr && tr.classList.contains('is-running');
+  });
+}
+function updateBulkCancelButtons() {
+  document.getElementById('cancelSelectedAssembly').disabled = selectedRunningInMap(ui.assembly).length === 0;
+  document.getElementById('cancelSelectedExtend').disabled = selectedRunningInMap(ui.extend).length === 0;
+}
+function updateSelectAllCheckbox(selectAllId, map) {
+  const el = document.getElementById(selectAllId);
+  if (!el) return;
+  let visible = 0;
+  let selected = 0;
+  for (const [id, tr] of map) {
+    if (tr.style.display === 'none' || !tr.classList.contains('is-running')) continue;
+    visible++;
+    if (ui.selectedJobs.has(id)) selected++;
+  }
+  el.checked = visible > 0 && selected === visible;
+  el.indeterminate = selected > 0 && selected < visible;
+  el.disabled = visible === 0;
+}
+function bindJobCheckboxHandlers(root) {
+  root.querySelectorAll('.job-select-cb').forEach(cb => {
+    cb.onchange = () => {
+      if (cb.checked) ui.selectedJobs.add(cb.dataset.id);
+      else ui.selectedJobs.delete(cb.dataset.id);
+      updateBulkCancelButtons();
+      updateSelectAllCheckbox('selectAllAssembly', ui.assembly);
+      updateSelectAllCheckbox('selectAllExtend', ui.extend);
+    };
+  });
+}
+function bindSelectAllCheckbox(selectAllId, map) {
+  const el = document.getElementById(selectAllId);
+  el.onchange = () => {
+    const check = el.checked;
+    for (const [id, tr] of map) {
+      if (tr.style.display === 'none' || !tr.classList.contains('is-running')) continue;
+      const cb = tr.querySelector('.job-select-cb');
+      if (!cb) continue;
+      cb.checked = check;
+      if (check) ui.selectedJobs.add(id);
+      else ui.selectedJobs.delete(id);
+    }
+    updateBulkCancelButtons();
+    updateSelectAllCheckbox('selectAllAssembly', ui.assembly);
+    updateSelectAllCheckbox('selectAllExtend', ui.extend);
+  };
+}
+async function cancelSelectedJobs(map) {
+  const ids = selectedRunningInMap(map);
+  if (!ids.length) return;
+  if (!confirm('Cancel ' + ids.length + ' running job(s)?')) return;
+  const btnIds = ['cancelSelectedAssembly', 'cancelSelectedExtend'];
+  btnIds.forEach(id => { document.getElementById(id).disabled = true; });
+  try {
+    const results = await Promise.allSettled(ids.map(id =>
+      api('/v1/jobs/' + encodeURIComponent(id) + '/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ confirm: true }),
+      })
+    ));
+    const failed = results.filter(r => r.status === 'rejected').length;
+    ids.forEach(id => ui.selectedJobs.delete(id));
+    ui.cancelPending = null;
+    await pollSnapshot({ includeStats: true });
+    schedulePoll(1500);
+    if (failed) alert(failed + ' cancel request(s) failed');
+  } catch (e) {
+    alert('Cancel failed: ' + e);
+  }
+  updateBulkCancelButtons();
+  updateSelectAllCheckbox('selectAllAssembly', ui.assembly);
+  updateSelectAllCheckbox('selectAllExtend', ui.extend);
+}
 function jobActionsHtml(row) {
   const id = row.execution_id;
   const st = row.status || '';
-  const active = st === 'running' || st === 'cancelling' || st === 'unknown';
+  const active = isCancellableStatus(st);
   if (!active) return '<td class="job-actions muted">—</td>';
   if (ui.cancelPending === id) {
     return '<td class="job-actions"><div class="cancel-confirm">' +
@@ -1302,6 +2048,7 @@ function bindJobActionButtons(root) {
   root.querySelectorAll('.cancel-confirm-btn').forEach(btn => {
     btn.onclick = () => confirmCancelJob(btn.dataset.id);
   });
+  bindJobCheckboxHandlers(root);
 }
 async function confirmCancelJob(executionId) {
   try {
@@ -1333,7 +2080,8 @@ function rerenderJobTables() {
 
 function upsertJobRow(tableId, map, row) {
   let tr = map.get(row.execution_id);
-  const running = row.status === 'running' || row.status === 'cancelling' || row.status === 'unknown';
+  const running = isCancellableStatus(row.status || '');
+  if (!running) ui.selectedJobs.delete(row.execution_id);
   const gcpLine = row.gcp_execution_id && row.gcp_execution_id !== row.execution_id
     ? '<br/><span class="muted">' + esc(row.gcp_execution_id) + '</span>' : '';
   const updated = row.updated_at ? '<span class="job-updated">Updated ' + esc(fmtTime(row.updated_at)) + '</span>' : '';
@@ -1341,6 +2089,7 @@ function upsertJobRow(tableId, map, row) {
     tr = document.createElement('tr');
     tr.dataset.jobId = row.execution_id;
     tr.innerHTML =
+      jobCheckboxHtml(row) +
       '<td class="job-id"><code>' + esc(row.execution_id) + '</code>' + gcpLine + '</td>' +
       '<td class="job-status status-' + esc(row.status) + '">' + esc(row.status) + '</td>' +
       '<td class="job-progress"><div class="bar"><span class="bar-fill"></span></div>' +
@@ -1351,6 +2100,8 @@ function upsertJobRow(tableId, map, row) {
     document.getElementById(tableId).prepend(tr);
     bindJobActionButtons(tr);
   } else {
+    const checkCell = tr.querySelector('.job-check');
+    if (checkCell) checkCell.outerHTML = jobCheckboxHtml(row);
     tr.querySelector('.job-id').innerHTML = '<code>' + esc(row.execution_id) + '</code>' + gcpLine;
     const st = tr.querySelector('.job-status');
     st.className = 'job-status status-' + row.status;
@@ -1372,19 +2123,35 @@ function upsertJobRow(tableId, map, row) {
 }
 function syncJobTable(tableId, map, rows) {
   const tb = document.getElementById(tableId);
+  const countEl = document.getElementById(tableId === 'jobsBody' ? 'assemblyJobCount' : 'extendJobCount');
+  if (countEl) {
+    const running = rows.filter(r => isCancellableStatus(r.status || '')).length;
+    countEl.textContent = rows.length
+      ? '(' + rows.length + (running ? ', ' + running + ' running' : '') + ')'
+      : '';
+  }
   const ids = new Set(rows.map(r => r.execution_id));
-  for (const [id, tr] of map) { if (!ids.has(id)) { tr.remove(); map.delete(id); } }
+  for (const [id, tr] of map) {
+    if (!ids.has(id)) {
+      tr.remove();
+      map.delete(id);
+      ui.selectedJobs.delete(id);
+    }
+  }
   for (const row of rows) upsertJobRow(tableId, map, row);
   for (let i = rows.length - 1; i >= 0; i--) {
     const tr = map.get(rows[i].execution_id);
     if (tr) tb.prepend(tr);
   }
+  updateBulkCancelButtons();
+  updateSelectAllCheckbox('selectAllAssembly', ui.assembly);
+  updateSelectAllCheckbox('selectAllExtend', ui.extend);
 }
 
 async function loadVideoList() {
   const el = document.getElementById('videoList');
   el.innerHTML = '<p class="loading">Loading video list…</p>';
-  let url = '/v1/videos?category=' + encodeURIComponent(cat()) + '&summary=1';
+  let url = '/v1/videos?summary=1';
   const chFilter = videoChannelFilter();
   if (chFilter) url += '&channel=' + encodeURIComponent(chFilter);
   const d = await api(url);
@@ -1426,8 +2193,8 @@ async function toggleVideoDetail(id, wrap) {
   detail.innerHTML = '<p class="loading">Loading metadata…</p>';
   try {
     const ch = ui.videoChannels.get(id) || '';
-    let url = '/v1/videos/' + encodeURIComponent(id) + '?category=' + encodeURIComponent(cat());
-    if (ch) url += '&channel=' + encodeURIComponent(ch);
+    let url = '/v1/videos/' + encodeURIComponent(id);
+    if (ch) url += '?channel=' + encodeURIComponent(ch);
     const v = await api(url);
     ui.videoDetails.set(id, v);
     const track = v.tracklist ? '<h4 style="font-size:.85rem;margin:.75rem 0 .25rem">Tracklist</h4><pre class="desc">' + esc(v.tracklist) + '</pre>' : '';
@@ -1558,6 +2325,7 @@ async function refreshRunningAssemblyProgress() {
 
 async function pollSnapshot({ includeStats, refresh }) {
   const q = '?category=' + encodeURIComponent(cat())
+    + '&job_limit=100'
     + (includeStats ? '' : '&light=1')
     + (refresh ? '&refresh=1' : '');
   const d = await api('/v1/dashboard/snapshot' + q);
@@ -1615,15 +2383,17 @@ document.getElementById('logoutBtn').onclick = async () => {
 };
 document.getElementById('runBtn').onclick = async () => {
   const btn = document.getElementById('runBtn');
+  const channel = runChannel();
+  if (!channel) { alert('Select or enter a YouTube channel'); return; }
   btn.disabled = true;
   try {
     const r = await api('/v1/assembly/jobs', { method: 'POST', body: JSON.stringify({
-      category: cat(),
-      channel: runChannel() || null,
+      channel: channel,
       thumbnail_text: document.getElementById('runThumb').value,
       duration_min: parseInt(document.getElementById('runDuration').value, 10),
       variance_min: parseInt(document.getElementById('runVariance').value, 10),
       count: parseInt(document.getElementById('runCount').value, 10),
+      queue_youtube: document.getElementById('runQueueYoutube').checked,
     })});
     document.getElementById('runResult').textContent = JSON.stringify(r, null, 2);
     ui.tabsLoaded.videos = false;
@@ -1657,14 +2427,12 @@ document.getElementById('jobFilter').onchange = () => {
     const st = tr.querySelector('.job-status')?.textContent || '';
     tr.style.display = (!ui.jobFilter || st === ui.jobFilter) ? '' : 'none';
   }
+  updateSelectAllCheckbox('selectAllAssembly', ui.assembly);
 };
-document.getElementById('runCategory').addEventListener('change', () => {
-  ui.tabsLoaded = { videos: false, assets: false, obs: false };
-  ui.videoDetails.clear();
-  ui.videoChannels.clear();
-  ui.lastStatsAt = 0;
-  loadChannelOptions();
-});
+document.getElementById('cancelSelectedAssembly').onclick = () => cancelSelectedJobs(ui.assembly);
+document.getElementById('cancelSelectedExtend').onclick = () => cancelSelectedJobs(ui.extend);
+bindSelectAllCheckbox('selectAllAssembly', ui.assembly);
+bindSelectAllCheckbox('selectAllExtend', ui.extend);
 document.getElementById('videoChannel').addEventListener('change', () => {
   ui.tabsLoaded.videos = false;
   ui.videoDetails.clear();
@@ -1673,9 +2441,11 @@ document.getElementById('videoChannel').addEventListener('change', () => {
 
 (async function init() {
   renderObsBar();
+  loadVersionInfo();
   try {
     await loadChannelOptions();
-    await pollSnapshot({ includeStats: true });
+    await pollSnapshot({ includeStats: false });
+    refreshStats().then(applyInventory).catch(e => console.warn('stats', e));
   } catch (e) { console.error(e); }
   schedulePoll(15000);
 })();
@@ -1683,3 +2453,5 @@ document.getElementById('videoChannel').addEventListener('change', () => {
 </body>
 </html>
 """
+
+install_openapi_docs(app)
