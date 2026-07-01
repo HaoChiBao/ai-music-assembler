@@ -384,21 +384,36 @@ def retire_claimed_pre_processed_on_r2(
 
 def list_in_flight_background_names(client, bucket: str, images_prefix: str) -> set[str]:
     """Filenames reserved under ``post-processed/{category}/in-flight/*/``."""
+    return set(list_in_flight_background_claims(client, bucket, images_prefix).keys())
+
+
+def list_in_flight_background_claims(
+    client, bucket: str, images_prefix: str
+) -> dict[str, list[tuple[str, str]]]:
+    """Map background filename → ``[(execution_id, in_flight_key), …]``."""
     prefix = f"{_normalize_prefix(images_prefix)}in-flight/"
-    names: set[str] = set()
+    out: dict[str, list[tuple[str, str]]] = {}
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.endswith("/"):
                 continue
-            rel = key[len(prefix) :]
-            if "/" not in rel:
+            rel = key[len(prefix):]
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
                 continue
-            filename = rel.split("/", 1)[1]
-            if _is_image_key(filename):
-                names.add(filename)
-    return names
+            exec_id, filename = parts[0], parts[1]
+            if not _is_image_key(filename):
+                continue
+            out.setdefault(filename, []).append((exec_id, key))
+    for claims in out.values():
+        claims.sort(key=lambda row: row[0])
+    return out
+
+
+def _background_claim_winner(claims: list[tuple[str, str]]) -> str:
+    return min(exec_id for exec_id, _ in claims)
 
 
 def list_available_background_keys(client, bucket: str, images_prefix: str) -> list[str]:
@@ -433,23 +448,42 @@ def claim_background_on_r2(
     """Atomically reserve one background for this job (copy → in-flight/, delete source).
 
     Returns the claimed filename, or ``None`` when every background is used or in-flight.
-    Safe for parallel workers: races retry the next candidate.
+    Safe for parallel workers: copy/delete races resolve via a deterministic winner per
+    filename; losers release their in-flight copy and retry another background.
     """
-    available = list_available_background_keys(client, bucket, images_prefix)
-    if not available:
-        return None
-    random.shuffle(available)
-    for src_key in available:
-        filename = src_key.rsplit("/", 1)[-1]
-        dest_key = in_flight_key(images_prefix, execution_id, filename)
-        if not object_exists(client, bucket, src_key):
-            continue
-        try:
-            copy_then_delete_object(client, bucket, src_key, dest_key)
-        except client.exceptions.ClientError:
-            continue
-        if object_exists(client, bucket, dest_key):
-            return filename
+    images_prefix = _normalize_prefix(images_prefix)
+    for _ in range(24):
+        available = list_available_background_keys(client, bucket, images_prefix)
+        if not available:
+            return None
+        random.shuffle(available)
+        lost_race = False
+        for src_key in available:
+            filename = src_key.rsplit("/", 1)[-1]
+            dest_key = in_flight_key(images_prefix, execution_id, filename)
+            if not object_exists(client, bucket, src_key):
+                continue
+            try:
+                copy_then_delete_object(client, bucket, src_key, dest_key)
+            except client.exceptions.ClientError:
+                continue
+            if not object_exists(client, bucket, dest_key):
+                continue
+            claims = list_in_flight_background_claims(client, bucket, images_prefix).get(
+                filename, []
+            )
+            if len(claims) <= 1:
+                return filename
+            if _background_claim_winner(claims) == execution_id:
+                return filename
+            try:
+                client.delete_object(Bucket=bucket, Key=dest_key)
+            except client.exceptions.ClientError:
+                pass
+            lost_race = True
+            break
+        if not lost_race:
+            return None
     return None
 
 

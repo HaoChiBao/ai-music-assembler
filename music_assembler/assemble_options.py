@@ -53,6 +53,23 @@ def video_output_prefix(channel: str) -> str:
     return f"music-video/{ch}/"
 
 
+def unique_output_basename(execution_id: str | None = None) -> str:
+    """Unique ``mv_*`` folder name — safe for parallel Cloud Run jobs."""
+    from datetime import datetime, timezone
+    import uuid
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if execution_id:
+        token = execution_id.rsplit("_", 1)[-1][:8]
+        return f"mv_{ts}_{token}"
+    return f"mv_{ts}_{uuid.uuid4().hex[:6]}"
+
+
+def assembly_video_object_key(channel: str, video_id: str) -> str:
+    """R2 key for the main MP4 of a finished assembly run."""
+    return f"{video_output_prefix(channel)}{video_id}/{video_id}_video.mp4"
+
+
 def parse_duration(value: str) -> float:
     """Parse a duration string into seconds.
 

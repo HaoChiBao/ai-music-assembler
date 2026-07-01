@@ -49,6 +49,8 @@ Service accounts for a hosted control API and optional worker identity:
 
 ## 5. Schedule (optional)
 
+Daily assembly trigger:
+
 ```bash
 gcloud scheduler jobs create http music-assemble-daily \
   --location "$REGION" \
@@ -57,6 +59,29 @@ gcloud scheduler jobs create http music-assemble-daily \
   --http-method POST \
   --oauth-service-account-email music-assembly-api@${PROJECT_ID}.iam.gserviceaccount.com
 ```
+
+### Assembly health check (recommended)
+
+The control API exposes ``GET`` or ``POST /v1/cron/assembly-health`` (``X-API-Key``). It audits recent ``asm_*`` jobs, flags “succeeded” runs with no MP4 on R2, and can rewrite false successes when ``repair=true``.
+
+```bash
+API_URL="https://music-assembly-api-17161979106.northamerica-northeast2.run.app"
+# Store ASSEMBLY_API_KEY in Secret Manager as assembly-api-key:latest
+
+gcloud services enable cloudscheduler.googleapis.com
+
+# Scheduler region is separate from Cloud Run (e.g. ``northamerica-northeast1``).
+SCHEDULER_LOCATION="northamerica-northeast1"
+
+gcloud scheduler jobs create http assembly-health-check \
+  --location "$SCHEDULER_LOCATION" \
+  --schedule "0 */6 * * *" \
+  --uri "${API_URL}/v1/cron/assembly-health?limit=40&repair=true" \
+  --http-method POST \
+  --headers "X-API-Key=YOUR_ASSEMBLY_API_KEY"
+```
+
+Returns HTTP ``207`` when issues are found (useful for alerting).
 
 ## Local smoke test (no GCP)
 

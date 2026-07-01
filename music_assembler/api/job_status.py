@@ -7,12 +7,37 @@ from typing import Any
 
 from music_assembler.api import gcp_jobs
 from music_assembler.api.config import ApiSettings
+from music_assembler.assemble_options import assembly_video_object_key, normalize_channel
 from music_assembler.job_progress import patch_meta_gcp_execution_id, write_progress_json
+from music_assembler.r2_storage import object_exists
 
 _SYNC_PHASE_SEC = 300.0
 _ENCODE_PHASE_SEC = 4500.0
 # Worker writes real encode progress at ~12%+; below this is API heartbeat only.
 _R2_TRUST_PCT = 12.0
+_TERMINAL_R2 = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def _assembly_output_verified(
+    client,
+    bucket: str,
+    run: dict[str, Any],
+    prog: dict[str, Any] | None,
+) -> bool:
+    if not prog or prog.get("status") != "succeeded":
+        return False
+    channel = run.get("channel") or prog.get("channel")
+    video_id = prog.get("video_id")
+    if not channel or not video_id:
+        return False
+    ch = normalize_channel(str(channel))
+    if not ch:
+        return False
+    return object_exists(
+        client,
+        bucket,
+        assembly_video_object_key(ch, str(video_id)),
+    )
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -108,7 +133,8 @@ def reconcile_assembly_runs(
     for run in runs:
         row = _normalize_from_run(run)
         prog = run.get("progress")
-        terminal = row["status"] in ("succeeded", "failed")
+        r2_status = (prog or {}).get("status")
+        terminal = r2_status in _TERMINAL_R2
         needs_gcp = not terminal
 
         gcp_row: dict[str, Any] | None = None
@@ -148,15 +174,38 @@ def reconcile_assembly_runs(
                         "r2" if prog is not None and r2_pct >= _R2_TRUST_PCT else "gcp_estimate"
                     )
             elif gcp_status in ("succeeded", "failed"):
-                row["status"] = gcp_status
-                row["status_source"] = "gcp"
-                if gcp_status == "succeeded":
+                if r2_status == "failed":
+                    row["status"] = "failed"
+                    row["status_source"] = "r2"
+                    row["stage"] = row["stage"] or (prog or {}).get("stage") or "Failed"
+                elif gcp_status == "failed":
+                    row["status"] = "failed"
+                    row["status_source"] = "gcp"
+                    row["stage"] = row["stage"] or "Failed on Cloud Run"
+                elif _assembly_output_verified(client, bucket, run, prog):
+                    row["status"] = "succeeded"
+                    row["status_source"] = "r2"
                     row["pct"] = max(r2_pct, 100.0)
                     row["stage"] = row["stage"] or "Complete"
+                elif prog is not None and r2_pct >= 100.0 and r2_status == "succeeded":
+                    row["status"] = "failed"
+                    row["status_source"] = "verify"
+                    row["stage"] = "Cloud Run finished but output video missing on R2"
+                elif prog is not None and r2_pct >= _R2_TRUST_PCT:
+                    row["status"] = row["status"] or "running"
+                    row["status_source"] = "r2"
+                    row["stage"] = row["stage"] or (prog or {}).get("stage") or "Finishing…"
                 else:
-                    row["stage"] = row["stage"] or "Failed on Cloud Run"
+                    row["status"] = "running"
+                    row["status_source"] = "gcp_wait_output"
+                    row["stage"] = row["stage"] or "Cloud Run finished; waiting for R2 output…"
                 row["updated_at"] = gcp_row.get("completion_time") or row.get("updated_at")
-                if patch_r2 and run.get("execution_id"):
+                if (
+                    patch_r2
+                    and run.get("execution_id")
+                    and row["status"] in ("succeeded", "failed")
+                    and row["status"] != r2_status
+                ):
                     write_progress_json(
                         client,
                         bucket,
@@ -164,7 +213,14 @@ def reconcile_assembly_runs(
                         pct=row["pct"],
                         stage=row["stage"],
                         category=run.get("category") or "korean",
-                        status=gcp_status,
+                        status=row["status"],
+                        extra={
+                            k: prog[k]
+                            for k in ("video_id", "channel", "job_type")
+                            if prog and prog.get(k)
+                        }
+                        if prog
+                        else None,
                     )
 
         elif needs_gcp and prog is None and gcp_row is None:

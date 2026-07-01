@@ -31,6 +31,7 @@ from music_assembler.assemble_options import (
     resolve_duration_bounds,
     resolve_folder_args,
     resolve_r2_assembly_prefixes,
+    unique_output_basename,
 )
 from music_assembler.bottom_text_overlay import resolve_font_key
 from music_assembler.config import AssemblerConfig, AssemblerPaths, TextOverlayStyle
@@ -449,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
 
     project_root = Path.cwd().resolve()
     font_key = resolve_font_key(project_root, None, weight=DEFAULT_TITLE_FONT_WEIGHT)
-    basename = datetime.now().strftime("mv_%Y%m%d_%H%M%S")
+    basename = unique_output_basename(execution_id)
 
     thumbnail_text = None if args.no_thumbnail else args.thumbnail_text
     if thumbnail_text is None and not args.no_thumbnail:
@@ -651,25 +652,24 @@ def main(argv: list[str] | None = None) -> int:
         progress_write(99, f"YouTube queue: {queue_result.get('job_id', basename)}")
 
     if execution_id:
-        if progress_write:
-            progress_write(
-                100,
-                "Complete",
-                status="succeeded",
-            )
-        else:
-            from music_assembler.job_progress import write_progress_json
+        from music_assembler.job_progress import write_progress_json
 
-            write_progress_json(
-                client,
-                cfg_r2.bucket,
-                execution_id,
-                pct=100,
-                stage="Complete",
-                category=prefixes.images_folder,
-                status="succeeded",
-                extra={"output_folder": str(result["output_dir"])},
-            )
+        write_progress_json(
+            client,
+            cfg_r2.bucket,
+            execution_id,
+            pct=100,
+            stage="Complete",
+            category=prefixes.images_folder,
+            status="succeeded",
+            extra={
+                "output_folder": str(result["output_dir"]),
+                "video_id": basename,
+                "channel": prefixes.channel,
+            },
+        )
+        if progress_write:
+            print("\r  [100.0%] Complete", end="", flush=True, file=sys.stderr)
 
     print("==> Done")
 

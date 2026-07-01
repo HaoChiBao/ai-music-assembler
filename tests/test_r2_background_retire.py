@@ -58,6 +58,23 @@ def _patch_exists(client: _FakeClient):
     ]
     mod.list_in_flight_background_names = lambda *_a, **_k: set()  # type: ignore[assignment]
 
+    def _claims(_c, _b, images_prefix: str):
+        prefix = f"{images_prefix}in-flight/"
+        out: dict[str, list[tuple[str, str]]] = {}
+        for key in client._keys:
+            if not key.startswith(prefix):
+                continue
+            rel = key[len(prefix) :]
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
+                continue
+            out.setdefault(parts[1], []).append((parts[0], key))
+        for rows in out.values():
+            rows.sort(key=lambda row: row[0])
+        return out
+
+    mod.list_in_flight_background_claims = _claims  # type: ignore[assignment]
+
 
 class TestCopyThenDelete(unittest.TestCase):
     def test_moves_object_to_dest_and_removes_source(self) -> None:
