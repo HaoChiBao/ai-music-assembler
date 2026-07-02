@@ -1072,15 +1072,15 @@ _DASHBOARD_DESIGN_ROOT_CSS = """    /* Wispr Flow design tokens — see DESIGN.m
       --font-figtree: 'Figtree', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       --font-eb-garamond: 'EB Garamond', 'Times New Roman', Georgia, serif;
       --page-max-width: 1200px;
-      --section-gap: 64px;
-      --card-padding: 32px;
+      --section-gap: 48px;
+      --card-padding: 28px;
       --element-gap: 16px;
       --radius-nav: 14px;
-      --radius-cards: 20px;
+      --radius-cards: 32px;
       --radius-badges: 9999px;
       --radius-images: 12px;
-      --radius-buttons: 10px;
-      --radius-small: 6px;
+      --radius-buttons: 14px;
+      --radius-small: 8px;
     }"""
 
 _LOGIN_HTML = (
@@ -1244,16 +1244,17 @@ _DASHBOARD_HTML = (
     body {
       font-family: var(--font-figtree);
       font-size: 16px;
-      line-height: 1.3;
+      line-height: 1.4;
       background: var(--color-cream-paper);
       color: var(--color-midnight-ink);
       margin: 0;
-      padding: 0 0 56px;
+      padding: 0 0 52px;
+      -webkit-font-smoothing: antialiased;
     }
     .page {
       max-width: var(--page-max-width);
       margin: 0 auto;
-      padding: 0 32px;
+      padding: 20px 32px 0;
     }
     h1, h2, h3 {
       font-family: var(--font-figtree);
@@ -1262,21 +1263,38 @@ _DASHBOARD_HTML = (
       letter-spacing: -0.02em;
     }
     h2 {
-      font-size: 18px;
-      line-height: 1.25;
-      margin: 0 0 4px;
+      font-size: 17px;
+      line-height: 1.3;
+      margin: 0 0 6px;
     }
     h2::after { display: none; }
     h3 {
-      font-size: 15px;
+      font-size: 14px;
+      line-height: 1.35;
+      margin: 20px 0 8px;
+      font-weight: 600;
+      color: var(--color-smoke);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .panel-title {
+      margin: 0;
+      flex: 1;
+      font-size: 16px;
+      font-weight: 600;
       line-height: 1.3;
-      margin: 16px 0 8px;
+    }
+    .panel-count {
+      font-weight: 400;
+      font-size: 13px;
+      color: var(--color-smoke);
     }
     .card-desc {
       color: var(--color-smoke);
       font-size: 14px;
-      line-height: 1.4;
-      margin: 0 0 20px;
+      line-height: 1.45;
+      margin: 0 0 18px;
+      max-width: 52ch;
     }
     .muted {
       color: var(--color-smoke);
@@ -1289,11 +1307,11 @@ _DASHBOARD_HTML = (
       justify-content: space-between;
       gap: 16px;
       flex-wrap: wrap;
-      padding: 14px 0;
-      margin: 0 0 8px;
-      border-bottom: 1px solid var(--color-stone-mist);
-      background: transparent;
-      border-radius: 0;
+      padding: 10px 16px;
+      margin: 0 0 20px;
+      background: var(--color-white);
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-nav);
     }
     .wordmark {
       font-size: 15px;
@@ -1315,41 +1333,55 @@ _DASHBOARD_HTML = (
     }
     .nav-link:hover { color: var(--color-midnight-ink); background: var(--color-pale-lavender-tint); }
     .stats-strip {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 0 0 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+      gap: 10px;
+      margin: 0 0 24px;
     }
     .stat-chip {
-      display: inline-flex;
-      align-items: baseline;
-      gap: 6px;
-      padding: 6px 12px;
-      background: var(--color-white);
-      border: 1px solid var(--color-stone-mist);
-      border-radius: var(--radius-badges);
-      font-size: 13px;
-    }
-    .stat-label { color: var(--color-smoke); }
-    .stat-value { font-weight: 600; color: var(--color-midnight-ink); font-variant-numeric: tabular-nums; }
-    .main-nav {
-      display: inline-flex;
+      display: flex;
+      flex-direction: column;
       gap: 2px;
-      padding: 3px;
-      margin: 0 0 20px;
+      padding: 12px 14px;
       background: var(--color-white);
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-buttons);
+      font-size: 13px;
+      min-height: 3.25rem;
+    }
+    .stat-label {
+      color: var(--color-smoke);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    .stat-value {
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      font-size: 18px;
+      line-height: 1.2;
+      font-variant-numeric: tabular-nums;
+    }
+    .main-nav {
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+      margin: 0 0 24px;
+      background: var(--color-white);
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-nav);
     }
     .main-tab {
       background: transparent;
       color: var(--color-smoke);
       border: none;
-      border-radius: calc(var(--radius-buttons) - 2px);
-      padding: 8px 16px;
+      border-radius: calc(var(--radius-nav) - 4px);
+      padding: 9px 18px;
       font-size: 14px;
       font-weight: 500;
       text-decoration: none;
+      flex: 1;
+      text-align: center;
     }
     .main-tab:hover { color: var(--color-midnight-ink); }
     .main-tab.active {
@@ -1362,8 +1394,8 @@ _DASHBOARD_HTML = (
     .main-section.active { display: block; }
     .job-nav {
       display: flex;
-      gap: 16px;
-      margin: 0 0 16px;
+      gap: 20px;
+      margin: 0 0 18px;
       border-bottom: 1px solid var(--color-stone-mist);
     }
     .job-tab {
@@ -1435,8 +1467,8 @@ _DASHBOARD_HTML = (
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-cards);
       box-shadow: none;
-      padding: 24px;
-      margin-bottom: 16px;
+      padding: var(--card-padding);
+      margin-bottom: 20px;
     }
     .card label {
       display: block;
@@ -1473,7 +1505,7 @@ _DASHBOARD_HTML = (
       font-weight: 400;
     }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-primary, #runBtn, #extendBtn {
+    .btn-primary, #runBtn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -1486,7 +1518,7 @@ _DASHBOARD_HTML = (
       font-weight: 600;
       text-transform: none;
     }
-    .btn-primary:hover, #runBtn:hover, #extendBtn:hover { background: var(--color-lavender-light); }
+    .btn-primary:hover, #runBtn:hover { background: var(--color-lavender-light); }
     .btn-secondary {
       display: inline-flex;
       align-items: center;
@@ -1533,31 +1565,42 @@ _DASHBOARD_HTML = (
       display: flex;
       gap: 4px;
       flex-wrap: wrap;
-      margin: 0 0 16px;
-      padding: 0;
+      margin: 0 0 20px;
+      padding: 4px;
+      background: var(--color-white);
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-nav);
+    }
+    .library-tabs .tab, .tabs .tab {
+      flex: 1;
+      text-align: center;
+      border-radius: calc(var(--radius-nav) - 4px);
+      padding: 9px 14px;
+      min-width: 6rem;
     }
     .tab, .subtab { margin: 0; }
     .tab.active, .subtab.active {
-      color: var(--color-midnight-ink);
+      color: var(--color-white);
       font-weight: 600;
-      background: var(--color-pale-lavender-tint);
+      background: var(--color-midnight-ink);
       text-decoration: none;
       box-shadow: none;
     }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td {
       text-align: left;
-      padding: 10px 8px;
+      padding: 11px 10px;
       border-bottom: 1px solid var(--color-stone-mist);
-      vertical-align: top;
+      vertical-align: middle;
     }
     th {
       font-weight: 500;
       color: var(--color-smoke);
-      font-size: 12px;
-      text-transform: none;
-      letter-spacing: 0;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
     }
+    tbody tr:last-child td { border-bottom: none; }
     tbody tr:hover td { background: var(--color-pale-lavender-tint); }
     .bar {
       height: 6px;
@@ -1614,16 +1657,16 @@ _DASHBOARD_HTML = (
       left: 0;
       right: 0;
       bottom: 0;
-      padding: 12px 50px;
+      padding: 10px 32px;
       background: var(--color-white);
-      color: var(--color-smoke);
+      color: var(--color-graphite-veil);
       font-size: 11px;
-      letter-spacing: 0.06em;
+      letter-spacing: 0;
       border-top: 1px solid var(--color-stone-mist);
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 4px 20px;
+      gap: 6px 18px;
       z-index: 50;
     }
     .obs-bar strong { color: var(--color-midnight-ink); font-weight: 600; }
@@ -1687,12 +1730,27 @@ _DASHBOARD_HTML = (
       max-height: 200px;
       overflow: auto;
       font-size: 14px;
+      line-height: 1.45;
       white-space: pre-wrap;
       background: transparent;
       padding: 0;
       border: none;
       color: var(--color-smoke);
-      font-family: var(--font-eb-garamond), Georgia, serif;
+      font-family: var(--font-figtree);
+    }
+    .detail-heading {
+      font-size: 12px;
+      font-weight: 600;
+      margin: 16px 0 6px;
+      color: var(--color-smoke);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .detail-meta {
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--color-graphite-veil);
+      word-break: break-all;
     }
     .asset-table { max-height: 400px; overflow: auto; }
     .modal {
@@ -1861,18 +1919,20 @@ _DASHBOARD_HTML = (
     .job-table-wrap thead th {
       position: sticky;
       top: 0;
-      background: var(--color-cream-paper);
+      background: var(--color-white);
       z-index: 1;
+      box-shadow: 0 1px 0 var(--color-stone-mist);
     }
     .job-table-wrap td.job-progress { min-width: 12rem; max-width: 28rem; vertical-align: top; }
     .json-block {
+      display: none;
       margin-top: 12px;
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-buttons);
       background: var(--color-cream-paper);
       overflow: hidden;
     }
-    .json-block:has(pre:empty) { display: none; }
+    .json-block.has-content { display: block; }
     .json-block-header {
       display: flex;
       justify-content: flex-end;
@@ -1899,11 +1959,12 @@ _DASHBOARD_HTML = (
     button.copy-btn.copied { color: var(--color-deep-forest-teal); font-weight: 600; }
     .job-toolbar {
       display: flex;
-      gap: 12px;
+      gap: 10px 14px;
       flex-wrap: wrap;
       align-items: center;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
+    .job-toolbar--flush { margin-top: 0; }
     .job-toolbar label {
       font-size: 13px;
       color: var(--color-smoke);
@@ -1915,7 +1976,7 @@ _DASHBOARD_HTML = (
     .job-toolbar select { width: auto; margin: 0; }
     .job-check-th, .job-check { width: 2.25rem; text-align: center; vertical-align: middle; }
     .job-check input, .job-check-th input { cursor: pointer; width: 1rem; height: 1rem; margin: 0; }
-    .section-card { margin-bottom: 0; padding: 0; border: none; background: transparent; }
+    .section-card { margin-bottom: 0; }
     a { color: var(--color-deep-forest-teal); text-decoration: none; }
     a:hover { text-decoration: underline; text-underline-offset: 2px; }
     @media (max-width: 720px) {
@@ -1923,7 +1984,7 @@ _DASHBOARD_HTML = (
       .obs-bar { padding: 10px 16px; }
       .create-grid { grid-template-columns: 1fr; }
       .form-row-2, .form-row-3 { grid-template-columns: 1fr; }
-      .btn-primary, #runBtn, #extendBtn { width: 100%; }
+      .btn-primary, #runBtn { width: 100%; }
       .main-nav { display: flex; width: 100%; }
       .main-tab { flex: 1; text-align: center; padding: 10px 8px; }
     }
@@ -1946,8 +2007,8 @@ _DASHBOARD_HTML = (
   </header>
 
   <div class="stats-strip" id="statsStrip" aria-label="Pipeline status">
-    <div class="stat-chip"><span class="stat-label">Running</span><span class="stat-value" id="statRunning">0</span></div>
-    <div class="stat-chip"><span class="stat-label">Ready backgrounds</span><span class="stat-value" id="statPostProcessed">—</span></div>
+    <div class="stat-chip"><span class="stat-label">Active jobs</span><span class="stat-value" id="statRunning">0</span></div>
+    <div class="stat-chip"><span class="stat-label">Backgrounds ready</span><span class="stat-value" id="statPostProcessed">—</span></div>
     <div class="stat-chip"><span class="stat-label">To extend</span><span class="stat-value" id="statExtendPending">—</span></div>
     <div class="stat-chip"><span class="stat-label">Tracks</span><span class="stat-value" id="statMusic">—</span></div>
     <div class="stat-chip"><span class="stat-label">Videos</span><span class="stat-value" id="statVideos">—</span></div>
@@ -1970,7 +2031,7 @@ _DASHBOARD_HTML = (
 
       <div id="jobPanelAssembly" class="job-panel active">
         <div class="job-toolbar">
-          <h2 style="margin:0;flex:1">Assembly jobs <span class="muted" id="assemblyJobCount" style="font-weight:400;font-size:13px"></span></h2>
+          <h2 class="panel-title">Assembly jobs <span class="panel-count" id="assemblyJobCount"></span></h2>
           <label>Status
             <select id="jobFilter"><option value="">All</option><option>running</option><option>succeeded</option><option>failed</option></select>
           </label>
@@ -1984,7 +2045,7 @@ _DASHBOARD_HTML = (
 
       <div id="jobPanelExtend" class="job-panel">
         <div class="job-toolbar">
-          <h2 style="margin:0;flex:1">Extend jobs <span class="muted" id="extendJobCount" style="font-weight:400;font-size:13px"></span></h2>
+          <h2 class="panel-title">Extend jobs <span class="panel-count" id="extendJobCount"></span></h2>
           <button type="button" class="secondary" id="expandExtendTable">Expand table</button>
           <button type="button" class="danger" id="cancelSelectedExtend" disabled>Cancel selected</button>
         </div>
@@ -1999,24 +2060,24 @@ _DASHBOARD_HTML = (
     <div class="create-grid">
       <div class="card">
         <h2>Assemble video</h2>
-        <p class="card-desc">Pick a channel and background folder, then start encoding on Cloud Run.</p>
+        <p class="card-desc">Encode a playlist video on Cloud Run.</p>
         <div class="form-stack">
           <div>
             <label for="runChannel">YouTube channel</label>
             <select id="runChannel" required><option value="">Select channel…</option></select>
           </div>
           <div>
-            <label for="runChannelCustom">Or new channel slug</label>
-            <input id="runChannelCustom" placeholder="e.g. nappabeats"/>
-            <p class="hint">Optional — overrides the dropdown above.</p>
-          </div>
-          <div>
             <label for="runImagesFolder">Background folder</label>
             <select id="runImagesFolder" required><option value="">Loading…</option></select>
           </div>
           <details class="advanced">
-            <summary>Advanced options</summary>
+            <summary>More options</summary>
             <div class="form-stack">
+              <div>
+                <label for="runChannelCustom">Custom channel slug</label>
+                <input id="runChannelCustom" placeholder="e.g. nappabeats"/>
+                <p class="hint">Overrides the dropdown when set.</p>
+              </div>
               <div class="checkbox-row">
                 <input type="checkbox" id="runQueueYoutube" checked/>
                 <label for="runQueueYoutube">Queue for YouTube upload when finished</label>
@@ -2062,7 +2123,7 @@ _DASHBOARD_HTML = (
 
       <div class="card">
         <h2>Extend backgrounds</h2>
-        <p class="card-desc">Gemini extend from <code>pre-processed/</code> → <code>post-processed/</code>. <strong id="extendPending">…</strong> waiting.</p>
+        <p class="card-desc"><strong id="extendPending">…</strong> images waiting in <code>pre-processed/</code>.</p>
         <div class="form-stack">
           <div>
             <label for="extendLimit">Batch size</label>
@@ -2076,7 +2137,7 @@ _DASHBOARD_HTML = (
           </div>
         </div>
         <div class="card-actions">
-          <button id="extendBtn" class="btn-secondary">Start extend</button>
+          <button id="extendBtn" class="btn-ghost">Start extend</button>
           <div class="json-block">
             <div class="json-block-header">
               <button type="button" class="secondary expand-btn" data-expand-target="extendResult">Expand</button>
@@ -2094,23 +2155,23 @@ _DASHBOARD_HTML = (
     <nav class="library-tabs tabs" role="tablist" aria-label="Library">
       <button type="button" class="tab active" data-tab="videos">Videos</button>
       <button type="button" class="tab" data-tab="assets">Backgrounds</button>
-      <button type="button" class="tab" data-tab="obs">Debug</button>
+      <button type="button" class="tab" data-tab="obs">System</button>
     </nav>
 
     <div id="panelVideos" class="panel card active">
-      <div class="job-toolbar" style="margin-top:0">
-        <h2 style="margin:0;flex:1">Music videos</h2>
+      <div class="job-toolbar job-toolbar--flush">
+        <h2 class="panel-title">Music videos</h2>
         <label>Channel
           <select id="videoChannel"><option value="">All channels</option></select>
         </label>
       </div>
-      <p class="card-desc">Click a row to preview metadata and playback.</p>
-      <div id="videoList"><p class="muted">Select Library → Videos to load.</p></div>
+      <p class="card-desc">Open a row to preview metadata and playback.</p>
+      <div id="videoList"><p class="muted">Loading videos…</p></div>
     </div>
 
     <div id="panelAssets" class="panel card">
       <h2>Background images</h2>
-      <p class="card-desc">Click a filename to preview. Images load on demand.</p>
+      <p class="card-desc">Browse R2 pools. Click a filename to preview.</p>
       <div class="subtabs" id="assetPools">
         <button type="button" class="subtab secondary active" data-pool="pre-processed">Pre-processed</button>
         <button type="button" class="subtab secondary" data-pool="post-processed">Post-processed</button>
@@ -2121,10 +2182,10 @@ _DASHBOARD_HTML = (
     </div>
 
     <div id="panelObs" class="panel card">
-      <h2>Debug</h2>
-      <p class="card-desc">API observability and raw inventory JSON.</p>
+      <h2>System</h2>
+      <p class="card-desc">API cache stats and raw inventory.</p>
       <pre id="obsDetail" class="muted">Loading…</pre>
-      <h3>Recent API calls</h3>
+      <h3>Recent requests</h3>
       <table><thead><tr><th>Time</th><th>Endpoint</th><th>ms</th><th>Cache</th></tr></thead><tbody id="obsFetches"></tbody></table>
     </div>
   </section>
@@ -2246,6 +2307,13 @@ async function api(path, opts={}) {
 
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+}
+function showResultBlock(preId, content) {
+  const pre = document.getElementById(preId);
+  if (!pre) return;
+  const text = String(content ?? '');
+  pre.textContent = text;
+  pre.closest('.json-block')?.classList.toggle('has-content', !!text.trim());
 }
 function copyFromPre(preId, btn) {
   const el = document.getElementById(preId);
@@ -2697,16 +2765,16 @@ async function toggleVideoDetail(id, wrap) {
     if (ch) url += '?channel=' + encodeURIComponent(ch);
     const v = await api(url);
     ui.videoDetails.set(id, v);
-    const track = v.tracklist ? '<h4 style="font-size:.85rem;margin:.75rem 0 .25rem">Tracklist</h4><pre class="desc">' + esc(v.tracklist) + '</pre>' : '';
+    const track = v.tracklist ? '<h4 class="detail-heading">Tracklist</h4><pre class="desc">' + esc(v.tracklist) + '</pre>' : '';
     detail.innerHTML =
       '<p><strong>' + esc(v.title || id) + '</strong></p>' +
-      (v.description ? '<h4 style="font-size:.85rem;margin:.5rem 0 .25rem">Description</h4><div class="desc">' + esc(v.description) + '</div>' : '<p class="muted">No description file</p>') +
+      (v.description ? '<h4 class="detail-heading">Description</h4><div class="desc">' + esc(v.description) + '</div>' : '<p class="muted">No description file</p>') +
       track +
       (v.has_video
-        ? '<p style="margin-top:.75rem"><button type="button" class="secondary play-btn">Load video preview</button></p>' +
+        ? '<p style="margin-top:12px"><button type="button" class="secondary play-btn">Load video preview</button></p>' +
           '<video controls preload="none" playsinline style="display:none"></video>'
         : '<p class="muted">No MP4 in this folder</p>') +
-      '<p class="muted" style="margin-top:.5rem;font-size:.75rem">' + esc(v.r2_prefix) + '</p>';
+      '<p class="detail-meta">' + esc(v.r2_prefix) + '</p>';
     const playBtn = detail.querySelector('.play-btn');
   const videoEl = detail.querySelector('video');
     if (playBtn && videoEl) {
@@ -2976,14 +3044,14 @@ document.getElementById('runBtn').onclick = async () => {
       count: parseInt(document.getElementById('runCount').value, 10),
       queue_youtube: document.getElementById('runQueueYoutube').checked,
     })});
-    document.getElementById('runResult').textContent = JSON.stringify(r, null, 2);
+    showResultBlock('runResult', JSON.stringify(r, null, 2));
     ui.tabsLoaded.videos = false;
     ui.lastStatsAt = 0;
     await pollSnapshot({ includeStats: true });
     schedulePoll(3000);
     showMainSection('jobs');
     document.querySelector('.job-tab[data-job="assembly"]')?.click();
-  } catch (e) { document.getElementById('runResult').textContent = String(e); }
+  } catch (e) { showResultBlock('runResult', String(e)); }
   setBtnLoading(btn, false);
 };
 document.getElementById('extendBtn').onclick = async () => {
@@ -2996,14 +3064,14 @@ document.getElementById('extendBtn').onclick = async () => {
       process_all: lim === 'all',
       limit: lim === 'all' ? null : parseInt(lim, 10),
     })});
-    document.getElementById('extendResult').textContent = JSON.stringify(r, null, 2);
+    showResultBlock('extendResult', JSON.stringify(r, null, 2));
     ui.tabsLoaded.assets = false;
     ui.lastStatsAt = 0;
     await pollSnapshot({ includeStats: true });
     schedulePoll(3000);
     showMainSection('jobs');
     document.querySelector('.job-tab[data-job="extend"]')?.click();
-  } catch (e) { document.getElementById('extendResult').textContent = String(e); }
+  } catch (e) { showResultBlock('extendResult', String(e)); }
   setBtnLoading(btn, false);
 };
 document.getElementById('jobFilter').onchange = () => {
