@@ -83,6 +83,28 @@ gcloud scheduler jobs create http assembly-health-check \
 
 Returns HTTP ``207`` when issues are found (useful for alerting).
 
+### Per-channel assembly schedules (YAN-46)
+
+The control API exposes ``GET`` or ``POST /v1/cron/run-schedules`` (``X-API-Key``). Every **15 minutes** it evaluates per-channel schedules stored in R2 ``schedules/schedules.json``, matches due slots in each channel's timezone, runs pre-flight resource checks, and starts ``music-assemble`` jobs with idempotency via ``schedules/runs/{slot_key}.json``.
+
+Configure schedules in the dashboard **Schedule** tab or via ``PUT /v1/schedules/{channel}``.
+
+```bash
+API_URL="https://music-assembly-api-17161979106.northamerica-northeast2.run.app"
+SCHEDULER_LOCATION="northamerica-northeast1"
+
+gcloud scheduler jobs create http assembly-run-schedules \
+  --location "$SCHEDULER_LOCATION" \
+  --schedule "*/15 * * * *" \
+  --uri "${API_URL}/v1/cron/run-schedules" \
+  --http-method POST \
+  --headers "X-API-Key=YOUR_ASSEMBLY_API_KEY"
+```
+
+Dry-run (no jobs started): ``GET /v1/cron/run-schedules?dry_run=true``
+
+The legacy ``music-assemble-daily`` job (direct Cloud Run Job HTTP trigger at 02:00 UTC) is superseded by this dispatcher — schedules can specify per-day local times instead of a single UTC cron.
+
 ## Local smoke test (no GCP)
 
 With R2 credentials in the environment:

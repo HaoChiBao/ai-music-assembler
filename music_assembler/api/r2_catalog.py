@@ -396,6 +396,13 @@ def find_video_key(
     )
 
 
+def _asset_folder(category: str, pool: str, images_folder: str | None = None) -> str:
+    """Folder segment for asset pools — ``images_folder`` for post-processed backgrounds."""
+    if pool in ("post-processed", "post-used") and images_folder and str(images_folder).strip():
+        return str(images_folder).strip().strip("/")
+    return category
+
+
 def list_assets(
     client,
     bucket: str,
@@ -403,11 +410,13 @@ def list_assets(
     category: str,
     pool: str,
     limit: int = 500,
+    images_folder: str | None = None,
 ) -> list[dict[str, Any]]:
     """List image metadata for a pre/post-processed pool (no image bytes)."""
     if pool not in _ASSET_POOLS:
         raise ValueError(f"Unknown pool: {pool}")
-    prefix = _ASSET_POOLS[pool](category)
+    folder = _asset_folder(category, pool, images_folder)
+    prefix = _ASSET_POOLS[pool](folder)
     rows: list[dict[str, Any]] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -430,9 +439,16 @@ def list_assets(
     return rows[:limit]
 
 
-def asset_object_key(category: str, pool: str, name: str) -> str:
+def asset_object_key(
+    category: str,
+    pool: str,
+    name: str,
+    *,
+    images_folder: str | None = None,
+) -> str:
     if pool not in _ASSET_POOLS:
         raise ValueError(f"Unknown pool: {pool}")
     if "/" in name or ".." in name:
         raise ValueError("Invalid asset name")
-    return _ASSET_POOLS[pool](category) + name
+    folder = _asset_folder(category, pool, images_folder)
+    return _ASSET_POOLS[pool](folder) + name

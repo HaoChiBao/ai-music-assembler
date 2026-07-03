@@ -1,6 +1,6 @@
 [project]
 name = "music-video-assembler"
-version = "0.1.9"
+version = "0.1.11"
 description = "Assemble long MP3 mixes from a library and mux with a titled still image into MP4."
 readme = "README.md"
 requires-python = ">=3.10"

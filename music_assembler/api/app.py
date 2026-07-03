@@ -28,6 +28,7 @@ from music_assembler.api import job_cancel
 from music_assembler.api import job_runs
 from music_assembler.api import job_status
 from music_assembler.api import assembly_health
+from music_assembler.api import assembly_schedule
 from music_assembler.api import r2_catalog
 from music_assembler.api import uploader_client
 from music_assembler.api.cache import dashboard_cache
@@ -48,6 +49,22 @@ app = FastAPI(
 )
 
 
+def _normalize_images_folder(value: str) -> str:
+    folder = value.strip().strip("/")
+    if not folder or ".." in folder or "/" in folder or "\\" in folder:
+        raise ValueError("images_folder must be a single folder name under post-processed/")
+    return folder
+
+
+def _assert_background_folder_exists(client, bucket: str, folder: str) -> None:
+    known = r2_catalog.list_background_folders(client, bucket)
+    if folder not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown background folder {folder!r}. Available: {', '.join(known) or '(none)'}",
+        )
+
+
 class StartJobRequest(BaseModel):
     category: str | None = Field(
         default=None,
@@ -59,9 +76,9 @@ class StartJobRequest(BaseModel):
         description="YouTube channel slug — output path music-video/{channel}/.",
         examples=["nappabeats"],
     )
-    images_folder: str | None = Field(
-        default=None,
-        description="R2 subfolder under post-processed/ for background stills (defaults to category).",
+    images_folder: str = Field(
+        ...,
+        description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
     thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["OMYO"])
@@ -85,13 +102,8 @@ class StartJobRequest(BaseModel):
 
     @field_validator("images_folder")
     @classmethod
-    def _validate_images_folder(cls, value: str | None) -> str | None:
-        if value is None or not str(value).strip():
-            return None
-        folder = value.strip().strip("/")
-        if not folder or ".." in folder or "/" in folder or "\\" in folder:
-            raise ValueError("images_folder must be a single folder name under post-processed/")
-        return folder
+    def _validate_images_folder(cls, value: str) -> str:
+        return _normalize_images_folder(value)
 
 
 class StartExtendRequest(BaseModel):
@@ -111,6 +123,66 @@ class DashboardLoginRequest(BaseModel):
 
 class CancelJobRequest(BaseModel):
     confirm: bool = Field(default=False, description="Set true to cancel; false returns a preview only.")
+
+
+class DaySlotRequest(BaseModel):
+    enabled: bool = False
+    assemble_at: str = "09:00"
+    upload_at: str | None = None
+
+
+class ChannelScheduleRequest(BaseModel):
+    enabled: bool = True
+    timezone: str = "America/New_York"
+    category: str | None = None
+    images_folder: str = Field(
+        ...,
+        description="R2 subfolder under post-processed/ for background stills (required).",
+        examples=["korean"],
+    )
+    duration_min: int = Field(default=90, ge=15, le=240)
+    variance_min: int = Field(default=15, ge=0, le=60)
+    thumbnail_text: str | None = None
+    queue_youtube: bool = True
+    default_assemble_at: str = "09:00"
+    default_upload_at: str | None = None
+    min_backgrounds: int = Field(default=1, ge=1, le=20)
+    auto_extend: bool = True
+    days: list[DaySlotRequest] = Field(default_factory=lambda: [DaySlotRequest() for _ in range(7)])
+    apply_default_to_enabled_days: bool = False
+
+    @field_validator("images_folder")
+    @classmethod
+    def _validate_schedule_images_folder(cls, value: str) -> str:
+        return _normalize_images_folder(value)
+
+
+def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assembly_schedule.ChannelSchedule:
+    if len(body.days) != 7:
+        raise HTTPException(status_code=400, detail="days must contain exactly 7 entries (Sun–Sat)")
+    sched = assembly_schedule.ChannelSchedule(
+        channel=normalize_channel(channel),
+        enabled=body.enabled,
+        timezone=body.timezone.strip(),
+        category=body.category,
+        images_folder=body.images_folder,
+        duration_min=body.duration_min,
+        variance_min=body.variance_min,
+        thumbnail_text=body.thumbnail_text,
+        queue_youtube=body.queue_youtube,
+        default_assemble_at=body.default_assemble_at,
+        default_upload_at=body.default_upload_at,
+        min_backgrounds=body.min_backgrounds,
+        auto_extend=body.auto_extend,
+        days=[assembly_schedule.DaySlot.from_dict(d.model_dump()) for d in body.days],
+    )
+    if body.apply_default_to_enabled_days:
+        assembly_schedule.apply_default_times(
+            sched,
+            assemble_at=body.default_assemble_at,
+            upload_at=body.default_upload_at,
+        )
+    return sched
 
 
 def _settings() -> ApiSettings:
@@ -355,6 +427,13 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/channels",
             "GET /v1/cron/assembly-health",
             "POST /v1/cron/assembly-health",
+            "GET /v1/schedules",
+            "GET /v1/schedules/{channel}",
+            "PUT /v1/schedules/{channel}",
+            "DELETE /v1/schedules/{channel}",
+            "GET /v1/schedules/{channel}/status",
+            "GET /v1/cron/run-schedules",
+            "POST /v1/cron/run-schedules",
         ],
     }
 
@@ -396,9 +475,10 @@ def start_job(
             detail="channel is required (YouTube channel slug for music-video/{channel}/ output)",
         )
     client, bucket = _r2()
+    _assert_background_folder_exists(client, bucket, body.images_folder)
     _invalidate_category_cache(category)
-    if images_folder and images_folder != category:
-        _invalidate_category_cache(images_folder)
+    if body.images_folder != category:
+        _invalidate_category_cache(body.images_folder)
 
     jobs: list[dict[str, Any]] = []
     assigned_gcp: set[str] = set()
@@ -545,6 +625,143 @@ def cron_assembly_health(
     return JSONResponse(content=report, status_code=status_code)
 
 
+def _start_extend_for_schedule(
+    client,
+    bucket: str,
+    settings: ApiSettings,
+    *,
+    execution_id: str,
+    category: str,
+    max_images: int,
+    force: bool,
+) -> dict[str, Any]:
+    write_meta_json(
+        client,
+        bucket,
+        execution_id,
+        category=category,
+        job_type="extend",
+        limit=max_images,
+    )
+    write_progress_json(
+        client,
+        bucket,
+        execution_id,
+        pct=0,
+        stage="Scheduled auto-extend…",
+        category=category,
+        status="running",
+        extra={"job_type": "extend", "source": "schedule"},
+    )
+    return gcp_jobs.start_extend_job(
+        settings,
+        execution_id=execution_id,
+        category=category,
+        max_images=max_images,
+        force=force,
+    )
+
+
+@app.get("/v1/schedules")
+def list_schedules(
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    schedules = assembly_schedule.list_schedules(client, bucket)
+    return {"schedules": [s.to_dict() for s in schedules], "count": len(schedules)}
+
+
+@app.get("/v1/schedules/{channel}")
+def get_schedule(
+    channel: str,
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    sched = assembly_schedule.get_schedule(client, bucket, normalize_channel(channel))
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return sched.to_dict()
+
+
+@app.put("/v1/schedules/{channel}")
+def put_schedule(
+    channel: str,
+    body: ChannelScheduleRequest,
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    try:
+        sched = _schedule_from_request(channel, body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    client, bucket = _r2()
+    _assert_background_folder_exists(client, bucket, sched.images_folder or body.images_folder)
+    saved = assembly_schedule.upsert_schedule(client, bucket, sched)
+    return saved.to_dict()
+
+
+@app.delete("/v1/schedules/{channel}")
+def remove_schedule(
+    channel: str,
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    if not assembly_schedule.delete_schedule(client, bucket, normalize_channel(channel)):
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {"deleted": True, "channel": channel}
+
+
+@app.get("/v1/schedules/{channel}/status")
+def schedule_status(
+    channel: str,
+    _auth: None = Depends(require_api_auth),
+    settings: ApiSettings = Depends(_settings),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    sched = assembly_schedule.get_schedule(client, bucket, normalize_channel(channel))
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    resources = assembly_schedule.evaluate_resources(client, bucket, sched, settings)
+    upcoming = assembly_schedule.preview_schedule(sched)
+    return {
+        "schedule": sched.to_dict(),
+        "resources": resources,
+        "upcoming": upcoming,
+    }
+
+
+@app.post("/v1/cron/run-schedules")
+@app.get("/v1/cron/run-schedules")
+def cron_run_schedules(
+    dry_run: bool = Query(default=False),
+    window_minutes: int = Query(default=assembly_schedule.DEFAULT_WINDOW_MINUTES, ge=5, le=60),
+    _auth: None = Depends(require_api_auth),
+    settings: ApiSettings = Depends(_settings),
+) -> dict[str, Any]:
+    """Evaluate per-channel schedules and start assembly jobs (Cloud Scheduler every 15m)."""
+    client, bucket = _r2()
+
+    def _extend(client, bucket, settings, *, execution_id, category, max_images, force):
+        return _start_extend_for_schedule(
+            client,
+            bucket,
+            settings,
+            execution_id=execution_id,
+            category=category,
+            max_images=max_images,
+            force=force,
+        )
+
+    return assembly_schedule.run_due_schedules(
+        client,
+        bucket,
+        settings,
+        window_minutes=window_minutes,
+        dry_run=dry_run,
+        new_execution_id=_new_execution_id,
+        start_extend_fn=_extend,
+    )
+
+
 @app.get("/v1/media/thumbnail")
 def media_thumbnail(
     channel: str,
@@ -592,12 +809,21 @@ def media_asset(
     category: str,
     pool: str = Query(pattern="^(pre-processed|pre-used|post-processed|post-used)$"),
     name: str = Query(min_length=1, max_length=512),
+    images_folder: str | None = Query(default=None),
     _auth: None = Depends(require_api_auth),
 ) -> Response:
     """Proxy a single pre/post-processed image (loaded on demand from dashboard)."""
     client, bucket = _r2()
+    folder: str | None = None
+    if pool in ("post-processed", "post-used"):
+        if not images_folder or not str(images_folder).strip():
+            raise HTTPException(status_code=400, detail="images_folder is required for this pool")
+        try:
+            folder = _normalize_images_folder(images_folder)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        key = r2_catalog.asset_object_key(category, pool, name)
+        key = r2_catalog.asset_object_key(category, pool, name, images_folder=folder)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
@@ -665,18 +891,43 @@ def observability(_auth: None = Depends(require_api_auth)) -> dict[str, Any]:
 def list_assets(
     category: str | None = None,
     pool: str = Query(pattern="^(pre-processed|pre-used|post-processed|post-used)$"),
+    images_folder: str | None = Query(
+        default=None,
+        description="Background pool under post-processed/ (required for post-processed and post-used pools).",
+    ),
     limit: int = Query(default=200, ge=1, le=1000),
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> JSONResponse:
     """List image filenames + metadata only (no bytes)."""
     cat = category or settings.default_category
-    cache_key = _cache_key("assets", cat, pool, str(limit))
+    folder: str | None = None
+    if pool in ("post-processed", "post-used"):
+        if not images_folder or not str(images_folder).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="images_folder is required for post-processed and post-used asset pools",
+            )
+        try:
+            folder = _normalize_images_folder(images_folder)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    cache_key = _cache_key("assets", cat, pool, folder or "", str(limit))
 
     def load() -> dict[str, Any]:
         client, bucket = _r2()
-        items = r2_catalog.list_assets(client, bucket, category=cat, pool=pool, limit=limit)
-        return {"category": cat, "pool": pool, "items": items, "count": len(items)}
+        if folder:
+            _assert_background_folder_exists(client, bucket, folder)
+        items = r2_catalog.list_assets(
+            client, bucket, category=cat, pool=pool, limit=limit, images_folder=folder
+        )
+        return {
+            "category": cat,
+            "images_folder": folder,
+            "pool": pool,
+            "items": items,
+            "count": len(items),
+        }
 
     data, hit = dashboard_cache.get_or_set(cache_key, 60.0, load)
     return JSONResponse(
@@ -1462,6 +1713,16 @@ _DASHBOARD_HTML = (
     }
     .checkbox-row input { width: auto; margin: 2px 0 0; }
     .checkbox-row label { margin: 0; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    .schedule-top { margin-bottom: 20px; }
+    .schedule-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 4px 0 8px; }
+    .schedule-table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; }
+    .schedule-table th, .schedule-table td { padding: 10px 8px; border-bottom: 1px solid var(--color-border); text-align: left; }
+    .schedule-table input[type="time"] { width: 100%; max-width: 140px; }
+    .schedule-table input[type="checkbox"] { width: auto; }
+    .schedule-status { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+    .schedule-status h3 { margin: 16px 0 8px; font-size: 15px; }
+    .asset-folder-label { display: block; margin: 0 0 12px; font-size: 14px; }
+    .asset-folder-label select { margin-top: 6px; width: min(280px, 100%); }
     .card {
       background: var(--color-white);
       border: 1px solid var(--color-stone-mist);
@@ -2020,6 +2281,7 @@ _DASHBOARD_HTML = (
     <button type="button" class="main-tab active" data-section="jobs">Jobs</button>
     <button type="button" class="main-tab" data-section="create">New run</button>
     <button type="button" class="main-tab" data-section="library">Library</button>
+    <button type="button" class="main-tab" data-section="schedule">Schedule</button>
   </nav>
 
   <section id="sectionJobs" class="main-section active">
@@ -2069,6 +2331,7 @@ _DASHBOARD_HTML = (
           <div>
             <label for="runImagesFolder">Background folder</label>
             <select id="runImagesFolder" required><option value="">Loading…</option></select>
+            <p class="hint">Pool under <code>post-processed/{folder}/</code> on R2 — each video claims one random still from this folder.</p>
           </div>
           <details class="advanced">
             <summary>More options</summary>
@@ -2171,7 +2434,10 @@ _DASHBOARD_HTML = (
 
     <div id="panelAssets" class="panel card">
       <h2>Background images</h2>
-      <p class="card-desc">Browse R2 pools. Click a filename to preview.</p>
+      <p class="card-desc">Browse R2 pools by folder. Click a filename to preview.</p>
+      <label class="asset-folder-label" id="assetFolderWrap" hidden>Background folder
+        <select id="assetImagesFolder"><option value="">Loading…</option></select>
+      </label>
       <div class="subtabs" id="assetPools">
         <button type="button" class="subtab secondary active" data-pool="pre-processed">Pre-processed</button>
         <button type="button" class="subtab secondary" data-pool="post-processed">Post-processed</button>
@@ -2187,6 +2453,80 @@ _DASHBOARD_HTML = (
       <pre id="obsDetail" class="muted">Loading…</pre>
       <h3>Recent requests</h3>
       <table><thead><tr><th>Time</th><th>Endpoint</th><th>ms</th><th>Cache</th></tr></thead><tbody id="obsFetches"></tbody></table>
+    </div>
+  </section>
+
+  <section id="sectionSchedule" class="main-section">
+    <div class="card section-card">
+      <div class="job-toolbar job-toolbar--flush">
+        <h2 class="panel-title">Assembly schedule</h2>
+        <label>Channel
+          <select id="scheduleChannel"><option value="">Select channel…</option></select>
+        </label>
+        <button type="button" class="secondary" id="scheduleReload">Reload</button>
+      </div>
+      <p class="card-desc">Auto-assemble videos on a weekly cadence. Cloud Scheduler calls <code>/v1/cron/run-schedules</code> every 15 minutes.</p>
+
+      <div id="scheduleEmpty" class="muted">Select a channel to configure its schedule.</div>
+      <div id="scheduleEditor" hidden>
+        <div class="form-stack schedule-top">
+          <div class="checkbox-row">
+            <input type="checkbox" id="scheduleEnabled" checked/>
+            <label for="scheduleEnabled">Schedule enabled</label>
+          </div>
+          <div class="form-row-3">
+            <div>
+              <label for="scheduleTimezone">Timezone</label>
+              <input id="scheduleTimezone" value="America/New_York" placeholder="America/New_York"/>
+            </div>
+            <div>
+              <label for="scheduleImagesFolder">Background folder</label>
+              <select id="scheduleImagesFolder" required><option value="">Loading…</option></select>
+            </div>
+            <div>
+              <label for="scheduleDefaultAssemble">Default assemble time</label>
+              <input id="scheduleDefaultAssemble" type="time" value="09:00"/>
+            </div>
+          </div>
+          <div class="form-row-3">
+            <div>
+              <label for="scheduleDefaultUpload">Default upload time</label>
+              <input id="scheduleDefaultUpload" type="time"/>
+            </div>
+          </div>
+          <div class="schedule-bulk">
+            <button type="button" class="secondary" id="scheduleApplyDefault">Apply default times to enabled days</button>
+            <span class="hint">Per-day overrides below still apply after bulk update.</span>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="scheduleQueueYoutube" checked/>
+            <label for="scheduleQueueYoutube">Queue YouTube upload when assembly finishes</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="scheduleAutoExtend" checked/>
+            <label for="scheduleAutoExtend">Auto-extend when backgrounds are low</label>
+          </div>
+        </div>
+
+        <table class="schedule-table">
+          <thead>
+            <tr><th>Day</th><th>On</th><th>Assemble</th><th>Upload</th></tr>
+          </thead>
+          <tbody id="scheduleDaysBody"></tbody>
+        </table>
+
+        <div class="card-actions">
+          <button type="button" class="btn-primary" id="scheduleSave">Save schedule</button>
+          <button type="button" class="danger" id="scheduleDelete">Delete</button>
+        </div>
+
+        <div class="schedule-status">
+          <h3>Resource check</h3>
+          <pre id="scheduleResources" class="muted">—</pre>
+          <h3>Upcoming slots</h3>
+          <div id="scheduleUpcoming"><p class="muted">—</p></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -2368,14 +2708,15 @@ function videoChannelFilter() {
   return document.getElementById('videoChannel').value.trim();
 }
 
-async function loadBackgroundFolders() {
-  const el = document.getElementById('runImagesFolder');
-  const keep = el.value;
+async function populateBackgroundFolderSelect(selectId, selected) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const keep = selected || el.value;
   try {
     const d = await api('/v1/background-folders');
     const folders = d.folders || [];
     el.innerHTML = folders.length
-      ? ''
+      ? '<option value="">Select folder…</option>'
       : '<option value="">No folders on R2</option>';
     for (const f of folders) {
       el.innerHTML += '<option value="' + esc(f) + '">' + esc(f) + '</option>';
@@ -2383,11 +2724,34 @@ async function loadBackgroundFolders() {
     const def = '__DEFAULT_CATEGORY__';
     if (keep && folders.includes(keep)) el.value = keep;
     else if (folders.includes(def)) el.value = def;
-    else if (folders.length) el.value = folders[0];
+    else if (folders.length === 1) el.value = folders[0];
   } catch (e) {
-    console.warn('background-folders', e);
+    console.warn('background-folders', selectId, e);
     el.innerHTML = '<option value="__DEFAULT_CATEGORY__">__DEFAULT_CATEGORY__</option>';
   }
+}
+
+async function loadBackgroundFolders() {
+  await Promise.all([
+    populateBackgroundFolderSelect('runImagesFolder'),
+    populateBackgroundFolderSelect('scheduleImagesFolder'),
+    populateBackgroundFolderSelect('assetImagesFolder'),
+  ]);
+}
+
+function assetPoolUsesBackgroundFolder(pool) {
+  return pool === 'post-processed' || pool === 'post-used';
+}
+
+function selectedAssetImagesFolder() {
+  const el = document.getElementById('assetImagesFolder');
+  return el ? el.value.trim() : '';
+}
+
+function syncAssetFolderVisibility() {
+  const wrap = document.getElementById('assetFolderWrap');
+  if (!wrap) return;
+  wrap.hidden = !assetPoolUsesBackgroundFolder(ui.assetPool);
 }
 
 async function loadChannelOptions() {
@@ -2396,7 +2760,7 @@ async function loadChannelOptions() {
     const rows = (d.channel_details && d.channel_details.length)
       ? d.channel_details
       : (d.channels || []).map(id => ({ id, name: id }));
-    for (const selId of ['runChannel', 'videoChannel']) {
+    for (const selId of ['runChannel', 'videoChannel', 'scheduleChannel']) {
       const el = document.getElementById(selId);
       const keep = el.value;
       const allOpt = selId === 'videoChannel'
@@ -2808,8 +3172,18 @@ async function toggleVideoDetail(id, wrap) {
 
 async function loadAssetList() {
   const el = document.getElementById('assetList');
+  syncAssetFolderVisibility();
   el.innerHTML = loadingBlockHtml('Loading ' + ui.assetPool + '…');
-  const d = await api('/v1/assets?category=' + encodeURIComponent(cat()) + '&pool=' + encodeURIComponent(ui.assetPool));
+  let q = '/v1/assets?category=' + encodeURIComponent(cat()) + '&pool=' + encodeURIComponent(ui.assetPool);
+  if (assetPoolUsesBackgroundFolder(ui.assetPool)) {
+    const folder = selectedAssetImagesFolder();
+    if (!folder) {
+      el.innerHTML = '<p class="muted">Select a background folder above.</p>';
+      return;
+    }
+    q += '&images_folder=' + encodeURIComponent(folder);
+  }
+  const d = await api(q);
   if (!d.items?.length) { el.innerHTML = '<p class="muted">No images in this pool.</p>'; return; }
   el.innerHTML = '<div class="asset-table">' + d.items.map(it =>
     '<div class="list-row asset-row" data-name="' + esc(it.name) + '">' +
@@ -2839,13 +3213,150 @@ function openAssetModal(name) {
     body.innerHTML = '<p class="muted">Failed to load image</p>';
     modal.setAttribute('aria-busy', 'false');
   };
-  img.src = '/v1/media/asset?category=' + encodeURIComponent(cat()) + '&pool=' + encodeURIComponent(ui.assetPool) + '&name=' + encodeURIComponent(name);
+  img.src = '/v1/media/asset?category=' + encodeURIComponent(cat()) + '&pool=' + encodeURIComponent(ui.assetPool) + '&name=' + encodeURIComponent(name)
+    + (assetPoolUsesBackgroundFolder(ui.assetPool) && selectedAssetImagesFolder()
+      ? '&images_folder=' + encodeURIComponent(selectedAssetImagesFolder()) : '');
 }
 document.getElementById('modalClose').onclick = () => {
   document.getElementById('modal').classList.remove('open');
   document.getElementById('modalBody').innerHTML = '';
 };
 document.getElementById('modal').onclick = (e) => { if (e.target.id === 'modal') document.getElementById('modalClose').click(); };
+
+const SCHEDULE_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function timeInputValue(hhmm) {
+  if (!hhmm) return '';
+  const parts = String(hhmm).split(':');
+  if (parts.length < 2) return '';
+  return parts[0].padStart(2, '0') + ':' + parts[1].padStart(2, '0');
+}
+function timeFromInput(value) {
+  if (!value) return null;
+  const [h, m] = value.split(':');
+  return String(parseInt(h, 10)).padStart(2, '0') + ':' + String(parseInt(m, 10)).padStart(2, '0');
+}
+function defaultScheduleDays() {
+  return SCHEDULE_DAY_NAMES.map(() => ({ enabled: false, assemble_at: '09:00', upload_at: null }));
+}
+function renderScheduleDays(days) {
+  const body = document.getElementById('scheduleDaysBody');
+  const rows = (days && days.length === 7) ? days : defaultScheduleDays();
+  body.innerHTML = rows.map((day, i) => {
+    const uploadVal = timeInputValue(day.upload_at || '');
+    return '<tr>'
+      + '<td>' + esc(SCHEDULE_DAY_NAMES[i]) + '</td>'
+      + '<td><input type="checkbox" data-day="' + i + '" class="schedule-day-enabled"' + (day.enabled ? ' checked' : '') + '></td>'
+      + '<td><input type="time" data-day="' + i + '" class="schedule-day-assemble" value="' + esc(timeInputValue(day.assemble_at || '09:00')) + '"></td>'
+      + '<td><input type="time" data-day="' + i + '" class="schedule-day-upload" value="' + esc(uploadVal) + '"></td>'
+      + '</tr>';
+  }).join('');
+}
+function collectScheduleDays() {
+  return SCHEDULE_DAY_NAMES.map((_, i) => {
+    const enabled = document.querySelector('.schedule-day-enabled[data-day="' + i + '"]')?.checked || false;
+    const assemble_at = timeFromInput(document.querySelector('.schedule-day-assemble[data-day="' + i + '"]')?.value) || '09:00';
+    const uploadRaw = document.querySelector('.schedule-day-upload[data-day="' + i + '"]')?.value;
+    const upload_at = uploadRaw ? timeFromInput(uploadRaw) : null;
+    return { enabled, assemble_at, upload_at };
+  });
+}
+function fillScheduleForm(data) {
+  document.getElementById('scheduleEnabled').checked = data.enabled !== false;
+  document.getElementById('scheduleTimezone').value = data.timezone || 'America/New_York';
+  const folder = data.images_folder || '';
+  populateBackgroundFolderSelect('scheduleImagesFolder', folder).then(() => {
+    if (folder) document.getElementById('scheduleImagesFolder').value = folder;
+  });
+  document.getElementById('scheduleDefaultAssemble').value = timeInputValue(data.default_assemble_at || '09:00');
+  document.getElementById('scheduleDefaultUpload').value = timeInputValue(data.default_upload_at || '');
+  document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
+  document.getElementById('scheduleAutoExtend').checked = data.auto_extend !== false;
+  renderScheduleDays(data.days || defaultScheduleDays());
+}
+function renderScheduleStatus(status) {
+  const res = status.resources || {};
+  const blockers = (res.blockers || []).join(', ') || 'none';
+  document.getElementById('scheduleResources').textContent = JSON.stringify({
+    images_folder: res.images_folder,
+    ready: res.ready,
+    backgrounds_available: res.backgrounds_available,
+    min_backgrounds: res.min_backgrounds,
+    extend_pending: res.extend_pending,
+    music_tracks: res.music_tracks,
+    blockers: blockers,
+  }, null, 2);
+  const upcoming = status.upcoming || [];
+  const el = document.getElementById('scheduleUpcoming');
+  if (!upcoming.length) {
+    el.innerHTML = '<p class="muted">No upcoming enabled slots in the next two weeks.</p>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr><th>Day</th><th>Assemble</th><th>Upload</th><th>Local time</th></tr></thead><tbody>'
+    + upcoming.map(s => '<tr><td>' + esc(s.day_name) + '</td><td>' + esc(s.assemble_at) + '</td><td>' + esc(s.upload_at || '—') + '</td><td>' + esc(s.at_local) + '</td></tr>').join('')
+    + '</tbody></table>';
+}
+async function loadScheduleEditor(channel) {
+  const empty = document.getElementById('scheduleEmpty');
+  const editor = document.getElementById('scheduleEditor');
+  if (!channel) {
+    empty.hidden = false;
+    editor.hidden = true;
+    return;
+  }
+  empty.hidden = true;
+  editor.hidden = false;
+  let data;
+  try {
+    data = await api('/v1/schedules/' + encodeURIComponent(channel));
+  } catch (e) {
+    if (String(e).includes('404')) {
+      data = {
+        channel,
+        enabled: true,
+        timezone: 'America/New_York',
+        default_assemble_at: '09:00',
+        queue_youtube: true,
+        auto_extend: true,
+        days: defaultScheduleDays(),
+      };
+    } else throw e;
+  }
+  fillScheduleForm(data);
+  try {
+    const status = await api('/v1/schedules/' + encodeURIComponent(channel) + '/status');
+    renderScheduleStatus(status);
+  } catch (e) {
+    document.getElementById('scheduleResources').textContent = String(e);
+    document.getElementById('scheduleUpcoming').innerHTML = '<p class="muted">—</p>';
+  }
+}
+async function saveSchedule() {
+  const channel = document.getElementById('scheduleChannel').value.trim();
+  if (!channel) { alert('Select a channel'); return; }
+  const imagesFolder = document.getElementById('scheduleImagesFolder').value.trim();
+  if (!imagesFolder) { alert('Select a background folder'); return; }
+  const btn = document.getElementById('scheduleSave');
+  setBtnLoading(btn, true, 'Saving…');
+  try {
+    const body = {
+      enabled: document.getElementById('scheduleEnabled').checked,
+      timezone: document.getElementById('scheduleTimezone').value.trim() || 'America/New_York',
+      images_folder: imagesFolder,
+      default_assemble_at: timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00',
+      default_upload_at: timeFromInput(document.getElementById('scheduleDefaultUpload').value),
+      queue_youtube: document.getElementById('scheduleQueueYoutube').checked,
+      auto_extend: document.getElementById('scheduleAutoExtend').checked,
+      days: collectScheduleDays(),
+      apply_default_to_enabled_days: false,
+    };
+    await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'PUT', body: JSON.stringify(body) });
+    await loadScheduleEditor(channel);
+  } catch (e) {
+    alert('Save failed: ' + e);
+  }
+  setBtnLoading(btn, false);
+}
 
 function showMainSection(section) {
   document.querySelectorAll('.main-tab').forEach(b => {
@@ -2858,6 +3369,10 @@ function showMainSection(section) {
   if (section === 'library') {
     const activeTab = document.querySelector('#sectionLibrary .tab.active');
     loadLibraryTab(activeTab);
+  }
+  if (section === 'schedule') {
+    const ch = document.getElementById('scheduleChannel').value.trim();
+    loadScheduleEditor(ch);
   }
 }
 async function loadLibraryTab(btn) {
@@ -2906,6 +3421,7 @@ document.querySelectorAll('#assetPools .subtab').forEach(btn => {
     btn.classList.add('active');
     ui.assetPool = btn.dataset.pool;
     ui.tabsLoaded.assets = false;
+    syncAssetFolderVisibility();
     setTabLoading(btn, true);
     try {
       await loadAssetList();
@@ -2913,6 +3429,12 @@ document.querySelectorAll('#assetPools .subtab').forEach(btn => {
       setTabLoading(btn, false);
     }
   };
+});
+document.getElementById('assetImagesFolder')?.addEventListener('change', async () => {
+  ui.tabsLoaded.assets = false;
+  if (document.getElementById('panelAssets').classList.contains('active')) {
+    await loadAssetList();
+  }
 });
 
 async function refreshRunningExtendProgress() {
@@ -3093,6 +3615,29 @@ document.getElementById('videoChannel').addEventListener('change', async () => {
     await loadVideoList();
   }
 });
+document.getElementById('scheduleChannel').addEventListener('change', () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim()));
+document.getElementById('scheduleReload').onclick = () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim());
+document.getElementById('scheduleSave').onclick = saveSchedule;
+document.getElementById('scheduleApplyDefault').onclick = () => {
+  const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
+  const upload = timeFromInput(document.getElementById('scheduleDefaultUpload').value);
+  document.querySelectorAll('.schedule-day-enabled:checked').forEach(cb => {
+    const i = cb.dataset.day;
+    const assembleEl = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+    if (assembleEl) assembleEl.value = timeInputValue(assemble);
+    const uploadEl = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
+    if (uploadEl) uploadEl.value = upload ? timeInputValue(upload) : '';
+  });
+};
+document.getElementById('scheduleDelete').onclick = async () => {
+  const channel = document.getElementById('scheduleChannel').value.trim();
+  if (!channel || !confirm('Delete schedule for ' + channel + '?')) return;
+  try {
+    await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'DELETE' });
+    document.getElementById('scheduleEditor').hidden = true;
+    document.getElementById('scheduleEmpty').hidden = false;
+  } catch (e) { alert(String(e)); }
+};
 
 (async function init() {
   renderObsBar();
