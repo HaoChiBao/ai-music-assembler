@@ -1,0 +1,47 @@
+# Cloud Build upload filter — keep the source tarball small (code + prompts only).
+# gcloud builds submit uses this file; .dockerignore only affects the Docker build context.
+
+.git
+.gitignore
+.gcloudignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+*.egg-info
+dist
+build
+output
+tmp
+.r2-extend-work
+.r2-work-test
+
+# Local media and pipeline outputs — live on R2, not in deploy artifacts
+music/
+pre-processed/
+post-processed/
+post-text-processed/
+music-video/
+layer-text-image/
+backgrounds/
+
+# Large / generated media anywhere in the tree
+*.mp4
+*.mp3
+*.m4a
+*.mov
+*.wav
+*.flac
+
+# Secrets and OAuth (never upload)
+client_secret*.json
+youtube_token.json
+*service-account*.json
+music-assembly-api*.json
+youtube-uploader-499603*.json
+.assembly-api-key.local
+
+.DS_Store

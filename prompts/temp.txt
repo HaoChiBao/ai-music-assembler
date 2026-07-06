@@ -1,0 +1,19 @@
+Outpaint this photo into a wider 16:9 frame. Treat the supplied image as the fixed center of the final frame and generate NEW scene on the sides (and top/bottom if needed) so the result is one seamless, believable continuation of the SAME photograph.
+
+**Preserve the original (most important)**
+- Keep the original photo's pixels unchanged: same subject, pose, framing, position, scale, colors, and detail. Do NOT crop, zoom, pan, re-center, restyle, relight, or regenerate the existing content. Only ADD new area around it.
+- The original content must sit in the same place at the same size — you are only widening the canvas around it.
+
+**Make the new area seamless**
+- The newly generated regions must be a photorealistic continuation of the existing environment: the same room/place, same camera and focal length, same perspective and vanishing lines, same horizon height, same lighting direction and intensity, same white balance and color grade, same depth of field and bokeh, and the same film grain / digital noise.
+- Continue whatever is already at each edge — walls, floor, windows, sky, ground, foliage, furniture, out-of-focus highlights — so there is no visible seam, brightness step, color shift, or change in sharpness at the join.
+- Match focus: if the background near the edges is out of focus, keep the extension equally soft; if it is sharp, keep it sharp.
+
+**Do not**
+- Do not invent unrelated subjects, new people, animals, vehicles, text, logos, watermarks, or a different location.
+- Do not replace the scene with a generic stock background or add "creative" scenery that doesn't logically continue from the edges.
+- Do not add borders, letterboxing, frames, vignettes, or visible seams.
+
+**Output**
+- A single full-bleed 16:9 photorealistic image: the original photo, unchanged, seamlessly extended into the wider frame.
+

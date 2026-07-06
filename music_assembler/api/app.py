@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -29,6 +29,7 @@ from music_assembler.api import job_runs
 from music_assembler.api import job_status
 from music_assembler.api import assembly_health
 from music_assembler.api import assembly_schedule
+from music_assembler.api import asset_upload
 from music_assembler.api import r2_catalog
 from music_assembler.api import uploader_client
 from music_assembler.api.cache import dashboard_cache
@@ -420,6 +421,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/dashboard/snapshot",
             "GET /v1/dashboard/stats",
             "GET /v1/assets",
+            "POST /v1/assets/upload",
             "GET /v1/observability",
             "GET /v1/categories",
             "GET /v1/categories/{category}/inventory",
@@ -916,8 +918,6 @@ def list_assets(
 
     def load() -> dict[str, Any]:
         client, bucket = _r2()
-        if folder:
-            _assert_background_folder_exists(client, bucket, folder)
         items = r2_catalog.list_assets(
             client, bucket, category=cat, pool=pool, limit=limit, images_folder=folder
         )
@@ -934,6 +934,60 @@ def list_assets(
         content={**data, "cache": {"hit": hit, "ttl_sec": 60}},
         headers={"X-Cache": "HIT" if hit else "MISS"},
     )
+
+
+@app.post("/v1/assets/upload")
+async def upload_assets(
+    pool: str = Form(..., pattern="^(pre-processed|post-processed)$"),
+    category: str | None = Form(default=None),
+    images_folder: str | None = Form(default=None),
+    overwrite: bool = Form(default=False),
+    files: list[UploadFile] = File(...),
+    _auth: None = Depends(require_api_auth),
+    settings: ApiSettings = Depends(_settings),
+) -> dict[str, Any]:
+    """Upload one or more images to a pre/post-processed pool on R2."""
+    cat = (category or settings.default_category).strip()
+    folder: str | None = None
+    if pool == "post-processed":
+        if not images_folder or not str(images_folder).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="images_folder is required when uploading to post-processed",
+            )
+        try:
+            folder = _normalize_images_folder(images_folder)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files attached")
+
+    payloads: list[tuple[str, bytes]] = []
+    for upload in files:
+        if not upload.filename:
+            continue
+        data = await upload.read()
+        payloads.append((upload.filename, data))
+
+    client, bucket = _r2()
+    try:
+        result = asset_upload.upload_asset_files(
+            client,
+            bucket,
+            category=cat,
+            pool=pool,
+            images_folder=folder,
+            files=payloads,
+            overwrite=overwrite,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _invalidate_category_cache(cat)
+    if folder and folder != cat:
+        _invalidate_category_cache(folder)
+    return result
 
 
 @app.get("/v1/dashboard/snapshot")
@@ -1300,7 +1354,10 @@ def dashboard_page(
 ) -> str:
     if not has_dashboard_session(request, settings):
         return _LOGIN_HTML
-    return _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category)
+    return _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category).replace(
+        "__DEFAULT_THUMBNAIL__",
+        (os.environ.get("THUMBNAIL_TEXT") or "OMYO").strip() or "OMYO",
+    )
 
 
 _DASHBOARD_DESIGN_FONTS = """  <link rel="preconnect" href="https://fonts.googleapis.com"/>
@@ -1715,11 +1772,71 @@ _DASHBOARD_HTML = (
     .checkbox-row label { margin: 0; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: 0; }
     .schedule-top { margin-bottom: 20px; }
     .schedule-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 4px 0 8px; }
+    .schedule-days-heading { margin: 8px 0 4px; font-size: 15px; font-weight: 600; }
+    .schedule-days-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+      gap: 12px;
+      margin: 12px 0 20px;
+    }
+    .schedule-day-tile {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      background: var(--color-white);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .schedule-day-tile.is-on {
+      border-color: var(--color-deep-forest-teal);
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-day-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .schedule-day-head strong { font-size: 14px; }
+    .schedule-day-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      font-size: 13px;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .schedule-day-toggle input { width: auto; margin: 0; }
+    .schedule-day-field {
+      display: block;
+      margin: 0;
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--color-smoke);
+    }
+    .schedule-day-field input { margin-top: 4px; font-size: 13px; padding: 8px 10px; }
+    .schedule-summary {
+      margin: 0 0 16px;
+      padding: 12px 14px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.6);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .schedule-summary dt { font-weight: 600; margin-top: 8px; }
+    .schedule-summary dt:first-child { margin-top: 0; }
+    .schedule-summary dd { margin: 2px 0 0; color: var(--color-smoke); }
     .schedule-table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; }
-    .schedule-table th, .schedule-table td { padding: 10px 8px; border-bottom: 1px solid var(--color-border); text-align: left; }
+    .schedule-table th, .schedule-table td { padding: 10px 8px; border-bottom: 1px solid var(--color-stone-mist); text-align: left; }
     .schedule-table input[type="time"] { width: 100%; max-width: 140px; }
     .schedule-table input[type="checkbox"] { width: auto; }
-    .schedule-status { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+    .schedule-status { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--color-stone-mist); }
     .schedule-status h3 { margin: 16px 0 8px; font-size: 15px; }
     .asset-folder-label { display: block; margin: 0 0 12px; font-size: 14px; }
     .asset-folder-label select { margin-top: 6px; width: min(280px, 100%); }
@@ -2014,6 +2131,25 @@ _DASHBOARD_HTML = (
       word-break: break-all;
     }
     .asset-table { max-height: 400px; overflow: auto; }
+    .asset-upload {
+      margin: 0 0 16px;
+      padding: 14px 16px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-md);
+      background: rgba(255,255,255,0.45);
+    }
+    .asset-upload-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+    }
+    .asset-upload-row label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+    .asset-upload-row input[type=file] { max-width: 280px; font-size: 13px; }
+    .asset-upload-hint { margin: 8px 0 0; font-size: 13px; color: var(--color-smoke); }
+    .asset-upload-status { margin-top: 10px; font-size: 14px; }
+    .asset-upload-status.ok { color: var(--color-deep-forest-teal); }
+    .asset-upload-status.err { color: #9b2c2c; }
     .modal {
       position: fixed;
       inset: 0;
@@ -2434,7 +2570,7 @@ _DASHBOARD_HTML = (
 
     <div id="panelAssets" class="panel card">
       <h2>Background images</h2>
-      <p class="card-desc">Browse R2 pools by folder. Click a filename to preview.</p>
+      <p class="card-desc">Browse R2 pools by folder. Upload multiple images at once to Cloudflare R2.</p>
       <label class="asset-folder-label" id="assetFolderWrap" hidden>Background folder
         <select id="assetImagesFolder"><option value="">Loading…</option></select>
       </label>
@@ -2443,6 +2579,23 @@ _DASHBOARD_HTML = (
         <button type="button" class="subtab secondary" data-pool="post-processed">Post-processed</button>
         <button type="button" class="subtab secondary" data-pool="pre-used">Pre-used</button>
         <button type="button" class="subtab secondary" data-pool="post-used">Post-used</button>
+      </div>
+      <div id="assetUploadWrap" class="asset-upload">
+        <div class="asset-upload-row">
+          <label>Images
+            <input type="file" id="assetUploadInput" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"/>
+          </label>
+          <label id="assetUploadFolderWrap" hidden>Upload folder
+            <input type="text" id="assetUploadFolder" placeholder="e.g. korean" maxlength="128"/>
+          </label>
+          <div class="checkbox-row">
+            <input type="checkbox" id="assetUploadOverwrite"/>
+            <label for="assetUploadOverwrite">Replace same filename</label>
+          </div>
+          <button type="button" class="btn-primary" id="assetUploadBtn">Upload to R2</button>
+        </div>
+        <p class="asset-upload-hint" id="assetUploadHint">Uploads to <code>pre-processed/{category}/</code> for extend.</p>
+        <div id="assetUploadStatus" class="asset-upload-status" aria-live="polite"></div>
       </div>
       <div id="assetList"><p class="muted">Select a pool above to load filenames.</p></div>
     </div>
@@ -2494,6 +2647,21 @@ _DASHBOARD_HTML = (
               <input id="scheduleDefaultUpload" type="time"/>
             </div>
           </div>
+          <div class="form-row-3">
+            <div>
+              <label for="scheduleThumb">Thumbnail text</label>
+              <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
+            </div>
+            <div>
+              <label for="scheduleDuration">Duration (min)</label>
+              <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
+            </div>
+            <div>
+              <label for="scheduleVariance">Variance (min)</label>
+              <input id="scheduleVariance" type="number" min="0" max="60" value="15"/>
+            </div>
+          </div>
+          <p class="hint">Each scheduled run assembles one playlist video with these settings (same as New run).</p>
           <div class="schedule-bulk">
             <button type="button" class="secondary" id="scheduleApplyDefault">Apply default times to enabled days</button>
             <span class="hint">Per-day overrides below still apply after bulk update.</span>
@@ -2508,12 +2676,11 @@ _DASHBOARD_HTML = (
           </div>
         </div>
 
-        <table class="schedule-table">
-          <thead>
-            <tr><th>Day</th><th>On</th><th>Assemble</th><th>Upload</th></tr>
-          </thead>
-          <tbody id="scheduleDaysBody"></tbody>
-        </table>
+        <h3 class="schedule-days-heading">Weekly days</h3>
+        <p class="hint">Turn on Sunday–Saturday for automatic assembly. Per-day times override the defaults above.</p>
+        <div class="schedule-days-grid" id="scheduleDaysGrid"></div>
+
+        <dl class="schedule-summary" id="scheduleSummary"></dl>
 
         <div class="card-actions">
           <button type="button" class="btn-primary" id="scheduleSave">Save schedule</button>
@@ -2743,15 +2910,36 @@ function assetPoolUsesBackgroundFolder(pool) {
   return pool === 'post-processed' || pool === 'post-used';
 }
 
+function assetPoolAllowsUpload(pool) {
+  return pool === 'pre-processed' || pool === 'post-processed';
+}
+
 function selectedAssetImagesFolder() {
   const el = document.getElementById('assetImagesFolder');
   return el ? el.value.trim() : '';
 }
 
+function uploadTargetImagesFolder() {
+  const manual = document.getElementById('assetUploadFolder')?.value.trim();
+  if (manual) return manual;
+  return selectedAssetImagesFolder();
+}
+
 function syncAssetFolderVisibility() {
   const wrap = document.getElementById('assetFolderWrap');
-  if (!wrap) return;
-  wrap.hidden = !assetPoolUsesBackgroundFolder(ui.assetPool);
+  if (wrap) wrap.hidden = !assetPoolUsesBackgroundFolder(ui.assetPool);
+  const uploadWrap = document.getElementById('assetUploadWrap');
+  if (uploadWrap) uploadWrap.hidden = !assetPoolAllowsUpload(ui.assetPool);
+  const folderWrap = document.getElementById('assetUploadFolderWrap');
+  if (folderWrap) folderWrap.hidden = ui.assetPool !== 'post-processed';
+  const hint = document.getElementById('assetUploadHint');
+  if (hint) {
+    if (ui.assetPool === 'post-processed') {
+      hint.innerHTML = 'Uploads to <code>post-processed/{folder}/</code>. Pick a folder above or type a new one.';
+    } else if (ui.assetPool === 'pre-processed') {
+      hint.innerHTML = 'Uploads to <code>pre-processed/' + esc(cat()) + '/</code> for extend.';
+    }
+  }
 }
 
 async function loadChannelOptions() {
@@ -3196,6 +3384,84 @@ async function loadAssetList() {
   ui.tabsLoaded.assets = true;
 }
 
+async function uploadAssetFiles() {
+  const input = document.getElementById('assetUploadInput');
+  const statusEl = document.getElementById('assetUploadStatus');
+  const btn = document.getElementById('assetUploadBtn');
+  if (!input?.files?.length) {
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status err';
+      statusEl.textContent = 'Choose one or more images first.';
+    }
+    return;
+  }
+  if (!assetPoolAllowsUpload(ui.assetPool)) {
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status err';
+      statusEl.textContent = 'Upload is only available for pre-processed and post-processed pools.';
+    }
+    return;
+  }
+  const fd = new FormData();
+  fd.append('pool', ui.assetPool);
+  fd.append('category', cat());
+  if (ui.assetPool === 'post-processed') {
+    const folder = uploadTargetImagesFolder();
+    if (!folder) {
+      if (statusEl) {
+        statusEl.className = 'asset-upload-status err';
+        statusEl.textContent = 'Select or type a background folder for post-processed uploads.';
+      }
+      return;
+    }
+    fd.append('images_folder', folder);
+  }
+  if (document.getElementById('assetUploadOverwrite')?.checked) {
+    fd.append('overwrite', 'true');
+  }
+  for (const file of input.files) fd.append('files', file);
+
+  setBtnLoading(btn, true, 'Uploading…');
+  if (statusEl) {
+    statusEl.className = 'asset-upload-status';
+    statusEl.textContent = 'Uploading ' + input.files.length + ' file(s)…';
+  }
+  try {
+    const t0 = performance.now();
+    const r = await fetch('/v1/assets/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
+    const ms = Math.round(performance.now() - t0);
+    obs.fetches.unshift({ at: new Date().toLocaleTimeString(), path: '/v1/assets/upload', ms, cache: '—' });
+    if (obs.fetches.length > 25) obs.fetches.pop();
+    renderObsBar();
+    if (r.status === 401) { window.location.reload(); throw new Error('Session expired'); }
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    const errCount = (d.errors || []).length;
+    const msg = 'Uploaded ' + d.count + ' image(s) to R2.'
+      + (errCount ? ' ' + errCount + ' failed.' : '');
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status' + (errCount && !d.count ? ' err' : ' ok');
+      statusEl.textContent = msg;
+    }
+    input.value = '';
+    ui.tabsLoaded.assets = false;
+    if (ui.assetPool === 'post-processed' && d.images_folder) {
+      await populateBackgroundFolderSelect('assetImagesFolder', d.images_folder);
+      const folderInput = document.getElementById('assetUploadFolder');
+      if (folderInput) folderInput.value = d.images_folder;
+    }
+    await refreshStats();
+    await loadAssetList();
+  } catch (e) {
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status err';
+      statusEl.textContent = String(e);
+    }
+  } finally {
+    setBtnLoading(btn, false);
+  }
+}
+
 function openAssetModal(name) {
   const modal = document.getElementById('modal');
   const body = document.getElementById('modalBody');
@@ -3240,17 +3506,35 @@ function defaultScheduleDays() {
   return SCHEDULE_DAY_NAMES.map(() => ({ enabled: false, assemble_at: '09:00', upload_at: null }));
 }
 function renderScheduleDays(days) {
-  const body = document.getElementById('scheduleDaysBody');
+  const grid = document.getElementById('scheduleDaysGrid');
+  if (!grid) return;
   const rows = (days && days.length === 7) ? days : defaultScheduleDays();
-  body.innerHTML = rows.map((day, i) => {
+  grid.innerHTML = rows.map((day, i) => {
     const uploadVal = timeInputValue(day.upload_at || '');
-    return '<tr>'
-      + '<td>' + esc(SCHEDULE_DAY_NAMES[i]) + '</td>'
-      + '<td><input type="checkbox" data-day="' + i + '" class="schedule-day-enabled"' + (day.enabled ? ' checked' : '') + '></td>'
-      + '<td><input type="time" data-day="' + i + '" class="schedule-day-assemble" value="' + esc(timeInputValue(day.assemble_at || '09:00')) + '"></td>'
-      + '<td><input type="time" data-day="' + i + '" class="schedule-day-upload" value="' + esc(uploadVal) + '"></td>'
-      + '</tr>';
+    const on = day.enabled ? ' is-on' : '';
+    return '<div class="schedule-day-tile' + on + '" data-day="' + i + '">'
+      + '<div class="schedule-day-head">'
+      + '<strong>' + esc(SCHEDULE_DAY_NAMES[i]) + '</strong>'
+      + '<label class="schedule-day-toggle"><input type="checkbox" data-day="' + i + '" class="schedule-day-enabled"'
+      + (day.enabled ? ' checked' : '') + '> On</label>'
+      + '</div>'
+      + '<label class="schedule-day-field">Assemble'
+      + '<input type="time" data-day="' + i + '" class="schedule-day-assemble" value="'
+      + esc(timeInputValue(day.assemble_at || '09:00')) + '"></label>'
+      + '<label class="schedule-day-field">Upload'
+      + '<input type="time" data-day="' + i + '" class="schedule-day-upload" value="'
+      + esc(uploadVal) + '"></label>'
+      + '</div>';
   }).join('');
+  grid.querySelectorAll('.schedule-day-enabled').forEach(cb => {
+    cb.addEventListener('change', () => {
+      cb.closest('.schedule-day-tile')?.classList.toggle('is-on', cb.checked);
+      updateScheduleSummary();
+    });
+  });
+  grid.querySelectorAll('.schedule-day-assemble, .schedule-day-upload').forEach(el => {
+    el.addEventListener('change', updateScheduleSummary);
+  });
 }
 function collectScheduleDays() {
   return SCHEDULE_DAY_NAMES.map((_, i) => {
@@ -3261,21 +3545,57 @@ function collectScheduleDays() {
     return { enabled, assemble_at, upload_at };
   });
 }
+function readScheduleVideoSettings() {
+  const thumb = document.getElementById('scheduleThumb')?.value.trim() || '';
+  const duration = parseInt(document.getElementById('scheduleDuration')?.value, 10);
+  const variance = parseInt(document.getElementById('scheduleVariance')?.value, 10);
+  return {
+    thumbnail_text: thumb || null,
+    duration_min: Number.isFinite(duration) ? duration : 90,
+    variance_min: Number.isFinite(variance) ? variance : 15,
+  };
+}
+function updateScheduleSummary() {
+  const el = document.getElementById('scheduleSummary');
+  if (!el) return;
+  const channel = document.getElementById('scheduleChannel')?.value.trim() || '—';
+  const folder = document.getElementById('scheduleImagesFolder')?.value.trim() || '—';
+  const tz = document.getElementById('scheduleTimezone')?.value.trim() || 'America/New_York';
+  const video = readScheduleVideoSettings();
+  const enabledDays = collectScheduleDays()
+    .map((d, i) => (d.enabled ? SCHEDULE_DAY_NAMES[i] + ' ' + d.assemble_at : null))
+    .filter(Boolean);
+  el.innerHTML =
+    '<dt>Channel</dt><dd><code>' + esc(channel) + '</code></dd>'
+    + '<dt>Background pool</dt><dd><code>post-processed/' + esc(folder) + '/</code></dd>'
+    + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
+    + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
+    + '<dt>Thumbnail text</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
+    + '<dt>YouTube queue</dt><dd>' + (document.getElementById('scheduleQueueYoutube')?.checked ? 'Yes' : 'No') + '</dd>'
+    + '<dt>Timezone</dt><dd>' + esc(tz) + '</dd>'
+    + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None enabled') + '</dd>';
+}
 function fillScheduleForm(data) {
   document.getElementById('scheduleEnabled').checked = data.enabled !== false;
   document.getElementById('scheduleTimezone').value = data.timezone || 'America/New_York';
   const folder = data.images_folder || '';
   populateBackgroundFolderSelect('scheduleImagesFolder', folder).then(() => {
     if (folder) document.getElementById('scheduleImagesFolder').value = folder;
+    updateScheduleSummary();
   });
   document.getElementById('scheduleDefaultAssemble').value = timeInputValue(data.default_assemble_at || '09:00');
   document.getElementById('scheduleDefaultUpload').value = timeInputValue(data.default_upload_at || '');
+  document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
+  document.getElementById('scheduleDuration').value = data.duration_min ?? 90;
+  document.getElementById('scheduleVariance').value = data.variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
   document.getElementById('scheduleAutoExtend').checked = data.auto_extend !== false;
   renderScheduleDays(data.days || defaultScheduleDays());
+  updateScheduleSummary();
 }
 function renderScheduleStatus(status) {
   const res = status.resources || {};
+  const sched = status.schedule || {};
   const blockers = (res.blockers || []).join(', ') || 'none';
   document.getElementById('scheduleResources').textContent = JSON.stringify({
     images_folder: res.images_folder,
@@ -3285,6 +3605,9 @@ function renderScheduleStatus(status) {
     extend_pending: res.extend_pending,
     music_tracks: res.music_tracks,
     blockers: blockers,
+    duration_min: sched.duration_min,
+    variance_min: sched.variance_min,
+    thumbnail_text: sched.thumbnail_text,
   }, null, 2);
   const upcoming = status.upcoming || [];
   const el = document.getElementById('scheduleUpcoming');
@@ -3316,6 +3639,9 @@ async function loadScheduleEditor(channel) {
         enabled: true,
         timezone: 'America/New_York',
         default_assemble_at: '09:00',
+        duration_min: 90,
+        variance_min: 15,
+        thumbnail_text: '__DEFAULT_THUMBNAIL__',
         queue_youtube: true,
         auto_extend: true,
         days: defaultScheduleDays(),
@@ -3339,10 +3665,14 @@ async function saveSchedule() {
   const btn = document.getElementById('scheduleSave');
   setBtnLoading(btn, true, 'Saving…');
   try {
+    const video = readScheduleVideoSettings();
     const body = {
       enabled: document.getElementById('scheduleEnabled').checked,
       timezone: document.getElementById('scheduleTimezone').value.trim() || 'America/New_York',
       images_folder: imagesFolder,
+      duration_min: video.duration_min,
+      variance_min: video.variance_min,
+      thumbnail_text: video.thumbnail_text,
       default_assemble_at: timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00',
       default_upload_at: timeFromInput(document.getElementById('scheduleDefaultUpload').value),
       queue_youtube: document.getElementById('scheduleQueueYoutube').checked,
@@ -3436,6 +3766,7 @@ document.getElementById('assetImagesFolder')?.addEventListener('change', async (
     await loadAssetList();
   }
 });
+document.getElementById('assetUploadBtn')?.addEventListener('click', uploadAssetFiles);
 
 async function refreshRunningExtendProgress() {
   const ids = [...ui.extend.keys()].filter(id => {
@@ -3618,6 +3949,10 @@ document.getElementById('videoChannel').addEventListener('change', async () => {
 document.getElementById('scheduleChannel').addEventListener('change', () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim()));
 document.getElementById('scheduleReload').onclick = () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim());
 document.getElementById('scheduleSave').onclick = saveSchedule;
+['scheduleThumb', 'scheduleDuration', 'scheduleVariance', 'scheduleImagesFolder', 'scheduleTimezone', 'scheduleQueueYoutube'].forEach(id => {
+  document.getElementById(id)?.addEventListener('change', updateScheduleSummary);
+  document.getElementById(id)?.addEventListener('input', updateScheduleSummary);
+});
 document.getElementById('scheduleApplyDefault').onclick = () => {
   const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
   const upload = timeFromInput(document.getElementById('scheduleDefaultUpload').value);
@@ -3628,6 +3963,7 @@ document.getElementById('scheduleApplyDefault').onclick = () => {
     const uploadEl = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
     if (uploadEl) uploadEl.value = upload ? timeInputValue(upload) : '';
   });
+  updateScheduleSummary();
 };
 document.getElementById('scheduleDelete').onclick = async () => {
   const channel = document.getElementById('scheduleChannel').value.trim();

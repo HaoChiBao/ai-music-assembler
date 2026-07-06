@@ -568,6 +568,26 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "cache": {"hit": True, "ttl_sec": 60},
         },
     },
+    "POST /v1/assets/upload": {
+        "tags": ["Catalog"],
+        "summary": "Upload images to R2",
+        "description": (
+            "Multipart upload of one or more images to ``pre-processed/{category}/`` or "
+            "``post-processed/{images_folder}/`` on Cloudflare R2. Supports jpg, png, webp "
+            "(max 50 files, 20 MB each). Duplicate names get ``_2``, ``_3`` suffixes unless "
+            "``overwrite`` is true."
+        ),
+        "response_example": {
+            "category": "korean",
+            "pool": "pre-processed",
+            "images_folder": None,
+            "count": 2,
+            "uploaded": [
+                {"name": "photo.jpg", "key": "pre-processed/korean/photo.jpg", "size": 120000}
+            ],
+            "errors": [],
+        },
+    },
     "GET /v1/media/thumbnail": {
         "tags": ["Media"],
         "summary": "Stream video thumbnail",

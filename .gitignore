@@ -4,30 +4,21 @@ __pycache__/
 .venv/
 venv/
 .env
-# Local music library: ignore all files in music/ but keep the folder (see music/.gitkeep)
-music/*
-!music/.gitkeep
-!music/*/
-!music/*/.gitkeep
-music-video/*
-!music-video/.gitkeep
-!music-video/*/
-!music-video/*/.gitkeep
+# Local pipeline assets (R2 is source of truth for hosted production)
+music/**
+music-video/**
+pre-processed/**
+post-processed/**
+post-text-processed/**
+layer-text-image/**
 
-# Photo dump + Gemini outputs (keep folders only)
-pre-processed/*
-!pre-processed/.gitkeep
-post-processed/*
-!post-processed/.gitkeep
-!post-processed/*/
-!post-processed/*/.gitkeep
-post-text-processed/*
-!post-text-processed/.gitkeep
-layer-text-image/*
-!layer-text-image/.gitkeep
-
+# Large media anywhere in the repo
+*.mp3
 *.mp4
 *.m4a
+*.wav
+*.flac
+*.mov
 .DS_Store
 dist/
 build/

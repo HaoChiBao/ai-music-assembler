@@ -2,30 +2,31 @@
 
 Living document summarizing the production workflow, lessons learned, and planned next steps for the **ai-music-assembler** pipeline.
 
-Last updated: 2026-06-23
+Last updated: 2026-07-06
 
-> **Linear:** [Production status — June 2026](https://linear.app/yangspace/document/production-status-june-2026-c5db29e1b5b9) · **Notion:** [Project Wiki](https://app.notion.com/p/387850bd5b0881c1a746d84960d54fbf) — keep in sync with the Linear doc above.
+> **Linear:** [Production status — June 2026](https://linear.app/yangspace/document/production-status-june-2026-c5db29e1b5b9) · **Notion:** [Project Wiki](https://app.notion.com/p/387850bd5b0881c1a746d84960d54fbf) · **Repo mirror:** [`docs/production-status-july-2026.md`](docs/production-status-july-2026.md)
 
 ---
 
-## Current production status (2026-06-23)
+## Current production status (2026-07-06)
 
 Hosted pipeline is **live** on GCP + Cloudflare R2.
 
 | Service | Type | URL |
 |---------|------|-----|
-| **music-assembly-api** | Cloud Run Service | https://music-assembly-api-17161979106.northamerica-northeast2.run.app (`00008-d8p`) |
+| **music-assembly-api** | Cloud Run Service | https://music-assembly-api-q3uklh4a6a-pd.a.run.app (`00036-gmp`) |
 | **music-assemble** | Cloud Run Job | `northamerica-northeast2` |
 | **youtuber-uploader-app** | Cloud Run Service | https://youtuber-uploader-app-q3uklh4a6a-pd.a.run.app |
 
 - **R2 bucket:** `music-assembly-data` · **Category:** `korean`
-- **Control API:** dashboard, parallel assembly (1–10), extend backgrounds, progress bars, channel picker — Linear **YAN-52**, **YAN-56**
+- **Control API:** dashboard, parallel assembly (1–10), extend backgrounds, progress bars, channel picker, **R2 mass upload**, **schedule day tiles + video params** — Linear **YAN-52**, **YAN-56**
 - **Output paths:** `music-video/{category}/{channel}/mv_*/` when channel selected; legacy flat `music-video/{category}/mv_*/` still supported
 - **Channel list (interim):** `ASSEMBLY_CHANNELS` env + R2 discovery via `GET /v1/channels`
 - **Channel list (target):** youtube-uploader `GET /v1/channels` → assembly dashboard proxy (**YAN-54**, **YAN-55**)
 - **Auth:** `ASSEMBLY_DASHBOARD_PASSWORD` + `ASSEMBLY_API_KEY`
 - **Active:** confirm full dashboard encode (**YAN-45**), uploader register (**YAN-48**)
-- **Deferred:** Cloud Scheduler (**YAN-46**), local batch CLI channel flag (**YAN-50** canceled)
+- **Deferred:** Cloud Scheduler cron for schedules (**YAN-46** — dashboard UI done), local batch CLI channel flag (**YAN-50** canceled)
+- **Shipped 2026-07-05/06:** `POST /v1/assets/upload`, `.gcloudignore` (deploy tarball ~1.2 MiB), schedule Sun–Sat tiles + thumbnail/duration/variance
 
 ---
 
@@ -629,6 +630,9 @@ Details are in [Target hosting architecture](#target-hosting-architecture) above
 ### Hosting / scale
 
 - [X] **R2 bucket layout** — `music/`, `pre-processed/`, `post-processed/`, `music-video/` per category; see `docs/r2-bucket-layout.md`
+- [X] **Mass upload pre-processed/post-processed images** — dashboard + `POST /v1/assets/upload` (flat pools; Phase 2 subfolders backlog)
+- [X] **`.gcloudignore`** — keep Cloud Build upload small (exclude local media)
+- [ ] **Pre-processed subfolder batches on R2** — extend + upload support for nested folders (Phase 2)
 - [ ] **extend-from-r2 CLI** — sync pre-processed down, run `extend-backgrounds`, sync post-processed + used back
 - [ ] **Secrets manager integration** — per-channel `youtube_token.json`, API keys.
 - [ ] **Weekly `extend-backgrounds` cron** — separate from daily video job.

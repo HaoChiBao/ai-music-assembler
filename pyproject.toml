@@ -34,6 +34,7 @@ cloud = ["boto3>=1.28.0", "rembg>=2.0.0", "onnxruntime>=1.16.0"]
 # Music Assembly control API (FastAPI + Cloud Run Jobs client).
 api = [
     "fastapi>=0.115.0",
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.32.0",
     "google-cloud-run>=0.10.0",
 ]
