@@ -145,6 +145,11 @@ class ChannelScheduleRequest(BaseModel):
     variance_min: int = Field(default=15, ge=0, le=60)
     thumbnail_text: str | None = None
     queue_youtube: bool = True
+    upload_privacy: str = "private"
+    upload_schedule_publish: bool = True
+    upload_tags: str = ""
+    upload_category_id: str = "10"
+    upload_made_for_kids: bool = False
     default_assemble_at: str = "09:00"
     default_upload_at: str | None = None
     min_backgrounds: int = Field(default=1, ge=1, le=20)
@@ -156,6 +161,14 @@ class ChannelScheduleRequest(BaseModel):
     @classmethod
     def _validate_schedule_images_folder(cls, value: str) -> str:
         return _normalize_images_folder(value)
+
+    @field_validator("upload_privacy")
+    @classmethod
+    def _validate_upload_privacy(cls, value: str) -> str:
+        raw = value.strip().lower()
+        if raw not in assembly_schedule.VALID_UPLOAD_PRIVACY:
+            raise ValueError(f"upload_privacy must be one of {assembly_schedule.VALID_UPLOAD_PRIVACY}")
+        return raw
 
 
 def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assembly_schedule.ChannelSchedule:
@@ -171,8 +184,14 @@ def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assemb
         variance_min=body.variance_min,
         thumbnail_text=body.thumbnail_text,
         queue_youtube=body.queue_youtube,
+        upload_privacy=body.upload_privacy,
+        upload_schedule_publish=body.upload_schedule_publish,
+        upload_tags=body.upload_tags.strip(),
+        upload_category_id=body.upload_category_id.strip() or "10",
+        upload_made_for_kids=body.upload_made_for_kids,
         default_assemble_at=body.default_assemble_at,
-        default_upload_at=body.default_upload_at,
+        default_upload_at=body.default_upload_at
+        or assembly_schedule.upload_time_after_assemble(body.default_assemble_at),
         min_backgrounds=body.min_backgrounds,
         auto_extend=body.auto_extend,
         days=[assembly_schedule.DaySlot.from_dict(d.model_dump()) for d in body.days],
@@ -434,6 +453,9 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "PUT /v1/schedules/{channel}",
             "DELETE /v1/schedules/{channel}",
             "GET /v1/schedules/{channel}/status",
+            "GET /v1/schedules/runs",
+            "GET /v1/schedules/{channel}/runs",
+            "DELETE /v1/schedules/runs/{slot_key}",
             "GET /v1/cron/run-schedules",
             "POST /v1/cron/run-schedules",
         ],
@@ -729,6 +751,42 @@ def schedule_status(
         "resources": resources,
         "upcoming": upcoming,
     }
+
+
+@app.get("/v1/schedules/runs")
+def list_all_schedule_runs(
+    channel: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    ch = normalize_channel(channel) if channel else None
+    runs = assembly_schedule.list_schedule_runs(client, bucket, channel=ch, limit=limit)
+    return {"runs": runs, "count": len(runs)}
+
+
+@app.get("/v1/schedules/{channel}/runs")
+def list_channel_schedule_runs(
+    channel: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    client, bucket = _r2()
+    ch = normalize_channel(channel)
+    runs = assembly_schedule.list_schedule_runs(client, bucket, channel=ch, limit=limit)
+    return {"runs": runs, "count": len(runs), "channel": ch}
+
+
+@app.delete("/v1/schedules/runs/{slot_key:path}")
+def clear_schedule_run(
+    slot_key: str,
+    _auth: None = Depends(require_api_auth),
+) -> dict[str, Any]:
+    """Remove ledger entry so a slot can fire again on the next cron tick."""
+    client, bucket = _r2()
+    if not assembly_schedule.delete_schedule_run(client, bucket, slot_key):
+        raise HTTPException(status_code=404, detail="Schedule run not found")
+    return {"deleted": True, "slot_key": slot_key}
 
 
 @app.post("/v1/cron/run-schedules")
@@ -1356,7 +1414,7 @@ def dashboard_page(
         return _LOGIN_HTML
     return _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category).replace(
         "__DEFAULT_THUMBNAIL__",
-        (os.environ.get("THUMBNAIL_TEXT") or "OMYO").strip() or "OMYO",
+        (os.environ.get("THUMBNAIL_TEXT") or "PLAYLIST").strip() or "PLAYLIST",
     )
 
 
@@ -1773,53 +1831,69 @@ _DASHBOARD_HTML = (
     .schedule-top { margin-bottom: 20px; }
     .schedule-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 4px 0 8px; }
     .schedule-days-heading { margin: 8px 0 4px; font-size: 15px; font-weight: 600; }
-    .schedule-days-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-      gap: 12px;
-      margin: 12px 0 20px;
+    .schedule-day-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0 16px;
+      min-height: 44px;
     }
-    .schedule-day-tile {
+    .schedule-day-times {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 12px;
+      margin: 0 0 20px;
+    }
+    .schedule-day-times.is-empty {
+      display: block;
+      padding: 8px 12px;
+      border: 1px dashed var(--color-stone-mist);
+      border-radius: var(--radius-small);
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-day-times.is-empty p { margin: 0; }
+    .schedule-day-time-card {
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-md);
       padding: 12px;
-      background: var(--color-white);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .schedule-day-tile.is-on {
-      border-color: var(--color-deep-forest-teal);
       background: var(--color-pale-lavender-tint);
     }
-    .schedule-day-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .schedule-day-head strong { font-size: 14px; }
-    .schedule-day-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      margin: 0;
-      font-size: 13px;
-      font-weight: 500;
-      text-transform: none;
-      letter-spacing: 0;
-    }
-    .schedule-day-toggle input { width: auto; margin: 0; }
-    .schedule-day-field {
+    .schedule-day-time-card strong {
       display: block;
-      margin: 0;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .schedule-day-time-card .schedule-day-field {
+      display: block;
+      margin: 0 0 6px;
       font-size: 12px;
-      font-weight: 500;
-      text-transform: none;
-      letter-spacing: 0;
       color: var(--color-smoke);
     }
-    .schedule-day-field input { margin-top: 4px; font-size: 13px; padding: 8px 10px; }
+    .schedule-day-time-card .schedule-day-field input {
+      margin-top: 4px;
+      width: 100%;
+      font-size: 13px;
+      padding: 8px 10px;
+    }
+    .schedule-upload-panel {
+      margin: 16px 0;
+      padding: 14px 16px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.7);
+    }
+    .schedule-upload-panel h3 { margin: 0 0 12px; font-size: 15px; }
+    .schedule-run-history { margin-top: 8px; }
+    .schedule-run-history table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .schedule-run-history th, .schedule-run-history td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--color-stone-mist);
+      text-align: left;
+      vertical-align: top;
+    }
+    .schedule-days-grid {
+      display: none;
+    }
     .schedule-summary {
       margin: 0 0 16px;
       padding: 12px 14px;
@@ -1883,6 +1957,32 @@ _DASHBOARD_HTML = (
       font-weight: 400;
     }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.schedule-day-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 54px;
+      min-height: 40px;
+      padding: 10px 14px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      background: var(--color-white);
+      color: var(--color-smoke);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    button.schedule-day-btn:hover {
+      border-color: var(--color-midnight-ink);
+      color: var(--color-midnight-ink);
+    }
+    button.schedule-day-btn.is-active {
+      background: var(--color-lavender-whisper);
+      border-color: var(--color-midnight-ink);
+      color: var(--color-midnight-ink);
+      box-shadow: inset 0 0 0 1px var(--color-midnight-ink);
+    }
     .btn-primary, #runBtn {
       display: inline-flex;
       align-items: center;
@@ -2636,49 +2736,91 @@ _DASHBOARD_HTML = (
               <label for="scheduleImagesFolder">Background folder</label>
               <select id="scheduleImagesFolder" required><option value="">Loading…</option></select>
             </div>
-            <div>
-              <label for="scheduleDefaultAssemble">Default assemble time</label>
-              <input id="scheduleDefaultAssemble" type="time" value="09:00"/>
-            </div>
           </div>
-          <div class="form-row-3">
-            <div>
-              <label for="scheduleDefaultUpload">Default upload time</label>
-              <input id="scheduleDefaultUpload" type="time"/>
-            </div>
+
+        <h3 class="schedule-days-heading">Repeat on these days</h3>
+        <p class="hint">Click a day to toggle it on (lavender = active). Assembly and YouTube upload run on enabled days at the times below.</p>
+        <div class="schedule-day-bar" id="scheduleDayBar" role="group" aria-label="Weekly schedule days">
+          <button type="button" class="schedule-day-btn" data-day="0" aria-pressed="false" title="Sunday">Sun</button>
+          <button type="button" class="schedule-day-btn" data-day="1" aria-pressed="false" title="Monday">Mon</button>
+          <button type="button" class="schedule-day-btn" data-day="2" aria-pressed="false" title="Tuesday">Tue</button>
+          <button type="button" class="schedule-day-btn" data-day="3" aria-pressed="false" title="Wednesday">Wed</button>
+          <button type="button" class="schedule-day-btn" data-day="4" aria-pressed="false" title="Thursday">Thu</button>
+          <button type="button" class="schedule-day-btn" data-day="5" aria-pressed="false" title="Friday">Fri</button>
+          <button type="button" class="schedule-day-btn" data-day="6" aria-pressed="false" title="Saturday">Sat</button>
+        </div>
+        <div class="schedule-day-times" id="scheduleDayTimes"></div>
+        <div class="schedule-days-grid" id="scheduleDaysGrid" hidden aria-hidden="true"></div>
+
+        <div class="form-row-3">
+          <div>
+            <label for="scheduleDefaultAssemble">Default assemble time</label>
+            <input id="scheduleDefaultAssemble" type="time" value="09:00"/>
           </div>
-          <div class="form-row-3">
-            <div>
-              <label for="scheduleThumb">Thumbnail text</label>
-              <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
-            </div>
-            <div>
-              <label for="scheduleDuration">Duration (min)</label>
-              <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
-            </div>
-            <div>
-              <label for="scheduleVariance">Variance (min)</label>
-              <input id="scheduleVariance" type="number" min="0" max="60" value="15"/>
-            </div>
+          <div>
+            <label for="scheduleDefaultUpload">Default upload time</label>
+            <input id="scheduleDefaultUpload" type="time" value="10:00"/>
           </div>
-          <p class="hint">Each scheduled run assembles one playlist video with these settings (same as New run).</p>
-          <div class="schedule-bulk">
-            <button type="button" class="secondary" id="scheduleApplyDefault">Apply default times to enabled days</button>
-            <span class="hint">Per-day overrides below still apply after bulk update.</span>
+        </div>
+        <div class="schedule-bulk">
+          <button type="button" class="secondary" id="scheduleApplyDefault">Apply default times to enabled days</button>
+        </div>
+
+        <div class="form-row-3">
+          <div>
+            <label for="scheduleThumb">Thumbnail text</label>
+            <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
           </div>
+          <div>
+            <label for="scheduleDuration">Duration (min)</label>
+            <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
+          </div>
+          <div>
+            <label for="scheduleVariance">Variance (min)</label>
+            <input id="scheduleVariance" type="number" min="0" max="60" value="15"/>
+          </div>
+        </div>
+        <p class="hint">Default upload time is 1 hour after assemble (editable per day).</p>
+
+        <div class="schedule-upload-panel">
+          <h3>YouTube upload</h3>
           <div class="checkbox-row">
             <input type="checkbox" id="scheduleQueueYoutube" checked/>
-            <label for="scheduleQueueYoutube">Queue YouTube upload when assembly finishes</label>
+            <label for="scheduleQueueYoutube">Upload to YouTube when assembly finishes</label>
+          </div>
+          <div class="form-row-3">
+            <div>
+              <label for="scheduleUploadPrivacy">Privacy</label>
+              <select id="scheduleUploadPrivacy">
+                <option value="private">Private (recommended for scheduled publish)</option>
+                <option value="unlisted">Unlisted</option>
+                <option value="public">Public</option>
+              </select>
+            </div>
+            <div>
+              <label for="scheduleUploadCategory">Category ID</label>
+              <input id="scheduleUploadCategory" value="10" placeholder="10 = Music"/>
+            </div>
+            <div>
+              <label for="scheduleUploadTags">Tags (comma-separated)</label>
+              <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
+            </div>
           </div>
           <div class="checkbox-row">
-            <input type="checkbox" id="scheduleAutoExtend" checked/>
-            <label for="scheduleAutoExtend">Auto-extend when backgrounds are low</label>
+            <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
+            <label for="scheduleUploadSchedulePublish">Schedule YouTube publish at upload time (uses per-day upload time)</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="scheduleUploadMadeForKids"/>
+            <label for="scheduleUploadMadeForKids">Made for kids</label>
           </div>
         </div>
 
-        <h3 class="schedule-days-heading">Weekly days</h3>
-        <p class="hint">Turn on Sunday–Saturday for automatic assembly. Per-day times override the defaults above.</p>
-        <div class="schedule-days-grid" id="scheduleDaysGrid"></div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="scheduleAutoExtend" checked/>
+          <label for="scheduleAutoExtend">Auto-extend when backgrounds are low</label>
+        </div>
+        </div>
 
         <dl class="schedule-summary" id="scheduleSummary"></dl>
 
@@ -2692,6 +2834,9 @@ _DASHBOARD_HTML = (
           <pre id="scheduleResources" class="muted">—</pre>
           <h3>Upcoming slots</h3>
           <div id="scheduleUpcoming"><p class="muted">—</p></div>
+          <h3>Run history</h3>
+          <p class="hint">Past cron dispatches for this channel. Clear a row to allow that slot to fire again.</p>
+          <div id="scheduleRunHistory" class="schedule-run-history"><p class="muted">—</p></div>
         </div>
       </div>
     </div>
@@ -3490,6 +3635,7 @@ document.getElementById('modalClose').onclick = () => {
 document.getElementById('modal').onclick = (e) => { if (e.target.id === 'modal') document.getElementById('modalClose').click(); };
 
 const SCHEDULE_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const SCHEDULE_DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 function timeInputValue(hhmm) {
   if (!hhmm) return '';
@@ -3502,48 +3648,135 @@ function timeFromInput(value) {
   const [h, m] = value.split(':');
   return String(parseInt(h, 10)).padStart(2, '0') + ':' + String(parseInt(m, 10)).padStart(2, '0');
 }
-function defaultScheduleDays() {
-  return SCHEDULE_DAY_NAMES.map(() => ({ enabled: false, assemble_at: '09:00', upload_at: null }));
+function uploadTimeAfterAssemble(assembleHhmm, offsetMin = 60) {
+  if (!assembleHhmm) return null;
+  const parts = String(assembleHhmm).split(':');
+  if (parts.length < 2) return null;
+  let total = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + offsetMin;
+  total = ((total % (24 * 60)) + 24 * 60) % (24 * 60);
+  return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
 }
-function renderScheduleDays(days) {
-  const grid = document.getElementById('scheduleDaysGrid');
-  if (!grid) return;
-  const rows = (days && days.length === 7) ? days : defaultScheduleDays();
-  grid.innerHTML = rows.map((day, i) => {
-    const uploadVal = timeInputValue(day.upload_at || '');
-    const on = day.enabled ? ' is-on' : '';
-    return '<div class="schedule-day-tile' + on + '" data-day="' + i + '">'
-      + '<div class="schedule-day-head">'
-      + '<strong>' + esc(SCHEDULE_DAY_NAMES[i]) + '</strong>'
-      + '<label class="schedule-day-toggle"><input type="checkbox" data-day="' + i + '" class="schedule-day-enabled"'
-      + (day.enabled ? ' checked' : '') + '> On</label>'
-      + '</div>'
-      + '<label class="schedule-day-field">Assemble'
-      + '<input type="time" data-day="' + i + '" class="schedule-day-assemble" value="'
-      + esc(timeInputValue(day.assemble_at || '09:00')) + '"></label>'
-      + '<label class="schedule-day-field">Upload'
-      + '<input type="time" data-day="' + i + '" class="schedule-day-upload" value="'
-      + esc(uploadVal) + '"></label>'
-      + '</div>';
-  }).join('');
-  grid.querySelectorAll('.schedule-day-enabled').forEach(cb => {
-    cb.addEventListener('change', () => {
-      cb.closest('.schedule-day-tile')?.classList.toggle('is-on', cb.checked);
+function defaultScheduleDays() {
+  return SCHEDULE_DAY_NAMES.map(() => ({
+    enabled: false,
+    assemble_at: '09:00',
+    upload_at: uploadTimeAfterAssemble('09:00'),
+  }));
+}
+let scheduleDayBarBound = false;
+function bindScheduleDayBar() {
+  if (scheduleDayBarBound) return;
+  const bar = document.getElementById('scheduleDayBar');
+  if (!bar) return;
+  scheduleDayBarBound = true;
+  bar.querySelectorAll('.schedule-day-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = parseInt(btn.dataset.day, 10);
+      const next = !btn.classList.contains('is-active');
+      btn.classList.toggle('is-active', next);
+      btn.setAttribute('aria-pressed', next ? 'true' : 'false');
+      const hidden = document.querySelector('.schedule-day-enabled[data-day="' + i + '"]');
+      if (hidden) hidden.checked = next;
+      if (next) {
+        const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+        const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
+        const defaultAssemble = timeFromInput(document.getElementById('scheduleDefaultAssemble')?.value) || '09:00';
+        if (assembleHidden && !assembleHidden.value) {
+          assembleHidden.value = timeInputValue(defaultAssemble);
+        }
+        if (uploadHidden && !uploadHidden.value) {
+          uploadHidden.value = timeInputValue(
+            uploadTimeAfterAssemble(assembleHidden?.value || defaultAssemble)
+          );
+        }
+      }
+      renderScheduleDayTimes(collectScheduleDays());
       updateScheduleSummary();
     });
   });
-  grid.querySelectorAll('.schedule-day-assemble, .schedule-day-upload').forEach(el => {
-    el.addEventListener('change', updateScheduleSummary);
+}
+function renderScheduleDays(days) {
+  const rows = (days && days.length === 7) ? days : defaultScheduleDays();
+  const bar = document.getElementById('scheduleDayBar');
+  const times = document.getElementById('scheduleDayTimes');
+  const grid = document.getElementById('scheduleDaysGrid');
+  if (!bar || !times) return;
+
+  bindScheduleDayBar();
+  bar.querySelectorAll('.schedule-day-btn').forEach(btn => {
+    const i = parseInt(btn.dataset.day, 10);
+    const day = rows[i] || defaultScheduleDays()[i];
+    const on = !!day.enabled;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+
+  if (grid) {
+    grid.innerHTML = rows.map((day, i) =>
+      '<input type="checkbox" class="schedule-day-enabled" data-day="' + i + '"' + (day.enabled ? ' checked' : '') + ' hidden>'
+      + '<input type="time" class="schedule-day-assemble" data-day="' + i + '" value="' + esc(timeInputValue(day.assemble_at || '09:00')) + '" hidden>'
+      + '<input type="time" class="schedule-day-upload" data-day="' + i + '" value="' + esc(timeInputValue(day.upload_at || uploadTimeAfterAssemble(day.assemble_at || '09:00') || '')) + '" hidden>'
+    ).join('');
+  }
+
+  renderScheduleDayTimes(rows);
+}
+
+function renderScheduleDayTimes(days) {
+  const times = document.getElementById('scheduleDayTimes');
+  if (!times) return;
+  const enabled = days.map((d, i) => ({ day: d, i })).filter(x => x.day.enabled);
+  if (!enabled.length) {
+    times.classList.add('is-empty');
+    times.innerHTML = '<p class="muted">Select at least one day above.</p>';
+    return;
+  }
+  times.classList.remove('is-empty');
+  times.innerHTML = enabled.map(({ day, i }) => {
+    const assembleVal = timeInputValue(day.assemble_at || '09:00');
+    const uploadVal = timeInputValue(day.upload_at || uploadTimeAfterAssemble(assembleVal) || '');
+    return '<div class="schedule-day-time-card" data-day="' + i + '"><strong>' + esc(SCHEDULE_DAY_NAMES[i]) + '</strong>'
+      + '<label class="schedule-day-field">Assemble<input type="time" class="schedule-day-assemble-visible" data-day="' + i + '" value="' + esc(assembleVal) + '"></label>'
+      + '<label class="schedule-day-field">Upload<input type="time" class="schedule-day-upload-visible" data-day="' + i + '" value="' + esc(uploadVal) + '"></label>'
+      + '</div>';
+  }).join('');
+
+  times.querySelectorAll('.schedule-day-assemble-visible, .schedule-day-upload-visible').forEach(el => {
+    el.addEventListener('change', () => {
+      const i = el.dataset.day;
+      const assembleEl = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+      const uploadEl = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
+      const assembleVis = document.querySelector('.schedule-day-assemble-visible[data-day="' + i + '"]');
+      const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
+      if (assembleVis && assembleEl) assembleEl.value = assembleVis.value;
+      if (uploadVis && uploadEl) uploadEl.value = uploadVis.value;
+      updateScheduleSummary();
+    });
   });
 }
 function collectScheduleDays() {
   return SCHEDULE_DAY_NAMES.map((_, i) => {
-    const enabled = document.querySelector('.schedule-day-enabled[data-day="' + i + '"]')?.checked || false;
-    const assemble_at = timeFromInput(document.querySelector('.schedule-day-assemble[data-day="' + i + '"]')?.value) || '09:00';
-    const uploadRaw = document.querySelector('.schedule-day-upload[data-day="' + i + '"]')?.value;
-    const upload_at = uploadRaw ? timeFromInput(uploadRaw) : null;
+    const btn = document.querySelector('.schedule-day-btn[data-day="' + i + '"]');
+    const enabled = btn ? btn.classList.contains('is-active') : false;
+    const assembleVis = document.querySelector('.schedule-day-assemble-visible[data-day="' + i + '"]');
+    const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
+    const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+    const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
+    const assemble_at = timeFromInput(assembleVis?.value || assembleHidden?.value) || '09:00';
+    const uploadRaw = uploadVis?.value || uploadHidden?.value;
+    const upload_at = uploadRaw ? timeFromInput(uploadRaw) : uploadTimeAfterAssemble(assemble_at);
     return { enabled, assemble_at, upload_at };
   });
+}
+function readScheduleUploadSettings() {
+  return {
+    queue_youtube: document.getElementById('scheduleQueueYoutube')?.checked !== false,
+    upload_privacy: document.getElementById('scheduleUploadPrivacy')?.value || 'private',
+    upload_schedule_publish: document.getElementById('scheduleUploadSchedulePublish')?.checked !== false,
+    upload_tags: document.getElementById('scheduleUploadTags')?.value.trim() || '',
+    upload_category_id: document.getElementById('scheduleUploadCategory')?.value.trim() || '10',
+    upload_made_for_kids: document.getElementById('scheduleUploadMadeForKids')?.checked || false,
+  };
 }
 function readScheduleVideoSettings() {
   const thumb = document.getElementById('scheduleThumb')?.value.trim() || '';
@@ -3562,8 +3795,9 @@ function updateScheduleSummary() {
   const folder = document.getElementById('scheduleImagesFolder')?.value.trim() || '—';
   const tz = document.getElementById('scheduleTimezone')?.value.trim() || 'America/New_York';
   const video = readScheduleVideoSettings();
+  const upload = readScheduleUploadSettings();
   const enabledDays = collectScheduleDays()
-    .map((d, i) => (d.enabled ? SCHEDULE_DAY_NAMES[i] + ' ' + d.assemble_at : null))
+    .map((d, i) => (d.enabled ? SCHEDULE_DAY_ABBR[i] + ' ' + d.assemble_at + '→' + d.upload_at : null))
     .filter(Boolean);
   el.innerHTML =
     '<dt>Channel</dt><dd><code>' + esc(channel) + '</code></dd>'
@@ -3571,9 +3805,9 @@ function updateScheduleSummary() {
     + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
     + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
     + '<dt>Thumbnail text</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
-    + '<dt>YouTube queue</dt><dd>' + (document.getElementById('scheduleQueueYoutube')?.checked ? 'Yes' : 'No') + '</dd>'
+    + '<dt>YouTube upload</dt><dd>' + (upload.queue_youtube ? esc(upload.upload_privacy) + (upload.upload_schedule_publish ? ' @ upload time' : ' immediate') : 'Off') + '</dd>'
     + '<dt>Timezone</dt><dd>' + esc(tz) + '</dd>'
-    + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None enabled') + '</dd>';
+    + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None — click Sun–Sat above') + '</dd>';
 }
 function fillScheduleForm(data) {
   document.getElementById('scheduleEnabled').checked = data.enabled !== false;
@@ -3584,14 +3818,59 @@ function fillScheduleForm(data) {
     updateScheduleSummary();
   });
   document.getElementById('scheduleDefaultAssemble').value = timeInputValue(data.default_assemble_at || '09:00');
-  document.getElementById('scheduleDefaultUpload').value = timeInputValue(data.default_upload_at || '');
+  document.getElementById('scheduleDefaultUpload').value = timeInputValue(
+    data.default_upload_at || uploadTimeAfterAssemble(data.default_assemble_at || '09:00') || ''
+  );
   document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
   document.getElementById('scheduleDuration').value = data.duration_min ?? 90;
   document.getElementById('scheduleVariance').value = data.variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
+  document.getElementById('scheduleUploadPrivacy').value = data.upload_privacy || 'private';
+  document.getElementById('scheduleUploadSchedulePublish').checked = data.upload_schedule_publish !== false;
+  document.getElementById('scheduleUploadTags').value = data.upload_tags || '';
+  document.getElementById('scheduleUploadCategory').value = data.upload_category_id || '10';
+  document.getElementById('scheduleUploadMadeForKids').checked = !!data.upload_made_for_kids;
   document.getElementById('scheduleAutoExtend').checked = data.auto_extend !== false;
   renderScheduleDays(data.days || defaultScheduleDays());
   updateScheduleSummary();
+}
+async function loadScheduleRunHistory(channel) {
+  const el = document.getElementById('scheduleRunHistory');
+  if (!el || !channel) {
+    if (el) el.innerHTML = '<p class="muted">—</p>';
+    return;
+  }
+  try {
+    const data = await api('/v1/schedules/' + encodeURIComponent(channel) + '/runs?limit=30');
+    const runs = data.runs || [];
+    if (!runs.length) {
+      el.innerHTML = '<p class="muted">No scheduled runs yet (cron must call <code>/v1/cron/run-schedules</code>).</p>';
+      return;
+    }
+    el.innerHTML = '<table><thead><tr><th>Slot</th><th>Status</th><th>Execution</th><th>When</th><th></th></tr></thead><tbody>'
+      + runs.map(r => {
+        const slot = esc(r.slot_key || '—');
+        const status = esc(r.status || '—');
+        const execId = r.execution_id ? '<code>' + esc(r.execution_id) + '</code>' : '—';
+        const when = esc(r.updated_at || r.created_at || '—');
+        const clearBtn = r.slot_key
+          ? '<button type="button" class="secondary schedule-run-clear" data-slot="' + esc(r.slot_key) + '">Clear</button>'
+          : '';
+        return '<tr><td><code>' + slot + '</code></td><td>' + status + '</td><td>' + execId + '</td><td>' + when + '</td><td>' + clearBtn + '</td></tr>';
+      }).join('')
+      + '</tbody></table>';
+    el.querySelectorAll('.schedule-run-clear').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Clear this run record? The slot can fire again on the next cron tick.')) return;
+        try {
+          await api('/v1/schedules/runs/' + encodeURIComponent(btn.dataset.slot), { method: 'DELETE' });
+          await loadScheduleRunHistory(channel);
+        } catch (e) { alert(String(e)); }
+      };
+    });
+  } catch (e) {
+    el.innerHTML = '<p class="muted">' + esc(String(e)) + '</p>';
+  }
 }
 function renderScheduleStatus(status) {
   const res = status.resources || {};
@@ -3639,6 +3918,7 @@ async function loadScheduleEditor(channel) {
         enabled: true,
         timezone: 'America/New_York',
         default_assemble_at: '09:00',
+        default_upload_at: '10:00',
         duration_min: 90,
         variance_min: 15,
         thumbnail_text: '__DEFAULT_THUMBNAIL__',
@@ -3652,6 +3932,7 @@ async function loadScheduleEditor(channel) {
   try {
     const status = await api('/v1/schedules/' + encodeURIComponent(channel) + '/status');
     renderScheduleStatus(status);
+    await loadScheduleRunHistory(channel);
   } catch (e) {
     document.getElementById('scheduleResources').textContent = String(e);
     document.getElementById('scheduleUpcoming').innerHTML = '<p class="muted">—</p>';
@@ -3666,6 +3947,7 @@ async function saveSchedule() {
   setBtnLoading(btn, true, 'Saving…');
   try {
     const video = readScheduleVideoSettings();
+    const upload = readScheduleUploadSettings();
     const body = {
       enabled: document.getElementById('scheduleEnabled').checked,
       timezone: document.getElementById('scheduleTimezone').value.trim() || 'America/New_York',
@@ -3673,9 +3955,15 @@ async function saveSchedule() {
       duration_min: video.duration_min,
       variance_min: video.variance_min,
       thumbnail_text: video.thumbnail_text,
+      queue_youtube: upload.queue_youtube,
+      upload_privacy: upload.upload_privacy,
+      upload_schedule_publish: upload.upload_schedule_publish,
+      upload_tags: upload.upload_tags,
+      upload_category_id: upload.upload_category_id,
+      upload_made_for_kids: upload.upload_made_for_kids,
       default_assemble_at: timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00',
-      default_upload_at: timeFromInput(document.getElementById('scheduleDefaultUpload').value),
-      queue_youtube: document.getElementById('scheduleQueueYoutube').checked,
+      default_upload_at: timeFromInput(document.getElementById('scheduleDefaultUpload').value)
+        || uploadTimeAfterAssemble(timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00'),
       auto_extend: document.getElementById('scheduleAutoExtend').checked,
       days: collectScheduleDays(),
       apply_default_to_enabled_days: false,
@@ -3946,6 +4234,8 @@ document.getElementById('videoChannel').addEventListener('change', async () => {
     await loadVideoList();
   }
 });
+bindScheduleDayBar();
+renderScheduleDayTimes(defaultScheduleDays());
 document.getElementById('scheduleChannel').addEventListener('change', () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim()));
 document.getElementById('scheduleReload').onclick = () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim());
 document.getElementById('scheduleSave').onclick = saveSchedule;
@@ -3955,16 +4245,29 @@ document.getElementById('scheduleSave').onclick = saveSchedule;
 });
 document.getElementById('scheduleApplyDefault').onclick = () => {
   const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
-  const upload = timeFromInput(document.getElementById('scheduleDefaultUpload').value);
-  document.querySelectorAll('.schedule-day-enabled:checked').forEach(cb => {
-    const i = cb.dataset.day;
-    const assembleEl = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
-    if (assembleEl) assembleEl.value = timeInputValue(assemble);
-    const uploadEl = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
-    if (uploadEl) uploadEl.value = upload ? timeInputValue(upload) : '';
+  const upload = timeFromInput(document.getElementById('scheduleDefaultUpload').value)
+    || uploadTimeAfterAssemble(assemble);
+  document.querySelectorAll('.schedule-day-btn.is-active').forEach(btn => {
+    const i = btn.dataset.day;
+    const assembleVis = document.querySelector('.schedule-day-assemble-visible[data-day="' + i + '"]');
+    const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
+    const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+    const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
+    if (assembleVis) assembleVis.value = timeInputValue(assemble);
+    if (uploadVis) uploadVis.value = timeInputValue(upload);
+    if (assembleHidden) assembleHidden.value = timeInputValue(assemble);
+    if (uploadHidden) uploadHidden.value = timeInputValue(upload);
   });
   updateScheduleSummary();
 };
+['scheduleUploadPrivacy', 'scheduleUploadSchedulePublish', 'scheduleUploadTags', 'scheduleUploadCategory', 'scheduleUploadMadeForKids', 'scheduleQueueYoutube'].forEach(id => {
+  document.getElementById(id)?.addEventListener('change', updateScheduleSummary);
+});
+document.getElementById('scheduleDefaultAssemble')?.addEventListener('change', () => {
+  const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
+  document.getElementById('scheduleDefaultUpload').value = timeInputValue(uploadTimeAfterAssemble(assemble));
+  updateScheduleSummary();
+});
 document.getElementById('scheduleDelete').onclick = async () => {
   const channel = document.getElementById('scheduleChannel').value.trim();
   if (!channel || !confirm('Delete schedule for ' + channel + '?')) return;

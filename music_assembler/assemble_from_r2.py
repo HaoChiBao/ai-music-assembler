@@ -250,6 +250,13 @@ def _maybe_queue_youtube_upload(
 
     print(f"==> Register YouTube upload queue ({channel})")
     print(f"    video: {video_uri}")
+    upload_privacy = os.environ.get("ASSEMBLY_UPLOAD_PRIVACY", "").strip() or None
+    publish_at = os.environ.get("ASSEMBLY_PUBLISH_AT", "").strip() or None
+    upload_tags_raw = os.environ.get("ASSEMBLY_UPLOAD_TAGS", "").strip()
+    upload_tags = [t.strip() for t in upload_tags_raw.split(",") if t.strip()] if upload_tags_raw else None
+    category_id = os.environ.get("ASSEMBLY_UPLOAD_CATEGORY_ID", "").strip() or None
+    made_for_kids_raw = os.environ.get("ASSEMBLY_UPLOAD_MADE_FOR_KIDS", "").strip().lower()
+    made_for_kids = made_for_kids_raw in ("1", "true", "yes", "on") if made_for_kids_raw else None
     try:
         response = register_youtube_upload(
             api_url=api_url,
@@ -260,6 +267,11 @@ def _maybe_queue_youtube_upload(
             video_uri=video_uri,
             thumbnail_uri=thumbnail_uri,
             job_id=basename,
+            tags=upload_tags,
+            privacy=upload_privacy,
+            publish_at=publish_at,
+            category_id=category_id,
+            made_for_kids=made_for_kids,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"warning: YouTube queue register failed: {exc}", file=sys.stderr)

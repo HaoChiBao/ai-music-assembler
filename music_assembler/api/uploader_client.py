@@ -131,6 +131,10 @@ def register_youtube_upload(
     thumbnail_uri: str = "",
     job_id: str | None = None,
     tags: list[str] | None = None,
+    privacy: str | None = None,
+    publish_at: str | None = None,
+    category_id: str | None = None,
+    made_for_kids: bool | None = None,
     timeout: float = 30,
 ) -> dict[str, Any]:
     """Register a finished video with ``POST /v1/channels/{channel}/jobs/register``."""
@@ -157,6 +161,14 @@ def register_youtube_upload(
         payload["job_id"] = job_id
     if tags:
         payload["tags"] = tags
+    if privacy:
+        payload["privacy"] = privacy.strip().lower()
+    if publish_at:
+        payload["publish_at"] = publish_at.strip()
+    if category_id:
+        payload["category_id"] = str(category_id).strip()
+    if made_for_kids is not None:
+        payload["made_for_kids"] = bool(made_for_kids)
 
     url = f"{base}/v1/channels/{channel_ref}/jobs/register"
     body = json.dumps(payload).encode("utf-8")

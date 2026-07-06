@@ -188,6 +188,11 @@ def start_assembly_job(
     duration_min: int | None = None,
     variance_min: int | None = None,
     queue_youtube: bool = True,
+    upload_privacy: str | None = None,
+    publish_at: str | None = None,
+    upload_tags: str | None = None,
+    upload_category_id: str | None = None,
+    upload_made_for_kids: bool | None = None,
     exclude_gcp_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Start ``music-assemble`` with env overrides for this run."""
@@ -211,6 +216,21 @@ def start_assembly_job(
             value="true" if queue_youtube else "false",
         )
     )
+    if upload_privacy:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_PRIVACY", value=upload_privacy))
+    if publish_at:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_PUBLISH_AT", value=publish_at))
+    if upload_tags:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_TAGS", value=upload_tags))
+    if upload_category_id:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_CATEGORY_ID", value=upload_category_id))
+    if upload_made_for_kids is not None:
+        env.append(
+            run_v2.EnvVar(
+                name="ASSEMBLY_UPLOAD_MADE_FOR_KIDS",
+                value="true" if upload_made_for_kids else "false",
+            )
+        )
     return _run_cloud_job(
         settings,
         job_resource=settings.job_resource,

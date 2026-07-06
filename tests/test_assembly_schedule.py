@@ -13,12 +13,18 @@ from music_assembler.api.assembly_schedule import (
     ledger_is_terminal,
     preview_schedule,
     slot_key,
+    upload_time_after_assemble,
     upsert_schedule,
 )
 
 
 def test_slot_key_format():
     assert slot_key("nappabeats", datetime(2026, 7, 2).date(), 1, "09:00") == "nappabeats:2026-07-02:1:09:00"
+
+
+def test_upload_time_after_assemble():
+    assert upload_time_after_assemble("09:00") == "10:00"
+    assert upload_time_after_assemble("23:45") == "00:45"
 
 
 def test_apply_default_times_to_enabled_days():
@@ -33,9 +39,12 @@ def test_apply_default_times_to_enabled_days():
     )
     apply_default_times(sched, assemble_at="12:30")
     assert sched.default_assemble_at == "12:30"
+    assert sched.default_upload_at == "13:30"
     assert sched.days[0].assemble_at == "12:30"
+    assert sched.days[0].upload_at == "13:30"
     assert sched.days[1].assemble_at == "09:00"  # disabled day keeps default
     assert sched.days[2].assemble_at == "12:30"
+    assert sched.days[2].upload_at == "13:30"
 
 
 def test_due_slots_matches_window():
@@ -50,6 +59,7 @@ def test_due_slots_matches_window():
     slots = due_slots(sched, now_utc=now, window_minutes=15)
     assert len(slots) == 1
     assert slots[0]["assemble_at"] == "09:00"
+    assert slots[0]["upload_at"] == "10:00"
     assert slots[0]["day_name"] == "Thursday"
 
 

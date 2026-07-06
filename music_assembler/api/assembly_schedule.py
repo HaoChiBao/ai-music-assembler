@@ -21,6 +21,9 @@ SCHEDULE_RUNS_PREFIX = "schedules/runs/"
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 DEFAULT_WINDOW_MINUTES = 15
+DEFAULT_UPLOAD_OFFSET_MINUTES = 60
+VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
+SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
 
 @dataclass
@@ -57,6 +60,11 @@ class ChannelSchedule:
     variance_min: int = 15
     thumbnail_text: str | None = None
     queue_youtube: bool = True
+    upload_privacy: str = "private"
+    upload_schedule_publish: bool = True
+    upload_tags: str = ""
+    upload_category_id: str = "10"
+    upload_made_for_kids: bool = False
     default_assemble_at: str = "09:00"
     default_upload_at: str | None = None
     min_backgrounds: int = 1
@@ -74,6 +82,11 @@ class ChannelSchedule:
             "variance_min": self.variance_min,
             "thumbnail_text": self.thumbnail_text,
             "queue_youtube": self.queue_youtube,
+            "upload_privacy": self.upload_privacy,
+            "upload_schedule_publish": self.upload_schedule_publish,
+            "upload_tags": self.upload_tags,
+            "upload_category_id": self.upload_category_id,
+            "upload_made_for_kids": self.upload_made_for_kids,
             "default_assemble_at": self.default_assemble_at,
             "default_upload_at": self.default_upload_at,
             "min_backgrounds": self.min_backgrounds,
@@ -101,12 +114,30 @@ class ChannelSchedule:
             variance_min=int(data.get("variance_min") or 15),
             thumbnail_text=(str(data["thumbnail_text"]).strip() if data.get("thumbnail_text") else None),
             queue_youtube=bool(data.get("queue_youtube", True)),
+            upload_privacy=(
+                str(data.get("upload_privacy") or "private").strip().lower()
+                if str(data.get("upload_privacy") or "private").strip().lower() in VALID_UPLOAD_PRIVACY
+                else "private"
+            ),
+            upload_schedule_publish=bool(data.get("upload_schedule_publish", True)),
+            upload_tags=str(data.get("upload_tags") or "").strip(),
+            upload_category_id=str(data.get("upload_category_id") or "10").strip() or "10",
+            upload_made_for_kids=bool(data.get("upload_made_for_kids", False)),
             default_assemble_at=_normalize_time(str(data.get("default_assemble_at") or "09:00")),
             default_upload_at=_normalize_time_optional(data.get("default_upload_at")),
             min_backgrounds=max(1, int(data.get("min_backgrounds") or 1)),
             auto_extend=bool(data.get("auto_extend", True)),
             days=days,
         )
+
+
+def resolved_upload_at(day: DaySlot, schedule: ChannelSchedule) -> str:
+    assemble_at = day.assemble_at or schedule.default_assemble_at
+    if day.upload_at:
+        return day.upload_at
+    if schedule.default_upload_at:
+        return schedule.default_upload_at
+    return upload_time_after_assemble(assemble_at)
 
 
 def _normalize_time(value: str) -> str:
@@ -123,6 +154,73 @@ def _normalize_time_optional(value: Any) -> str | None:
     if value is None or str(value).strip() == "":
         return None
     return _normalize_time(str(value))
+
+
+def upload_time_after_assemble(
+    assemble_at: str,
+    offset_minutes: int = DEFAULT_UPLOAD_OFFSET_MINUTES,
+) -> str:
+    """Return HH:MM upload time ``offset_minutes`` after ``assemble_at`` (wraps at midnight)."""
+    hour, minute = map(int, _normalize_time(assemble_at).split(":"))
+    total = (hour * 60 + minute + offset_minutes) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _normalize_upload_privacy(value: Any) -> str:
+    raw = str(value or "private").strip().lower()
+    if raw not in VALID_UPLOAD_PRIVACY:
+        raise ValueError(f"upload_privacy must be one of {VALID_UPLOAD_PRIVACY}")
+    return raw
+
+
+def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str | None:
+    """RFC3339 UTC publish time from slot upload_at, or None for immediate upload."""
+    if not schedule.queue_youtube or not schedule.upload_schedule_publish:
+        return None
+    upload_at = slot.get("upload_at")
+    if not upload_at:
+        return None
+    local_date = date.fromisoformat(str(slot["local_date"]))
+    tz = ZoneInfo(schedule.timezone)
+    dt = datetime.combine(local_date, _parse_local_time(str(upload_at)), tzinfo=tz)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def list_schedule_runs(
+    client,
+    bucket: str,
+    *,
+    channel: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List idempotency ledger entries under ``schedules/runs/``."""
+    rows: list[dict[str, Any]] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=SCHEDULE_RUNS_PREFIX):
+        for obj in page.get("Contents") or []:
+            key = obj.get("Key") or ""
+            if not key.endswith(".json"):
+                continue
+            try:
+                resp = client.get_object(Bucket=bucket, Key=key)
+                entry = json.loads(resp["Body"].read().decode("utf-8"))
+            except client.exceptions.ClientError:
+                continue
+            if channel and entry.get("channel") != channel:
+                continue
+            entry["ledger_key"] = key
+            rows.append(entry)
+    rows.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
+    return rows[: max(limit, 0)]
+
+
+def delete_schedule_run(client, bucket: str, slot_key: str) -> bool:
+    """Remove a ledger entry so the slot can fire again."""
+    try:
+        client.delete_object(Bucket=bucket, Key=_ledger_key(slot_key))
+        return True
+    except client.exceptions.ClientError:
+        return False
 
 
 def _ledger_key(slot_key: str) -> str:
@@ -213,6 +311,12 @@ def apply_default_times(schedule: ChannelSchedule, *, assemble_at: str | None = 
         for day in schedule.days:
             if day.enabled:
                 day.upload_at = schedule.default_upload_at
+    elif assemble_at is not None:
+        computed = upload_time_after_assemble(schedule.default_assemble_at)
+        schedule.default_upload_at = computed
+        for day in schedule.days:
+            if day.enabled:
+                day.upload_at = computed
     return schedule
 
 
@@ -255,7 +359,7 @@ def due_slots(
             "day_index": day_index,
             "day_name": DAY_NAMES[day_index],
             "assemble_at": assemble_at,
-            "upload_at": day.upload_at or schedule.default_upload_at,
+            "upload_at": resolved_upload_at(day, schedule),
             "timezone": schedule.timezone,
         }
     ]
@@ -352,7 +456,7 @@ def preview_schedule(schedule: ChannelSchedule, *, now_utc: datetime | None = No
                 "at_local": dt.isoformat(),
                 "day_name": DAY_NAMES[day_index],
                 "assemble_at": assemble_at,
-                "upload_at": day.upload_at or schedule.default_upload_at,
+                "upload_at": resolved_upload_at(day, schedule),
                 "slot_key": slot_key(schedule.channel, day_local, day_index, assemble_at),
             }
         )
@@ -410,6 +514,7 @@ def start_scheduled_assembly(
         status="running",
         extra={"schedule_slot_key": slot["slot_key"]},
     )
+    publish_at = slot_publish_at_utc(slot, schedule)
     result = gcp_jobs.start_assembly_job(
         settings,
         execution_id=execution_id,
@@ -420,6 +525,11 @@ def start_scheduled_assembly(
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
         queue_youtube=schedule.queue_youtube,
+        upload_privacy=schedule.upload_privacy,
+        publish_at=publish_at,
+        upload_tags=schedule.upload_tags or None,
+        upload_category_id=schedule.upload_category_id,
+        upload_made_for_kids=schedule.upload_made_for_kids,
     )
     gcp_id = result.get("gcp_execution_id")
     if gcp_id:
