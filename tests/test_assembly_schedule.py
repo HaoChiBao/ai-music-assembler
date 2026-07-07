@@ -42,7 +42,7 @@ def test_apply_default_times_to_enabled_days():
     assert sched.default_upload_at == "13:30"
     assert sched.days[0].assemble_at == "12:30"
     assert sched.days[0].upload_at == "13:30"
-    assert sched.days[1].assemble_at == "09:00"  # disabled day keeps default
+    assert sched.days[1].assemble_at == "11:00"  # disabled day keeps default
     assert sched.days[2].assemble_at == "12:30"
     assert sched.days[2].upload_at == "13:30"
 

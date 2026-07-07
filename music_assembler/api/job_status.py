@@ -89,6 +89,18 @@ def _estimate_running_pct(gcp_row: dict[str, Any]) -> tuple[float, str]:
     return pct, "Encoding on Cloud Run…"
 
 
+def runs_need_gcp_reconcile(runs: list[dict[str, Any]]) -> bool:
+    """True when any run may still be active on Cloud Run (not terminal on R2)."""
+    for run in runs:
+        prog = run.get("progress") or {}
+        st = prog.get("status")
+        if st in (None, "running", "cancelling"):
+            return True
+        if st not in _TERMINAL_R2:
+            return True
+    return False
+
+
 def _normalize_from_run(run: dict[str, Any]) -> dict[str, Any]:
     prog = run.get("progress") or {}
     status = prog.get("status") or "running"
@@ -112,10 +124,13 @@ def reconcile_assembly_runs(
     runs: list[dict[str, Any]],
     *,
     patch_r2: bool = True,
+    reconcile_gcp: bool = True,
 ) -> list[dict[str, Any]]:
     """Merge fresh R2 ``progress.json`` with Cloud Run execution status."""
     if not runs:
         return []
+    if not reconcile_gcp:
+        return [_normalize_from_run(run) for run in runs]
 
     gcp_rows: list[dict[str, Any]] = []
     gcp_by_id: dict[str, dict[str, Any]] = {}
@@ -239,10 +254,13 @@ def reconcile_extend_runs(
     runs: list[dict[str, Any]],
     *,
     patch_r2: bool = True,
+    reconcile_gcp: bool = True,
 ) -> list[dict[str, Any]]:
     """Merge R2 extend progress with Cloud Run execution status."""
     if not runs:
         return []
+    if not reconcile_gcp:
+        return [_normalize_from_run(run) for run in runs]
 
     gcp_rows: list[dict[str, Any]] = []
     gcp_by_id: dict[str, dict[str, Any]] = {}

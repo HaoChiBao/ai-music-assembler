@@ -128,7 +128,7 @@ class CancelJobRequest(BaseModel):
 
 class DaySlotRequest(BaseModel):
     enabled: bool = False
-    assemble_at: str = "09:00"
+    assemble_at: str = assembly_schedule.DEFAULT_ASSEMBLE_AT
     upload_at: str | None = None
 
 
@@ -150,7 +150,7 @@ class ChannelScheduleRequest(BaseModel):
     upload_tags: str = ""
     upload_category_id: str = "10"
     upload_made_for_kids: bool = False
-    default_assemble_at: str = "09:00"
+    default_assemble_at: str = assembly_schedule.DEFAULT_ASSEMBLE_AT
     default_upload_at: str | None = None
     min_backgrounds: int = Field(default=1, ge=1, le=20)
     auto_extend: bool = True
@@ -243,6 +243,10 @@ def _invalidate_category_cache(category: str) -> None:
     dashboard_cache.invalidate_prefix(_cache_key("stats", category))
     dashboard_cache.invalidate_prefix(_cache_key("videos", category))
     dashboard_cache.invalidate_prefix(_cache_key("assets", category))
+
+
+def _invalidate_schedule_cache() -> None:
+    dashboard_cache.invalidate_prefix(_cache_key("schedules", "overview"))
 
 
 def _queue_extend_job_local(
@@ -449,6 +453,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/cron/assembly-health",
             "POST /v1/cron/assembly-health",
             "GET /v1/schedules",
+            "GET /v1/schedules/overview",
             "GET /v1/schedules/{channel}",
             "PUT /v1/schedules/{channel}",
             "DELETE /v1/schedules/{channel}",
@@ -695,6 +700,39 @@ def list_schedules(
     return {"schedules": [s.to_dict() for s in schedules], "count": len(schedules)}
 
 
+@app.get("/v1/schedules/overview")
+def schedules_overview(
+    upcoming_limit: int = Query(default=25, ge=1, le=100),
+    runs_limit: int = Query(default=40, ge=1, le=200),
+    refresh: bool = Query(default=False, description="Bypass overview cache"),
+    _auth: None = Depends(require_api_auth),
+    settings: ApiSettings = Depends(_settings),
+) -> JSONResponse:
+    """All channel schedules with upcoming slots and recent cron ledger entries."""
+    cache_key = _cache_key("schedules", "overview", str(upcoming_limit), str(runs_limit))
+
+    def load() -> dict[str, Any]:
+        client, bucket = _r2()
+        return assembly_schedule.schedules_overview(
+            client,
+            bucket,
+            settings,
+            upcoming_limit=upcoming_limit,
+            runs_limit=runs_limit,
+        )
+
+    if refresh:
+        data = load()
+        hit = False
+        dashboard_cache.set(cache_key, data, 30.0)
+    else:
+        data, hit = dashboard_cache.get_or_set(cache_key, 30.0, load)
+    return JSONResponse(
+        content={**data, "cache": {"hit": hit, "ttl_sec": 30}},
+        headers={"X-Cache": "HIT" if hit else "MISS"},
+    )
+
+
 @app.get("/v1/schedules/{channel}")
 def get_schedule(
     channel: str,
@@ -720,6 +758,7 @@ def put_schedule(
     client, bucket = _r2()
     _assert_background_folder_exists(client, bucket, sched.images_folder or body.images_folder)
     saved = assembly_schedule.upsert_schedule(client, bucket, sched)
+    _invalidate_schedule_cache()
     return saved.to_dict()
 
 
@@ -731,12 +770,14 @@ def remove_schedule(
     client, bucket = _r2()
     if not assembly_schedule.delete_schedule(client, bucket, normalize_channel(channel)):
         raise HTTPException(status_code=404, detail="Schedule not found")
+    _invalidate_schedule_cache()
     return {"deleted": True, "channel": channel}
 
 
 @app.get("/v1/schedules/{channel}/status")
 def schedule_status(
     channel: str,
+    include_resources: bool = Query(default=True, description="Include R2 inventory checks"),
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
@@ -744,13 +785,17 @@ def schedule_status(
     sched = assembly_schedule.get_schedule(client, bucket, normalize_channel(channel))
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    resources = assembly_schedule.evaluate_resources(client, bucket, sched, settings)
+    resources: dict[str, Any] | None = None
+    if include_resources:
+        resources = assembly_schedule.evaluate_resources(client, bucket, sched, settings)
     upcoming = assembly_schedule.preview_schedule(sched)
-    return {
+    out: dict[str, Any] = {
         "schedule": sched.to_dict(),
-        "resources": resources,
         "upcoming": upcoming,
     }
+    if resources is not None:
+        out["resources"] = resources
+    return out
 
 
 @app.get("/v1/schedules/runs")
@@ -1060,22 +1105,36 @@ def dashboard_snapshot(
     """Poll endpoint for jobs. Use /v1/dashboard/stats and tab loaders for the rest."""
     cat = category or settings.default_category
     client, bucket = _r2()
+    effective_limit = min(job_limit, 50) if light else job_limit
+    scan_extra_running = not light
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         asm_future = pool.submit(
-            job_runs.list_r2_job_runs, client, bucket, id_prefix="asm_", limit=job_limit
+            job_runs.list_r2_job_runs,
+            client,
+            bucket,
+            id_prefix="asm_",
+            limit=effective_limit,
+            scan_extra_running=scan_extra_running,
         )
         ext_future = pool.submit(
-            job_runs.list_r2_job_runs, client, bucket, id_prefix="ext_", limit=job_limit
+            job_runs.list_r2_job_runs,
+            client,
+            bucket,
+            id_prefix="ext_",
+            limit=effective_limit,
+            scan_extra_running=scan_extra_running,
         )
         asm_raw = asm_future.result()
         ext_raw = ext_future.result()
 
+    reconcile_asm_gcp = (not light) or job_status.runs_need_gcp_reconcile(asm_raw)
+    reconcile_ext_gcp = (not light) or job_status.runs_need_gcp_reconcile(ext_raw)
     assembly_runs = job_status.reconcile_assembly_runs(
-        settings, client, bucket, asm_raw, patch_r2=True
+        settings, client, bucket, asm_raw, patch_r2=not light, reconcile_gcp=reconcile_asm_gcp
     )
     extend_runs = job_status.reconcile_extend_runs(
-        settings, client, bucket, ext_raw, patch_r2=True
+        settings, client, bucket, ext_raw, patch_r2=not light, reconcile_gcp=reconcile_ext_gcp
     )
     has_running = job_status.has_running_jobs(assembly_runs) or job_status.has_running_jobs(
         extend_runs
@@ -1828,90 +1887,443 @@ _DASHBOARD_HTML = (
     }
     .checkbox-row input { width: auto; margin: 2px 0 0; }
     .checkbox-row label { margin: 0; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-    .schedule-top { margin-bottom: 20px; }
-    .schedule-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 4px 0 8px; }
-    .schedule-days-heading { margin: 8px 0 4px; font-size: 15px; font-weight: 600; }
-    .schedule-day-bar {
+    .schedule-page {
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 12px 0 16px;
-      min-height: 44px;
+      flex-direction: column;
+      gap: 24px;
     }
-    .schedule-day-times {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-      gap: 12px;
-      margin: 0 0 20px;
+    .schedule-page__header {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--color-stone-mist);
     }
-    .schedule-day-times.is-empty {
-      display: block;
-      padding: 8px 12px;
-      border: 1px dashed var(--color-stone-mist);
-      border-radius: var(--radius-small);
-      background: var(--color-pale-lavender-tint);
+    .schedule-page__intro .panel-title { margin: 0 0 6px; }
+    .schedule-page__intro .card-desc { margin: 0; }
+    .schedule-page__toolbar {
+      margin-bottom: 0;
+      align-items: flex-end;
     }
-    .schedule-day-times.is-empty p { margin: 0; }
-    .schedule-day-time-card {
+    .schedule-page__toolbar label { min-width: min(280px, 100%); }
+    .schedule-panel {
       border: 1px solid var(--color-stone-mist);
-      border-radius: var(--radius-md);
-      padding: 12px;
-      background: var(--color-pale-lavender-tint);
+      border-radius: var(--radius-nav);
+      background: var(--color-cream-paper);
+      overflow: hidden;
     }
-    .schedule-day-time-card strong {
-      display: block;
+    .schedule-panel__head {
+      padding: 18px 20px 0;
+    }
+    .schedule-panel__head .hint { margin: 6px 0 0; max-width: 62ch; }
+    .schedule-panel__meta {
+      margin: 0;
+      padding: 14px 20px 0;
       font-size: 13px;
-      margin-bottom: 8px;
-    }
-    .schedule-day-time-card .schedule-day-field {
-      display: block;
-      margin: 0 0 6px;
-      font-size: 12px;
       color: var(--color-smoke);
+      line-height: 1.45;
     }
-    .schedule-day-time-card .schedule-day-field input {
-      margin-top: 4px;
-      width: 100%;
-      font-size: 13px;
-      padding: 8px 10px;
-    }
-    .schedule-upload-panel {
-      margin: 16px 0;
-      padding: 14px 16px;
+    .schedule-panel__meta code {
+      font-size: 12px;
+      background: var(--color-white);
+      padding: 2px 6px;
+      border-radius: 4px;
       border: 1px solid var(--color-stone-mist);
-      border-radius: var(--radius-md);
-      background: rgba(255, 255, 255, 0.7);
     }
-    .schedule-upload-panel h3 { margin: 0 0 12px; font-size: 15px; }
-    .schedule-run-history { margin-top: 8px; }
-    .schedule-run-history table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .schedule-run-history th, .schedule-run-history td {
-      padding: 8px 6px;
+    .schedule-panel__stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 16px 20px 20px;
+    }
+    .schedule-block {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      background: var(--color-white);
+      overflow: hidden;
+    }
+    .schedule-block__head {
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--color-stone-mist);
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-block__title {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--color-graphite-veil);
+    }
+    .schedule-block__body > .muted,
+    .schedule-block__body > p.muted {
+      margin: 0;
+      padding: 16px;
+      font-size: 13px;
+    }
+    .schedule-table-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .schedule-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .schedule-table th,
+    .schedule-table td {
+      padding: 10px 12px;
       border-bottom: 1px solid var(--color-stone-mist);
       text-align: left;
       vertical-align: top;
     }
-    .schedule-days-grid {
+    .schedule-table th {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--color-graphite-veil);
+      background: var(--color-white);
+    }
+    .schedule-table tr:last-child td { border-bottom: none; }
+    .schedule-table tr.is-disabled { opacity: 0.55; }
+    .schedule-table tr.is-clickable { cursor: pointer; }
+    .schedule-table tr.is-clickable:hover td {
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-table .schedule-run-clear { white-space: nowrap; }
+    .schedule-empty {
+      padding: 32px 24px;
+      border: 1px dashed var(--color-stone-mist);
+      border-radius: var(--radius-nav);
+      background: var(--color-pale-lavender-tint);
+      text-align: center;
+    }
+    .schedule-empty-title {
+      margin: 0 0 6px;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+    }
+    .schedule-empty .muted { margin: 0; font-size: 14px; }
+    .schedule-editor {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .schedule-editor__head {
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--color-stone-mist);
+    }
+    .schedule-editor__title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      letter-spacing: -0.01em;
+    }
+    .schedule-editor__head .hint { margin: 6px 0 0; }
+    .schedule-editor__footer {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding-top: 4px;
+      border-top: 1px solid var(--color-stone-mist);
+    }
+    .schedule-editor__actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .schedule-editor__actions .btn-primary {
+      width: auto;
+      min-width: 11rem;
+      padding: 12px 24px;
+    }
+    .schedule-panel--diagnostics {
+      background: var(--color-white);
+    }
+    .schedule-panel--diagnostics .schedule-panel__head {
+      padding: 14px 18px 0;
+    }
+    .schedule-panel--diagnostics .schedule-panel__stack {
+      padding: 12px 18px 16px;
+      gap: 8px;
+    }
+    .schedule-panel--diagnostics .schedule-diagnostic {
+      border: none;
+      border-radius: var(--radius-small);
+      background: var(--color-cream-paper);
+      padding: 0 12px;
+    }
+    .schedule-panel--diagnostics .schedule-diagnostic + .schedule-diagnostic {
+      margin-top: 0;
+    }
+    .schedule-editor.is-schedule-disabled .schedule-section:not(.schedule-section--status) {
+      opacity: 0.55;
+      pointer-events: none;
+    }
+    .schedule-section {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-nav);
+      background: var(--color-white);
+      overflow: hidden;
+    }
+    .schedule-section-head {
+      padding: 16px 18px 0;
+    }
+    .schedule-section-head .hint {
+      margin: 8px 0 0;
+      max-width: 60ch;
+    }
+    .schedule-section-body {
+      padding: 14px 18px 18px;
+    }
+    .schedule-section-body.form-stack { gap: 16px; }
+    .schedule-section-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      letter-spacing: -0.01em;
+    }
+    .schedule-section--compact .schedule-section-body { padding-top: 14px; padding-bottom: 14px; }
+    .schedule-day-bar {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .schedule-day-times {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .schedule-day-times.is-empty {
+      display: block;
+      margin-top: 16px;
+      padding: 14px 16px;
+      border: 1px dashed var(--color-stone-mist);
+      border-radius: var(--radius-small);
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-day-times.is-empty p { margin: 0; font-size: 13px; }
+    .schedule-day-time-card {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      padding: 14px;
+      background: var(--color-pale-lavender-tint);
+    }
+    .schedule-day-time-card-head {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      margin-bottom: 12px;
+    }
+    .schedule-day-time-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .schedule-day-field {
+      display: block;
+      margin: 0;
+      min-width: 0;
+    }
+    .schedule-day-field-label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--color-graphite-veil);
+    }
+    .schedule-day-time-card .time-picker { margin-top: 0; }
+    .schedule-day-time-card .time-picker-display { display: none; }
+    .schedule-default-times {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .schedule-inline-action { margin-top: 0; }
+    .schedule-actions {
       display: none;
     }
+    .schedule-diagnostics {
+      display: none;
+    }
+    .time-picker { margin-top: 4px; }
+    .time-picker-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .time-picker-row select {
+      width: auto;
+      min-width: 68px;
+      margin-top: 0;
+      padding: 10px 12px;
+      flex: 0 0 auto;
+      font-size: 14px;
+    }
+    .time-picker-minute { min-width: 76px; }
+    .time-picker-colon {
+      font-weight: 600;
+      color: var(--color-smoke);
+      line-height: 1;
+      user-select: none;
+    }
+    .time-picker-ampm {
+      display: inline-flex;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      overflow: hidden;
+      background: var(--color-white);
+    }
+    button.time-picker-ampm-btn {
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-smoke);
+      background: var(--color-white);
+      border: none;
+      border-right: 1px solid var(--color-stone-mist);
+    }
+    button.time-picker-ampm-btn:last-child { border-right: none; }
+    button.time-picker-ampm-btn.is-active {
+      background: var(--color-lavender-whisper);
+      color: var(--color-midnight-ink);
+    }
+    button.time-picker-ampm-btn:hover:not(.is-active) {
+      background: var(--color-pale-lavender-tint);
+      color: var(--color-midnight-ink);
+    }
+    .time-picker-display {
+      display: block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--color-graphite-veil);
+    }
     .schedule-summary {
-      margin: 0 0 16px;
-      padding: 12px 14px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+      gap: 14px 20px;
+      margin: 0;
+      padding: 0;
+      border: none;
+      background: transparent;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .schedule-summary dt {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--color-graphite-veil);
+    }
+    .schedule-summary dd {
+      margin: 4px 0 0;
+      color: var(--color-midnight-ink);
+      font-size: 14px;
+    }
+    .schedule-summary dd code {
+      font-size: 13px;
+      background: var(--color-pale-lavender-tint);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .schedule-diagnostic {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      background: var(--color-cream-paper);
+      padding: 0 16px;
+    }
+    .schedule-diagnostic summary {
+      cursor: pointer;
+      padding: 12px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      list-style: none;
+    }
+    .schedule-diagnostic summary::-webkit-details-marker { display: none; }
+    .schedule-diagnostic[open] summary { border-bottom: 1px solid var(--color-stone-mist); margin-bottom: 0; }
+    .schedule-diagnostic-body { padding: 12px 0 14px; }
+    .schedule-diagnostic-body .schedule-table-wrap { margin: 0 -4px; }
+    .schedule-diagnostic-body pre {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .schedule-days-grid { display: none; }
+    .schedule-upcoming-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+    }
+    .schedule-upcoming-group {
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-md);
-      background: rgba(255, 255, 255, 0.6);
-      font-size: 14px;
-      line-height: 1.5;
+      overflow: hidden;
+      background: var(--color-pure-white);
     }
-    .schedule-summary dt { font-weight: 600; margin-top: 8px; }
-    .schedule-summary dt:first-child { margin-top: 0; }
-    .schedule-summary dd { margin: 2px 0 0; color: var(--color-smoke); }
-    .schedule-table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; }
-    .schedule-table th, .schedule-table td { padding: 10px 8px; border-bottom: 1px solid var(--color-stone-mist); text-align: left; }
-    .schedule-table input[type="time"] { width: 100%; max-width: 140px; }
-    .schedule-table input[type="checkbox"] { width: auto; }
-    .schedule-status { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--color-stone-mist); }
-    .schedule-status h3 { margin: 16px 0 8px; font-size: 15px; }
+    .schedule-upcoming-group.is-disabled { opacity: 0.55; }
+    .schedule-upcoming-group-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      padding: 10px 12px;
+      background: var(--color-pale-lavender-tint);
+      border-bottom: 1px solid var(--color-stone-mist);
+    }
+    .schedule-upcoming-group-head.is-clickable { cursor: pointer; }
+    .schedule-upcoming-group-head.is-clickable:hover {
+      background: var(--color-lavender-whisper);
+    }
+    .schedule-upcoming-group-meta {
+      font-size: 12px;
+      color: var(--color-smoke);
+    }
+    .schedule-upcoming-group .schedule-table { margin: 0; }
+    .schedule-upcoming-group-empty {
+      padding: 14px 16px;
+      font-size: 13px;
+      margin: 0;
+    }
+    .schedule-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: var(--radius-badges);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .schedule-badge--on {
+      background: var(--color-lavender-whisper);
+      color: var(--color-midnight-ink);
+      border: 1px solid var(--color-midnight-ink);
+    }
+    .schedule-badge--off {
+      background: var(--color-stone-mist);
+      color: var(--color-smoke);
+    }
+    .schedule-badge--ready {
+      background: rgba(3, 79, 70, 0.12);
+      color: var(--color-deep-forest-teal);
+    }
+    .schedule-badge--blocked {
+      background: rgba(95, 95, 89, 0.12);
+      color: var(--color-smoke);
+    }
     .asset-folder-label { display: block; margin: 0 0 12px; font-size: 14px; }
     .asset-folder-label select { margin-top: 6px; width: min(280px, 100%); }
     .card {
@@ -1961,9 +2373,9 @@ _DASHBOARD_HTML = (
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 54px;
-      min-height: 40px;
-      padding: 10px 14px;
+      width: 100%;
+      min-height: 42px;
+      padding: 10px 8px;
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-buttons);
       background: var(--color-white);
@@ -1997,7 +2409,7 @@ _DASHBOARD_HTML = (
       text-transform: none;
     }
     .btn-primary:hover, #runBtn:hover { background: var(--color-lavender-light); }
-    .btn-secondary {
+    button.btn-secondary, .btn-secondary {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -2008,9 +2420,34 @@ _DASHBOARD_HTML = (
       padding: 10px 18px;
       font-size: 14px;
       font-weight: 500;
+      cursor: pointer;
     }
-    .btn-secondary:hover { border-color: var(--color-midnight-ink); }
-    .btn-ghost {
+    button.btn-secondary:hover, .btn-secondary:hover { border-color: var(--color-midnight-ink); }
+    button.btn-danger-outline, .btn-danger-outline {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--color-white);
+      color: var(--color-smoke);
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-danger-outline.btn-sm { padding: 8px 14px; font-size: 13px; }
+    button.btn-danger-outline:hover:not(:disabled), .btn-danger-outline:hover:not(:disabled) {
+      color: #9b2c2c;
+      border-color: #c53030;
+      background: rgba(197, 48, 48, 0.06);
+    }
+    button.btn-sm, .btn-sm {
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    button.btn-ghost, .btn-ghost {
       background: transparent;
       color: var(--color-midnight-ink);
       border: 1px solid var(--color-stone-mist);
@@ -2481,6 +2918,14 @@ _DASHBOARD_HTML = (
       .obs-bar { padding: 10px 16px; }
       .create-grid { grid-template-columns: 1fr; }
       .form-row-2, .form-row-3 { grid-template-columns: 1fr; }
+      .schedule-day-bar { grid-template-columns: repeat(4, 1fr); }
+      .schedule-day-time-grid { grid-template-columns: 1fr; }
+      .schedule-default-times { grid-template-columns: 1fr; }
+      .schedule-summary { grid-template-columns: 1fr; }
+      .schedule-page__toolbar { align-items: stretch; }
+      .schedule-page__toolbar label { width: 100%; }
+      .schedule-editor__actions .btn-primary,
+      .schedule-editor__actions .btn-danger-outline { width: 100%; min-width: 0; }
       .btn-primary, #runBtn { width: 100%; }
       .main-nav { display: flex; width: 100%; }
       .main-tab { flex: 1; text-align: center; padding: 10px 8px; }
@@ -2710,134 +3155,229 @@ _DASHBOARD_HTML = (
   </section>
 
   <section id="sectionSchedule" class="main-section">
-    <div class="card section-card">
-      <div class="job-toolbar job-toolbar--flush">
-        <h2 class="panel-title">Assembly schedule</h2>
-        <label>Channel
-          <select id="scheduleChannel"><option value="">Select channel…</option></select>
-        </label>
-        <button type="button" class="secondary" id="scheduleReload">Reload</button>
+    <div class="card section-card schedule-page">
+      <header class="schedule-page__header">
+        <div class="schedule-page__intro">
+          <h2 class="panel-title">Assembly schedule</h2>
+          <p class="card-desc">Set weekly assembly and YouTube upload times per channel. Cron runs every 15 minutes.</p>
+        </div>
+        <div class="schedule-page__toolbar job-toolbar job-toolbar--flush">
+          <label>Channel
+            <select id="scheduleChannel"><option value="">Select channel…</option></select>
+          </label>
+          <button type="button" class="btn-secondary btn-sm" id="scheduleReload">Reload</button>
+        </div>
+      </header>
+
+      <div class="schedule-panel" id="scheduleOverviewPanel">
+        <header class="schedule-panel__head">
+          <h3 class="schedule-section-title">Scheduled jobs</h3>
+          <p class="hint">All saved weekly schedules and what the cron dispatcher will fire next.</p>
+        </header>
+        <p class="schedule-panel__meta" id="scheduleCronMeta">Loading…</p>
+        <div class="schedule-panel__stack">
+          <section class="schedule-block">
+            <header class="schedule-block__head">
+              <h4 class="schedule-block__title">All channels</h4>
+            </header>
+            <div class="schedule-block__body" id="scheduleOverviewChannels">
+              <p class="muted">Loading schedules…</p>
+            </div>
+          </section>
+          <section class="schedule-block">
+            <header class="schedule-block__head">
+              <h4 class="schedule-block__title">Upcoming by channel</h4>
+            </header>
+            <div class="schedule-block__body" id="scheduleOverviewUpcoming">
+              <p class="muted">—</p>
+            </div>
+          </section>
+          <section class="schedule-block">
+            <header class="schedule-block__head">
+              <h4 class="schedule-block__title">Recent cron runs</h4>
+            </header>
+            <div class="schedule-block__body" id="scheduleOverviewRuns">
+              <p class="muted">—</p>
+            </div>
+          </section>
+        </div>
       </div>
-      <p class="card-desc">Auto-assemble videos on a weekly cadence. Cloud Scheduler calls <code>/v1/cron/run-schedules</code> every 15 minutes.</p>
 
-      <div id="scheduleEmpty" class="muted">Select a channel to configure its schedule.</div>
-      <div id="scheduleEditor" hidden>
-        <div class="form-stack schedule-top">
-          <div class="checkbox-row">
-            <input type="checkbox" id="scheduleEnabled" checked/>
-            <label for="scheduleEnabled">Schedule enabled</label>
+      <div id="scheduleEmpty" class="schedule-empty">
+        <p class="schedule-empty-title">Choose a channel</p>
+        <p class="muted">Select a YouTube channel above to configure its weekly schedule.</p>
+      </div>
+
+      <div id="scheduleEditor" class="schedule-editor" hidden>
+        <header class="schedule-editor__head">
+          <h3 class="schedule-editor__title" id="scheduleEditorTitle">Channel schedule</h3>
+          <p class="hint" id="scheduleEditorHint">Configure weekly cadence, defaults, and YouTube upload behavior.</p>
+        </header>
+
+        <section class="schedule-section schedule-section--status">
+          <div class="schedule-section-head">
+            <h3 class="schedule-section-title">Basics</h3>
+            <p class="hint">Enable scheduling and set timezone and background pool for this channel.</p>
           </div>
-          <div class="form-row-3">
-            <div>
-              <label for="scheduleTimezone">Timezone</label>
-              <input id="scheduleTimezone" value="America/New_York" placeholder="America/New_York"/>
+          <div class="schedule-section-body form-stack">
+            <div class="checkbox-row">
+              <input type="checkbox" id="scheduleEnabled" checked/>
+              <label for="scheduleEnabled">Schedule enabled</label>
             </div>
-            <div>
-              <label for="scheduleImagesFolder">Background folder</label>
-              <select id="scheduleImagesFolder" required><option value="">Loading…</option></select>
-            </div>
-          </div>
-
-        <h3 class="schedule-days-heading">Repeat on these days</h3>
-        <p class="hint">Click a day to toggle it on (lavender = active). Assembly and YouTube upload run on enabled days at the times below.</p>
-        <div class="schedule-day-bar" id="scheduleDayBar" role="group" aria-label="Weekly schedule days">
-          <button type="button" class="schedule-day-btn" data-day="0" aria-pressed="false" title="Sunday">Sun</button>
-          <button type="button" class="schedule-day-btn" data-day="1" aria-pressed="false" title="Monday">Mon</button>
-          <button type="button" class="schedule-day-btn" data-day="2" aria-pressed="false" title="Tuesday">Tue</button>
-          <button type="button" class="schedule-day-btn" data-day="3" aria-pressed="false" title="Wednesday">Wed</button>
-          <button type="button" class="schedule-day-btn" data-day="4" aria-pressed="false" title="Thursday">Thu</button>
-          <button type="button" class="schedule-day-btn" data-day="5" aria-pressed="false" title="Friday">Fri</button>
-          <button type="button" class="schedule-day-btn" data-day="6" aria-pressed="false" title="Saturday">Sat</button>
-        </div>
-        <div class="schedule-day-times" id="scheduleDayTimes"></div>
-        <div class="schedule-days-grid" id="scheduleDaysGrid" hidden aria-hidden="true"></div>
-
-        <div class="form-row-3">
-          <div>
-            <label for="scheduleDefaultAssemble">Default assemble time</label>
-            <input id="scheduleDefaultAssemble" type="time" value="09:00"/>
-          </div>
-          <div>
-            <label for="scheduleDefaultUpload">Default upload time</label>
-            <input id="scheduleDefaultUpload" type="time" value="10:00"/>
-          </div>
-        </div>
-        <div class="schedule-bulk">
-          <button type="button" class="secondary" id="scheduleApplyDefault">Apply default times to enabled days</button>
-        </div>
-
-        <div class="form-row-3">
-          <div>
-            <label for="scheduleThumb">Thumbnail text</label>
-            <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
-          </div>
-          <div>
-            <label for="scheduleDuration">Duration (min)</label>
-            <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
-          </div>
-          <div>
-            <label for="scheduleVariance">Variance (min)</label>
-            <input id="scheduleVariance" type="number" min="0" max="60" value="15"/>
-          </div>
-        </div>
-        <p class="hint">Default upload time is 1 hour after assemble (editable per day).</p>
-
-        <div class="schedule-upload-panel">
-          <h3>YouTube upload</h3>
-          <div class="checkbox-row">
-            <input type="checkbox" id="scheduleQueueYoutube" checked/>
-            <label for="scheduleQueueYoutube">Upload to YouTube when assembly finishes</label>
-          </div>
-          <div class="form-row-3">
-            <div>
-              <label for="scheduleUploadPrivacy">Privacy</label>
-              <select id="scheduleUploadPrivacy">
-                <option value="private">Private (recommended for scheduled publish)</option>
-                <option value="unlisted">Unlisted</option>
-                <option value="public">Public</option>
-              </select>
-            </div>
-            <div>
-              <label for="scheduleUploadCategory">Category ID</label>
-              <input id="scheduleUploadCategory" value="10" placeholder="10 = Music"/>
-            </div>
-            <div>
-              <label for="scheduleUploadTags">Tags (comma-separated)</label>
-              <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
+            <div class="form-row-2">
+              <div>
+                <label for="scheduleTimezone">Timezone</label>
+                <input id="scheduleTimezone" value="America/New_York" placeholder="America/New_York"/>
+              </div>
+              <div>
+                <label for="scheduleImagesFolder">Background folder</label>
+                <select id="scheduleImagesFolder" required><option value="">Loading…</option></select>
+              </div>
             </div>
           </div>
-          <div class="checkbox-row">
-            <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
-            <label for="scheduleUploadSchedulePublish">Schedule YouTube publish at upload time (uses per-day upload time)</label>
+        </section>
+
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3 class="schedule-section-title">Weekly cadence</h3>
+            <p class="hint">Toggle days on (lavender). Assembly and upload run at the times you set for each enabled day.</p>
           </div>
-          <div class="checkbox-row">
-            <input type="checkbox" id="scheduleUploadMadeForKids"/>
-            <label for="scheduleUploadMadeForKids">Made for kids</label>
+          <div class="schedule-section-body">
+            <div class="schedule-day-bar" id="scheduleDayBar" role="group" aria-label="Weekly schedule days">
+              <button type="button" class="schedule-day-btn" data-day="0" aria-pressed="false" title="Sunday">Sun</button>
+              <button type="button" class="schedule-day-btn" data-day="1" aria-pressed="false" title="Monday">Mon</button>
+              <button type="button" class="schedule-day-btn" data-day="2" aria-pressed="false" title="Tuesday">Tue</button>
+              <button type="button" class="schedule-day-btn" data-day="3" aria-pressed="false" title="Wednesday">Wed</button>
+              <button type="button" class="schedule-day-btn" data-day="4" aria-pressed="false" title="Thursday">Thu</button>
+              <button type="button" class="schedule-day-btn" data-day="5" aria-pressed="false" title="Friday">Fri</button>
+              <button type="button" class="schedule-day-btn" data-day="6" aria-pressed="false" title="Saturday">Sat</button>
+            </div>
+            <div class="schedule-day-times" id="scheduleDayTimes"></div>
+            <div class="schedule-days-grid" id="scheduleDaysGrid" hidden aria-hidden="true"></div>
           </div>
-        </div>
+        </section>
 
-        <div class="checkbox-row">
-          <input type="checkbox" id="scheduleAutoExtend" checked/>
-          <label for="scheduleAutoExtend">Auto-extend when backgrounds are low</label>
-        </div>
-        </div>
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3 class="schedule-section-title">Defaults &amp; video</h3>
+            <p class="hint">Default upload is 1 hour after assemble. Apply defaults to all enabled days, then tweak per day above.</p>
+          </div>
+          <div class="schedule-section-body form-stack">
+            <div class="schedule-default-times">
+              <div>
+                <label for="scheduleDefaultAssemble">Default assemble time</label>
+                <input type="hidden" id="scheduleDefaultAssemble" value="11:00"/>
+              </div>
+              <div>
+                <label for="scheduleDefaultUpload">Default upload time</label>
+                <input type="hidden" id="scheduleDefaultUpload" value="12:00"/>
+              </div>
+            </div>
+            <div class="schedule-inline-action">
+              <button type="button" class="btn-secondary btn-sm" id="scheduleApplyDefault">Apply defaults to enabled days</button>
+            </div>
+            <div class="form-row-3">
+              <div>
+                <label for="scheduleThumb">Thumbnail text</label>
+                <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
+              </div>
+              <div>
+                <label for="scheduleDuration">Duration (min)</label>
+                <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
+              </div>
+              <div>
+                <label for="scheduleVariance">Variance (min)</label>
+                <input id="scheduleVariance" type="number" min="0" max="60" value="15"/>
+              </div>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="scheduleAutoExtend" checked/>
+              <label for="scheduleAutoExtend">Auto-extend when backgrounds are low</label>
+            </div>
+          </div>
+        </section>
 
-        <dl class="schedule-summary" id="scheduleSummary"></dl>
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3 class="schedule-section-title">YouTube upload</h3>
+            <p class="hint">Queue uploads after assembly and control publish timing on YouTube.</p>
+          </div>
+          <div class="schedule-section-body form-stack">
+            <div class="checkbox-row">
+              <input type="checkbox" id="scheduleQueueYoutube" checked/>
+              <label for="scheduleQueueYoutube">Upload to YouTube when assembly finishes</label>
+            </div>
+            <div class="form-row-3">
+              <div>
+                <label for="scheduleUploadPrivacy">Privacy</label>
+                <select id="scheduleUploadPrivacy">
+                  <option value="private">Private (recommended for scheduled publish)</option>
+                  <option value="unlisted">Unlisted</option>
+                  <option value="public">Public</option>
+                </select>
+              </div>
+              <div>
+                <label for="scheduleUploadCategory">Category ID</label>
+                <input id="scheduleUploadCategory" value="10" placeholder="10 = Music"/>
+              </div>
+              <div>
+                <label for="scheduleUploadTags">Tags (comma-separated)</label>
+                <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
+              </div>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
+              <label for="scheduleUploadSchedulePublish">Schedule YouTube publish at upload time</label>
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="scheduleUploadMadeForKids"/>
+              <label for="scheduleUploadMadeForKids">Made for kids</label>
+            </div>
+          </div>
+        </section>
 
-        <div class="card-actions">
-          <button type="button" class="btn-primary" id="scheduleSave">Save schedule</button>
-          <button type="button" class="danger" id="scheduleDelete">Delete</button>
-        </div>
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3 class="schedule-section-title">Preview</h3>
+            <p class="hint">Summary of this channel’s saved schedule before you save.</p>
+          </div>
+          <div class="schedule-section-body">
+            <dl class="schedule-summary" id="scheduleSummary"></dl>
+          </div>
+        </section>
 
-        <div class="schedule-status">
-          <h3>Resource check</h3>
-          <pre id="scheduleResources" class="muted">—</pre>
-          <h3>Upcoming slots</h3>
-          <div id="scheduleUpcoming"><p class="muted">—</p></div>
-          <h3>Run history</h3>
-          <p class="hint">Past cron dispatches for this channel. Clear a row to allow that slot to fire again.</p>
-          <div id="scheduleRunHistory" class="schedule-run-history"><p class="muted">—</p></div>
-        </div>
+        <footer class="schedule-editor__footer">
+          <div class="schedule-editor__actions">
+            <button type="button" class="btn-primary" id="scheduleSave">Save schedule</button>
+            <button type="button" class="btn-danger-outline btn-sm" id="scheduleDelete">Delete schedule</button>
+          </div>
+
+          <div class="schedule-panel schedule-panel--diagnostics">
+            <header class="schedule-panel__head">
+              <h3 class="schedule-section-title">Diagnostics</h3>
+              <p class="hint">Resource readiness, upcoming slots, and cron run history for this channel.</p>
+            </header>
+            <div class="schedule-panel__stack">
+              <details class="schedule-diagnostic">
+                <summary>Resource check</summary>
+                <div class="schedule-diagnostic-body">
+                  <pre id="scheduleResources" class="muted">—</pre>
+                </div>
+              </details>
+              <details class="schedule-diagnostic" open>
+                <summary>Upcoming slots</summary>
+                <div class="schedule-diagnostic-body" id="scheduleUpcoming"><p class="muted">—</p></div>
+              </details>
+              <details class="schedule-diagnostic" open>
+                <summary>Run history</summary>
+                <div class="schedule-diagnostic-body">
+                  <p class="hint">Clear a row to allow that slot to fire again on the next cron tick.</p>
+                  <div id="scheduleRunHistory"><p class="muted">—</p></div>
+                </div>
+              </details>
+            </div>
+          </div>
+        </footer>
       </div>
     </div>
   </section>
@@ -3636,6 +4176,7 @@ document.getElementById('modal').onclick = (e) => { if (e.target.id === 'modal')
 
 const SCHEDULE_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const SCHEDULE_DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DEFAULT_ASSEMBLE_TIME = '11:00';
 
 function timeInputValue(hhmm) {
   if (!hhmm) return '';
@@ -3656,11 +4197,115 @@ function uploadTimeAfterAssemble(assembleHhmm, offsetMin = 60) {
   total = ((total % (24 * 60)) + 24 * 60) % (24 * 60);
   return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
 }
+function hhmmToParts(hhmm) {
+  const normalized = timeInputValue(hhmm) || DEFAULT_ASSEMBLE_TIME;
+  let h24 = parseInt(normalized.split(':')[0], 10);
+  const minute = parseInt(normalized.split(':')[1], 10);
+  const ampm = h24 >= 12 ? 'PM' : 'AM';
+  let hour12 = h24 % 12;
+  if (hour12 === 0) hour12 = 12;
+  return { hour12, minute, ampm };
+}
+function partsToHhmm(hour12, minute, ampm) {
+  let h = parseInt(hour12, 10);
+  const m = parseInt(minute, 10);
+  if (ampm === 'AM') {
+    if (h === 12) h = 0;
+  } else if (h !== 12) {
+    h += 12;
+  }
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+function formatTimeDisplay(hhmm) {
+  const { hour12, minute, ampm } = hhmmToParts(hhmm);
+  return hour12 + ':' + String(minute).padStart(2, '0') + ' ' + ampm;
+}
+function buildTimePickerMarkup(hiddenInput) {
+  const val = timeInputValue(hiddenInput.value) || DEFAULT_ASSEMBLE_TIME;
+  const { hour12, minute, ampm } = hhmmToParts(val);
+  const hourOpts = Array.from({ length: 12 }, (_, i) => {
+    const h = i + 1;
+    return '<option value="' + h + '"' + (h === hour12 ? ' selected' : '') + '>' + h + '</option>';
+  }).join('');
+  const minOpts = Array.from({ length: 60 }, (_, i) => {
+    const v = String(i).padStart(2, '0');
+    return '<option value="' + v + '"' + (i === minute ? ' selected' : '') + '>' + v + '</option>';
+  }).join('');
+  return '<div class="time-picker" data-target="' + esc(hiddenInput.id || '') + '">'
+    + '<div class="time-picker-row">'
+    + '<select class="time-picker-hour" aria-label="Hour">' + hourOpts + '</select>'
+    + '<span class="time-picker-colon" aria-hidden="true">:</span>'
+    + '<select class="time-picker-minute" aria-label="Minute">' + minOpts + '</select>'
+    + '<div class="time-picker-ampm" role="group" aria-label="AM or PM">'
+    + '<button type="button" class="time-picker-ampm-btn' + (ampm === 'AM' ? ' is-active' : '') + '" data-ampm="AM">AM</button>'
+    + '<button type="button" class="time-picker-ampm-btn' + (ampm === 'PM' ? ' is-active' : '') + '" data-ampm="PM">PM</button>'
+    + '</div></div>'
+    + '<span class="time-picker-display">' + esc(formatTimeDisplay(val)) + '</span>'
+    + '</div>';
+}
+function syncTimePickerFromHidden(picker, hidden) {
+  if (!picker || !hidden) return;
+  const { hour12, minute, ampm } = hhmmToParts(hidden.value);
+  const hourEl = picker.querySelector('.time-picker-hour');
+  const minEl = picker.querySelector('.time-picker-minute');
+  if (hourEl) hourEl.value = String(hour12);
+  if (minEl) minEl.value = String(minute).padStart(2, '0');
+  picker.querySelectorAll('.time-picker-ampm-btn').forEach(btn => {
+    btn.classList.toggle('is-active', btn.dataset.ampm === ampm);
+  });
+  const disp = picker.querySelector('.time-picker-display');
+  if (disp) disp.textContent = formatTimeDisplay(hidden.value);
+}
+function bindTimePickerEvents(picker, hidden, onChange) {
+  const sync = () => {
+    const hour12 = parseInt(picker.querySelector('.time-picker-hour').value, 10);
+    const minute = picker.querySelector('.time-picker-minute').value;
+    const ampmBtn = picker.querySelector('.time-picker-ampm-btn.is-active');
+    const ampm = ampmBtn ? ampmBtn.dataset.ampm : 'AM';
+    hidden.value = partsToHhmm(hour12, minute, ampm);
+    const disp = picker.querySelector('.time-picker-display');
+    if (disp) disp.textContent = formatTimeDisplay(hidden.value);
+    if (onChange) onChange(hidden.value);
+    hidden.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  picker.querySelector('.time-picker-hour').addEventListener('change', sync);
+  picker.querySelector('.time-picker-minute').addEventListener('change', sync);
+  picker.querySelectorAll('.time-picker-ampm-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      picker.querySelectorAll('.time-picker-ampm-btn').forEach(b => b.classList.remove('is-active'));
+      btn.classList.add('is-active');
+      sync();
+    });
+  });
+}
+function mountTimePickerForHidden(hiddenInput, onChange) {
+  if (!hiddenInput || hiddenInput.dataset.timePickerMounted) return null;
+  hiddenInput.type = 'hidden';
+  hiddenInput.dataset.timePickerMounted = '1';
+  const wrap = document.createElement('div');
+  wrap.innerHTML = buildTimePickerMarkup(hiddenInput);
+  const picker = wrap.firstElementChild;
+  hiddenInput.parentNode.insertBefore(picker, hiddenInput);
+  bindTimePickerEvents(picker, hiddenInput, onChange);
+  return picker;
+}
+function setHiddenTimeValue(hidden, hhmm) {
+  if (!hidden) return;
+  hidden.value = timeInputValue(hhmm) || DEFAULT_ASSEMBLE_TIME;
+  const picker = hidden.previousElementSibling;
+  if (picker && picker.classList.contains('time-picker')) {
+    syncTimePickerFromHidden(picker, hidden);
+  }
+}
+function readScheduleTime(hiddenId) {
+  const hidden = document.getElementById(hiddenId);
+  return timeFromInput(hidden?.value) || DEFAULT_ASSEMBLE_TIME;
+}
 function defaultScheduleDays() {
   return SCHEDULE_DAY_NAMES.map(() => ({
     enabled: false,
-    assemble_at: '09:00',
-    upload_at: uploadTimeAfterAssemble('09:00'),
+    assemble_at: DEFAULT_ASSEMBLE_TIME,
+    upload_at: uploadTimeAfterAssemble(DEFAULT_ASSEMBLE_TIME),
   }));
 }
 let scheduleDayBarBound = false;
@@ -3680,7 +4325,7 @@ function bindScheduleDayBar() {
       if (next) {
         const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
         const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
-        const defaultAssemble = timeFromInput(document.getElementById('scheduleDefaultAssemble')?.value) || '09:00';
+        const defaultAssemble = timeFromInput(document.getElementById('scheduleDefaultAssemble')?.value) || DEFAULT_ASSEMBLE_TIME;
         if (assembleHidden && !assembleHidden.value) {
           assembleHidden.value = timeInputValue(defaultAssemble);
         }
@@ -3714,8 +4359,8 @@ function renderScheduleDays(days) {
   if (grid) {
     grid.innerHTML = rows.map((day, i) =>
       '<input type="checkbox" class="schedule-day-enabled" data-day="' + i + '"' + (day.enabled ? ' checked' : '') + ' hidden>'
-      + '<input type="time" class="schedule-day-assemble" data-day="' + i + '" value="' + esc(timeInputValue(day.assemble_at || '09:00')) + '" hidden>'
-      + '<input type="time" class="schedule-day-upload" data-day="' + i + '" value="' + esc(timeInputValue(day.upload_at || uploadTimeAfterAssemble(day.assemble_at || '09:00') || '')) + '" hidden>'
+      + '<input type="hidden" class="schedule-day-assemble" data-day="' + i + '" value="' + esc(timeInputValue(day.assemble_at || DEFAULT_ASSEMBLE_TIME)) + '">'
+      + '<input type="hidden" class="schedule-day-upload" data-day="' + i + '" value="' + esc(timeInputValue(day.upload_at || uploadTimeAfterAssemble(day.assemble_at || DEFAULT_ASSEMBLE_TIME) || '')) + '">'
     ).join('');
   }
 
@@ -3728,28 +4373,36 @@ function renderScheduleDayTimes(days) {
   const enabled = days.map((d, i) => ({ day: d, i })).filter(x => x.day.enabled);
   if (!enabled.length) {
     times.classList.add('is-empty');
-    times.innerHTML = '<p class="muted">Select at least one day above.</p>';
+    times.innerHTML = '<p class="muted">Enable at least one day to set assemble and upload times.</p>';
     return;
   }
   times.classList.remove('is-empty');
   times.innerHTML = enabled.map(({ day, i }) => {
-    const assembleVal = timeInputValue(day.assemble_at || '09:00');
+    const assembleVal = timeInputValue(day.assemble_at || DEFAULT_ASSEMBLE_TIME);
     const uploadVal = timeInputValue(day.upload_at || uploadTimeAfterAssemble(assembleVal) || '');
-    return '<div class="schedule-day-time-card" data-day="' + i + '"><strong>' + esc(SCHEDULE_DAY_NAMES[i]) + '</strong>'
-      + '<label class="schedule-day-field">Assemble<input type="time" class="schedule-day-assemble-visible" data-day="' + i + '" value="' + esc(assembleVal) + '"></label>'
-      + '<label class="schedule-day-field">Upload<input type="time" class="schedule-day-upload-visible" data-day="' + i + '" value="' + esc(uploadVal) + '"></label>'
-      + '</div>';
+    return '<div class="schedule-day-time-card" data-day="' + i + '">'
+      + '<div class="schedule-day-time-card-head">' + esc(SCHEDULE_DAY_NAMES[i]) + '</div>'
+      + '<div class="schedule-day-time-grid">'
+      + '<label class="schedule-day-field"><span class="schedule-day-field-label">Assemble</span>'
+      + '<input type="hidden" class="schedule-day-assemble-visible" data-day="' + i + '" value="' + esc(assembleVal) + '"></label>'
+      + '<label class="schedule-day-field"><span class="schedule-day-field-label">Upload</span>'
+      + '<input type="hidden" class="schedule-day-upload-visible" data-day="' + i + '" value="' + esc(uploadVal) + '"></label>'
+      + '</div></div>';
   }).join('');
 
-  times.querySelectorAll('.schedule-day-assemble-visible, .schedule-day-upload-visible').forEach(el => {
-    el.addEventListener('change', () => {
-      const i = el.dataset.day;
+  times.querySelectorAll('input.schedule-day-assemble-visible').forEach(hidden => {
+    mountTimePickerForHidden(hidden, () => {
+      const i = hidden.dataset.day;
       const assembleEl = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
+      if (assembleEl) assembleEl.value = hidden.value;
+      updateScheduleSummary();
+    });
+  });
+  times.querySelectorAll('input.schedule-day-upload-visible').forEach(hidden => {
+    mountTimePickerForHidden(hidden, () => {
+      const i = hidden.dataset.day;
       const uploadEl = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
-      const assembleVis = document.querySelector('.schedule-day-assemble-visible[data-day="' + i + '"]');
-      const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
-      if (assembleVis && assembleEl) assembleEl.value = assembleVis.value;
-      if (uploadVis && uploadEl) uploadEl.value = uploadVis.value;
+      if (uploadEl) uploadEl.value = hidden.value;
       updateScheduleSummary();
     });
   });
@@ -3762,7 +4415,7 @@ function collectScheduleDays() {
     const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
     const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
     const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
-    const assemble_at = timeFromInput(assembleVis?.value || assembleHidden?.value) || '09:00';
+    const assemble_at = timeFromInput(assembleVis?.value || assembleHidden?.value) || DEFAULT_ASSEMBLE_TIME;
     const uploadRaw = uploadVis?.value || uploadHidden?.value;
     const upload_at = uploadRaw ? timeFromInput(uploadRaw) : uploadTimeAfterAssemble(assemble_at);
     return { enabled, assemble_at, upload_at };
@@ -3797,17 +4450,24 @@ function updateScheduleSummary() {
   const video = readScheduleVideoSettings();
   const upload = readScheduleUploadSettings();
   const enabledDays = collectScheduleDays()
-    .map((d, i) => (d.enabled ? SCHEDULE_DAY_ABBR[i] + ' ' + d.assemble_at + '→' + d.upload_at : null))
+    .map((d, i) => (d.enabled
+      ? SCHEDULE_DAY_ABBR[i] + ' ' + formatTimeDisplay(d.assemble_at) + ' → ' + formatTimeDisplay(d.upload_at)
+      : null))
     .filter(Boolean);
   el.innerHTML =
     '<dt>Channel</dt><dd><code>' + esc(channel) + '</code></dd>'
     + '<dt>Background pool</dt><dd><code>post-processed/' + esc(folder) + '/</code></dd>'
     + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
     + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
-    + '<dt>Thumbnail text</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
-    + '<dt>YouTube upload</dt><dd>' + (upload.queue_youtube ? esc(upload.upload_privacy) + (upload.upload_schedule_publish ? ' @ upload time' : ' immediate') : 'Off') + '</dd>'
+    + '<dt>Thumbnail</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
+    + '<dt>YouTube</dt><dd>' + (upload.queue_youtube ? esc(upload.upload_privacy) + (upload.upload_schedule_publish ? ' @ upload time' : ' immediate') : 'Off') + '</dd>'
     + '<dt>Timezone</dt><dd>' + esc(tz) + '</dd>'
-    + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None — click Sun–Sat above') + '</dd>';
+    + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None — toggle days above') + '</dd>';
+}
+function syncScheduleEnabledState() {
+  const editor = document.getElementById('scheduleEditor');
+  const on = document.getElementById('scheduleEnabled')?.checked !== false;
+  if (editor) editor.classList.toggle('is-schedule-disabled', !on);
 }
 function fillScheduleForm(data) {
   document.getElementById('scheduleEnabled').checked = data.enabled !== false;
@@ -3817,9 +4477,10 @@ function fillScheduleForm(data) {
     if (folder) document.getElementById('scheduleImagesFolder').value = folder;
     updateScheduleSummary();
   });
-  document.getElementById('scheduleDefaultAssemble').value = timeInputValue(data.default_assemble_at || '09:00');
-  document.getElementById('scheduleDefaultUpload').value = timeInputValue(
-    data.default_upload_at || uploadTimeAfterAssemble(data.default_assemble_at || '09:00') || ''
+  setHiddenTimeValue(document.getElementById('scheduleDefaultAssemble'), data.default_assemble_at || DEFAULT_ASSEMBLE_TIME);
+  setHiddenTimeValue(
+    document.getElementById('scheduleDefaultUpload'),
+    data.default_upload_at || uploadTimeAfterAssemble(data.default_assemble_at || DEFAULT_ASSEMBLE_TIME) || ''
   );
   document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
   document.getElementById('scheduleDuration').value = data.duration_min ?? 90;
@@ -3831,6 +4492,7 @@ function fillScheduleForm(data) {
   document.getElementById('scheduleUploadCategory').value = data.upload_category_id || '10';
   document.getElementById('scheduleUploadMadeForKids').checked = !!data.upload_made_for_kids;
   document.getElementById('scheduleAutoExtend').checked = data.auto_extend !== false;
+  syncScheduleEnabledState();
   renderScheduleDays(data.days || defaultScheduleDays());
   updateScheduleSummary();
 }
@@ -3842,61 +4504,259 @@ async function loadScheduleRunHistory(channel) {
   }
   try {
     const data = await api('/v1/schedules/' + encodeURIComponent(channel) + '/runs?limit=30');
-    const runs = data.runs || [];
-    if (!runs.length) {
-      el.innerHTML = '<p class="muted">No scheduled runs yet (cron must call <code>/v1/cron/run-schedules</code>).</p>';
-      return;
-    }
-    el.innerHTML = '<table><thead><tr><th>Slot</th><th>Status</th><th>Execution</th><th>When</th><th></th></tr></thead><tbody>'
-      + runs.map(r => {
-        const slot = esc(r.slot_key || '—');
-        const status = esc(r.status || '—');
-        const execId = r.execution_id ? '<code>' + esc(r.execution_id) + '</code>' : '—';
-        const when = esc(r.updated_at || r.created_at || '—');
-        const clearBtn = r.slot_key
-          ? '<button type="button" class="secondary schedule-run-clear" data-slot="' + esc(r.slot_key) + '">Clear</button>'
-          : '';
-        return '<tr><td><code>' + slot + '</code></td><td>' + status + '</td><td>' + execId + '</td><td>' + when + '</td><td>' + clearBtn + '</td></tr>';
-      }).join('')
-      + '</tbody></table>';
-    el.querySelectorAll('.schedule-run-clear').forEach(btn => {
-      btn.onclick = async () => {
-        if (!confirm('Clear this run record? The slot can fire again on the next cron tick.')) return;
-        try {
-          await api('/v1/schedules/runs/' + encodeURIComponent(btn.dataset.slot), { method: 'DELETE' });
-          await loadScheduleRunHistory(channel);
-        } catch (e) { alert(String(e)); }
-      };
-    });
+    renderScheduleRunHistoryRows(data.runs || [], el, channel);
   } catch (e) {
     el.innerHTML = '<p class="muted">' + esc(String(e)) + '</p>';
   }
 }
 function renderScheduleStatus(status) {
-  const res = status.resources || {};
+  const res = status.resources;
   const sched = status.schedule || {};
-  const blockers = (res.blockers || []).join(', ') || 'none';
-  document.getElementById('scheduleResources').textContent = JSON.stringify({
-    images_folder: res.images_folder,
-    ready: res.ready,
-    backgrounds_available: res.backgrounds_available,
-    min_backgrounds: res.min_backgrounds,
-    extend_pending: res.extend_pending,
-    music_tracks: res.music_tracks,
-    blockers: blockers,
-    duration_min: sched.duration_min,
-    variance_min: sched.variance_min,
-    thumbnail_text: sched.thumbnail_text,
-  }, null, 2);
+  const resEl = document.getElementById('scheduleResources');
+  if (resEl) {
+    if (!res) {
+      resEl.textContent = 'Loading resource check…';
+    } else {
+      const blockers = (res.blockers || []).join(', ') || 'none';
+      resEl.textContent = JSON.stringify({
+        images_folder: res.images_folder,
+        ready: res.ready,
+        backgrounds_available: res.backgrounds_available,
+        min_backgrounds: res.min_backgrounds,
+        extend_pending: res.extend_pending,
+        music_tracks: res.music_tracks,
+        blockers: blockers,
+        duration_min: sched.duration_min,
+        variance_min: sched.variance_min,
+        thumbnail_text: sched.thumbnail_text,
+      }, null, 2);
+    }
+  }
   const upcoming = status.upcoming || [];
   const el = document.getElementById('scheduleUpcoming');
+  if (!el) return;
   if (!upcoming.length) {
     el.innerHTML = '<p class="muted">No upcoming enabled slots in the next two weeks.</p>';
     return;
   }
-  el.innerHTML = '<table><thead><tr><th>Day</th><th>Assemble</th><th>Upload</th><th>Local time</th></tr></thead><tbody>'
-    + upcoming.map(s => '<tr><td>' + esc(s.day_name) + '</td><td>' + esc(s.assemble_at) + '</td><td>' + esc(s.upload_at || '—') + '</td><td>' + esc(s.at_local) + '</td></tr>').join('')
-    + '</tbody></table>';
+  el.innerHTML = renderUpcomingSlotsTable(upcoming);
+}
+async function loadScheduleEditorDiagnostics(channel) {
+  if (!channel) return;
+  const resEl = document.getElementById('scheduleResources');
+  const upEl = document.getElementById('scheduleUpcoming');
+  if (resEl) resEl.textContent = 'Loading…';
+  if (upEl) upEl.innerHTML = '<p class="muted">Loading…</p>';
+  const statusUrl = '/v1/schedules/' + encodeURIComponent(channel) + '/status?include_resources=1';
+  const runsUrl = '/v1/schedules/' + encodeURIComponent(channel) + '/runs?limit=30';
+  const [statusResult, runsResult] = await Promise.allSettled([
+    api(statusUrl),
+    api(runsUrl),
+  ]);
+  if (statusResult.status === 'fulfilled') {
+    renderScheduleStatus(statusResult.value);
+  } else {
+    if (resEl) resEl.textContent = String(statusResult.reason);
+    if (upEl) upEl.innerHTML = '<p class="muted">—</p>';
+  }
+  if (runsResult.status === 'fulfilled') {
+    renderScheduleRunHistoryRows(runsResult.value.runs || [], document.getElementById('scheduleRunHistory'), channel);
+  } else {
+    const histEl = document.getElementById('scheduleRunHistory');
+    if (histEl) histEl.innerHTML = '<p class="muted">' + esc(String(runsResult.reason)) + '</p>';
+  }
+}
+function renderScheduleRunHistoryRows(runs, el, channel) {
+  if (!el) return;
+  if (!runs.length) {
+    el.innerHTML = '<p class="muted">No scheduled runs yet (cron must call <code>/v1/cron/run-schedules</code>).</p>';
+    return;
+  }
+  el.innerHTML = wrapScheduleTable('<table class="schedule-table"><thead><tr><th>Slot</th><th>Status</th><th>Execution</th><th>When</th><th></th></tr></thead><tbody>'
+    + runs.map(r => {
+      const slot = esc(r.slot_key || '—');
+      const status = esc(r.status || '—');
+      const execId = r.execution_id ? '<code>' + esc(r.execution_id) + '</code>' : '—';
+      const when = esc(r.updated_at || r.created_at || '—');
+      const clearBtn = scheduleRunClearButton(r.slot_key);
+      return '<tr><td><code>' + slot + '</code></td><td>' + status + '</td><td>' + execId + '</td><td>' + when + '</td><td>' + clearBtn + '</td></tr>';
+    }).join('')
+    + '</tbody></table>');
+  bindScheduleRunClearButtons(el, async () => {
+    await loadScheduleEditorDiagnostics(channel);
+    await loadScheduleOverview();
+  });
+}
+function scheduleStatusBadge(enabled) {
+  return enabled
+    ? '<span class="schedule-badge schedule-badge--on">On</span>'
+    : '<span class="schedule-badge schedule-badge--off">Off</span>';
+}
+function resourcesBadge(ready, blockers) {
+  if (ready) return '<span class="schedule-badge schedule-badge--ready">Ready</span>';
+  const hint = (blockers || []).slice(0, 2).join(', ') || 'Blocked';
+  return '<span class="schedule-badge schedule-badge--blocked" title="' + esc(hint) + '">Blocked</span>';
+}
+function wrapScheduleTable(html) {
+  if (!html) return '';
+  return '<div class="schedule-table-wrap">' + html + '</div>';
+}
+function renderUpcomingSlotsTable(slots, { includeSlotKey = false } = {}) {
+  if (!slots?.length) return '';
+  const slotKeyCol = includeSlotKey ? '<th>Slot key</th>' : '';
+  const rows = slots.map(s => {
+    const slotKeyCell = includeSlotKey
+      ? '<td><code>' + esc(s.slot_key) + '</code></td>'
+      : '';
+    return '<tr><td>' + esc(s.day_name) + '</td><td>'
+      + esc(formatTimeDisplay(s.assemble_at)) + '</td><td>'
+      + esc(s.upload_at ? formatTimeDisplay(s.upload_at) : '—') + '</td><td>'
+      + esc(s.at_local) + '</td>' + slotKeyCell + '</tr>';
+  }).join('');
+  return wrapScheduleTable('<table class="schedule-table"><thead><tr>'
+    + '<th>Day</th><th>Assemble</th><th>Upload</th><th>Local time</th>' + slotKeyCol
+    + '</tr></thead><tbody>' + rows + '</tbody></table>');
+}
+function scheduleRunClearButton(slotKey) {
+  return slotKey
+    ? '<button type="button" class="btn-secondary btn-sm schedule-run-clear" data-slot="' + esc(slotKey) + '">Clear</button>'
+    : '';
+}
+function renderUpcomingByChannel(channels) {
+  if (!channels?.length) {
+    return '<p class="muted">No schedules saved yet.</p>';
+  }
+  return '<div class="schedule-upcoming-groups">'
+    + channels.map(ch => {
+      const slots = ch.upcoming || [];
+      const groupClass = (ch.enabled ? '' : 'is-disabled ') + 'schedule-upcoming-group';
+      const headClass = 'schedule-upcoming-group-head is-clickable';
+      const activeDays = ch.active_days?.length
+        ? esc(ch.active_days.join(' · '))
+        : 'No active days';
+      const body = slots.length
+        ? renderUpcomingSlotsTable(slots, { includeSlotKey: true })
+        : '<p class="schedule-upcoming-group-empty muted">No upcoming enabled slots in the next two weeks.</p>';
+      return '<section class="' + groupClass.trim() + '">'
+        + '<div class="' + headClass + '" data-channel="' + esc(ch.channel) + '">'
+        + '<code>' + esc(ch.channel) + '</code>'
+        + scheduleStatusBadge(ch.enabled)
+        + '<span class="schedule-upcoming-group-meta">' + esc(ch.timezone) + ' · ' + activeDays + '</span>'
+        + '</div>'
+        + body
+        + '</section>';
+    }).join('')
+    + '</div>';
+}
+function bindScheduleChannelJump(container, selector) {
+  if (!container) return;
+  container.querySelectorAll(selector || '[data-channel]').forEach(el => {
+    el.onclick = () => {
+      const ch = el.dataset.channel;
+      if (!ch) return;
+      document.getElementById('scheduleChannel').value = ch;
+      loadScheduleEditor(ch);
+      document.getElementById('scheduleEditor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+  });
+}
+function bindScheduleRunClearButtons(container, onCleared) {
+  if (!container) return;
+  container.querySelectorAll('.schedule-run-clear').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!confirm('Clear this run record? The slot can fire again on the next cron tick.')) return;
+      try {
+        await api('/v1/schedules/runs/' + encodeURIComponent(btn.dataset.slot), { method: 'DELETE' });
+        if (onCleared) await onCleared();
+      } catch (e) { alert(String(e)); }
+    };
+  });
+}
+async function loadScheduleOverview(refresh) {
+  const meta = document.getElementById('scheduleCronMeta');
+  const chEl = document.getElementById('scheduleOverviewChannels');
+  const upEl = document.getElementById('scheduleOverviewUpcoming');
+  const runsEl = document.getElementById('scheduleOverviewRuns');
+  if (!meta || !chEl || !upEl || !runsEl) return;
+  if (refresh) {
+    meta.textContent = 'Refreshing…';
+  }
+  try {
+    const overviewPath = refresh ? '/v1/schedules/overview?refresh=1' : '/v1/schedules/overview';
+    const data = await api(overviewPath);
+    const cron = data.cron || {};
+    const count = data.channel_count || 0;
+    meta.innerHTML = 'Cloud Scheduler polls <code>' + esc(cron.endpoint || '/v1/cron/run-schedules')
+      + '</code> every ' + esc(String(cron.poll_minutes || 15)) + ' min · '
+      + esc(String(count)) + ' channel' + (count === 1 ? '' : 's') + ' configured · '
+      + esc(String(cron.match_window_minutes || 15)) + ' min match window';
+
+    const channels = data.channels || [];
+    if (!channels.length) {
+      chEl.innerHTML = '<p class="muted">No schedules saved yet. Select a channel below to create one.</p>';
+    } else {
+      chEl.innerHTML = wrapScheduleTable('<table class="schedule-table"><thead><tr>'
+        + '<th>Channel</th><th>Status</th><th>Timezone</th><th>Active days</th><th>Next assemble</th><th>Resources</th><th>YouTube</th>'
+        + '</tr></thead><tbody>'
+        + channels.map(row => {
+          const next = row.next_slot;
+          const nextTxt = next
+            ? esc(next.day_name) + ' ' + esc(formatTimeDisplay(next.assemble_at))
+              + '<br><span class="muted">' + esc(next.at_local) + '</span>'
+            : '<span class="muted">—</span>';
+          const yt = row.queue_youtube
+            ? esc(row.upload_privacy) + (row.upload_schedule_publish ? ' @ publish' : ' immediate')
+            : 'Off';
+          const rowClass = ((row.enabled ? '' : 'is-disabled ') + 'is-clickable').trim();
+          return '<tr class="' + rowClass + '" data-channel="' + esc(row.channel) + '">'
+            + '<td><code>' + esc(row.channel) + '</code><br><span class="muted">post-processed/'
+            + esc(row.images_folder || '—') + '/</span></td>'
+            + '<td>' + scheduleStatusBadge(row.enabled) + '</td>'
+            + '<td>' + esc(row.timezone) + '</td>'
+            + '<td>' + (row.active_days?.length ? esc(row.active_days.join(' · ')) : '<span class="muted">None</span>') + '</td>'
+            + '<td>' + nextTxt + '</td>'
+            + '<td>' + resourcesBadge(row.resources_ready, row.blockers) + '</td>'
+            + '<td>' + esc(yt) + '</td>'
+            + '</tr>';
+        }).join('')
+        + '</tbody></table>';
+      bindScheduleChannelJump(chEl, 'tr[data-channel]');
+    }
+
+    upEl.innerHTML = renderUpcomingByChannel(channels);
+    bindScheduleChannelJump(upEl, '.schedule-upcoming-group-head');
+
+    const runs = data.recent_runs || [];
+    if (!runs.length) {
+      runsEl.innerHTML = '<p class="muted">No cron dispatches recorded yet.</p>';
+    } else {
+      runsEl.innerHTML = wrapScheduleTable('<table class="schedule-table"><thead><tr>'
+        + '<th>Channel</th><th>Slot</th><th>Status</th><th>Execution</th><th>When</th><th></th>'
+        + '</tr></thead><tbody>'
+        + runs.map(r => {
+          const slot = esc(r.slot_key || '—');
+          const channel = r.channel ? esc(r.channel) : esc(String(r.slot_key || '').split(':')[0] || '—');
+          const status = esc(r.status || '—');
+          const execId = r.execution_id ? '<code>' + esc(r.execution_id) + '</code>' : '—';
+          const when = esc(r.updated_at || r.created_at || '—');
+          const clearBtn = scheduleRunClearButton(r.slot_key);
+          return '<tr><td><code>' + channel + '</code></td><td><code>' + slot + '</code></td><td>' + status
+            + '</td><td>' + execId + '</td><td>' + when + '</td><td>' + clearBtn + '</td></tr>';
+        }).join('')
+        + '</tbody></table>');
+      bindScheduleRunClearButtons(runsEl, async () => {
+        await loadScheduleOverview();
+        const ch = document.getElementById('scheduleChannel').value.trim();
+        if (ch) await loadScheduleEditorDiagnostics(ch);
+      });
+    }
+  } catch (e) {
+    meta.textContent = String(e);
+    chEl.innerHTML = '<p class="muted">' + esc(String(e)) + '</p>';
+    upEl.innerHTML = '<p class="muted">—</p>';
+    runsEl.innerHTML = '<p class="muted">—</p>';
+  }
 }
 async function loadScheduleEditor(channel) {
   const empty = document.getElementById('scheduleEmpty');
@@ -3904,10 +4764,14 @@ async function loadScheduleEditor(channel) {
   if (!channel) {
     empty.hidden = false;
     editor.hidden = true;
+    const titleEl = document.getElementById('scheduleEditorTitle');
+    if (titleEl) titleEl.textContent = 'Channel schedule';
     return;
   }
   empty.hidden = true;
   editor.hidden = false;
+  const titleEl = document.getElementById('scheduleEditorTitle');
+  if (titleEl) titleEl.textContent = channel;
   let data;
   try {
     data = await api('/v1/schedules/' + encodeURIComponent(channel));
@@ -3917,8 +4781,8 @@ async function loadScheduleEditor(channel) {
         channel,
         enabled: true,
         timezone: 'America/New_York',
-        default_assemble_at: '09:00',
-        default_upload_at: '10:00',
+        default_assemble_at: DEFAULT_ASSEMBLE_TIME,
+        default_upload_at: '12:00',
         duration_min: 90,
         variance_min: 15,
         thumbnail_text: '__DEFAULT_THUMBNAIL__',
@@ -3929,14 +4793,8 @@ async function loadScheduleEditor(channel) {
     } else throw e;
   }
   fillScheduleForm(data);
-  try {
-    const status = await api('/v1/schedules/' + encodeURIComponent(channel) + '/status');
-    renderScheduleStatus(status);
-    await loadScheduleRunHistory(channel);
-  } catch (e) {
-    document.getElementById('scheduleResources').textContent = String(e);
-    document.getElementById('scheduleUpcoming').innerHTML = '<p class="muted">—</p>';
-  }
+  updateScheduleSummary();
+  loadScheduleEditorDiagnostics(channel);
 }
 async function saveSchedule() {
   const channel = document.getElementById('scheduleChannel').value.trim();
@@ -3961,15 +4819,16 @@ async function saveSchedule() {
       upload_tags: upload.upload_tags,
       upload_category_id: upload.upload_category_id,
       upload_made_for_kids: upload.upload_made_for_kids,
-      default_assemble_at: timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00',
+      default_assemble_at: readScheduleTime('scheduleDefaultAssemble'),
       default_upload_at: timeFromInput(document.getElementById('scheduleDefaultUpload').value)
-        || uploadTimeAfterAssemble(timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00'),
+        || uploadTimeAfterAssemble(readScheduleTime('scheduleDefaultAssemble')),
       auto_extend: document.getElementById('scheduleAutoExtend').checked,
       days: collectScheduleDays(),
       apply_default_to_enabled_days: false,
     };
     await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'PUT', body: JSON.stringify(body) });
     await loadScheduleEditor(channel);
+    await loadScheduleOverview();
   } catch (e) {
     alert('Save failed: ' + e);
   }
@@ -3989,6 +4848,7 @@ function showMainSection(section) {
     loadLibraryTab(activeTab);
   }
   if (section === 'schedule') {
+    loadScheduleOverview();
     const ch = document.getElementById('scheduleChannel').value.trim();
     loadScheduleEditor(ch);
   }
@@ -4103,7 +4963,7 @@ async function refreshRunningAssemblyProgress() {
 
 async function pollSnapshot({ includeStats, refresh }) {
   const q = '?category=' + encodeURIComponent(cat())
-    + '&job_limit=100'
+    + '&job_limit=50'
     + (includeStats ? '' : '&light=1')
     + (refresh ? '&refresh=1' : '');
   if (includeStats) setStatsLoading(true);
@@ -4236,15 +5096,29 @@ document.getElementById('videoChannel').addEventListener('change', async () => {
 });
 bindScheduleDayBar();
 renderScheduleDayTimes(defaultScheduleDays());
+mountTimePickerForHidden(document.getElementById('scheduleDefaultAssemble'), () => {
+  const assemble = readScheduleTime('scheduleDefaultAssemble');
+  setHiddenTimeValue(document.getElementById('scheduleDefaultUpload'), uploadTimeAfterAssemble(assemble));
+  updateScheduleSummary();
+});
+mountTimePickerForHidden(document.getElementById('scheduleDefaultUpload'), () => updateScheduleSummary());
+document.getElementById('scheduleEnabled')?.addEventListener('change', () => {
+  syncScheduleEnabledState();
+  updateScheduleSummary();
+});
 document.getElementById('scheduleChannel').addEventListener('change', () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim()));
-document.getElementById('scheduleReload').onclick = () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim());
+document.getElementById('scheduleReload').onclick = () => {
+  loadScheduleOverview(true);
+  const ch = document.getElementById('scheduleChannel').value.trim();
+  if (ch) loadScheduleEditorDiagnostics(ch);
+};
 document.getElementById('scheduleSave').onclick = saveSchedule;
 ['scheduleThumb', 'scheduleDuration', 'scheduleVariance', 'scheduleImagesFolder', 'scheduleTimezone', 'scheduleQueueYoutube'].forEach(id => {
   document.getElementById(id)?.addEventListener('change', updateScheduleSummary);
   document.getElementById(id)?.addEventListener('input', updateScheduleSummary);
 });
 document.getElementById('scheduleApplyDefault').onclick = () => {
-  const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
+  const assemble = readScheduleTime('scheduleDefaultAssemble');
   const upload = timeFromInput(document.getElementById('scheduleDefaultUpload').value)
     || uploadTimeAfterAssemble(assemble);
   document.querySelectorAll('.schedule-day-btn.is-active').forEach(btn => {
@@ -4253,8 +5127,8 @@ document.getElementById('scheduleApplyDefault').onclick = () => {
     const uploadVis = document.querySelector('.schedule-day-upload-visible[data-day="' + i + '"]');
     const assembleHidden = document.querySelector('.schedule-day-assemble[data-day="' + i + '"]');
     const uploadHidden = document.querySelector('.schedule-day-upload[data-day="' + i + '"]');
-    if (assembleVis) assembleVis.value = timeInputValue(assemble);
-    if (uploadVis) uploadVis.value = timeInputValue(upload);
+    setHiddenTimeValue(assembleVis, assemble);
+    setHiddenTimeValue(uploadVis, upload);
     if (assembleHidden) assembleHidden.value = timeInputValue(assemble);
     if (uploadHidden) uploadHidden.value = timeInputValue(upload);
   });
@@ -4263,11 +5137,6 @@ document.getElementById('scheduleApplyDefault').onclick = () => {
 ['scheduleUploadPrivacy', 'scheduleUploadSchedulePublish', 'scheduleUploadTags', 'scheduleUploadCategory', 'scheduleUploadMadeForKids', 'scheduleQueueYoutube'].forEach(id => {
   document.getElementById(id)?.addEventListener('change', updateScheduleSummary);
 });
-document.getElementById('scheduleDefaultAssemble')?.addEventListener('change', () => {
-  const assemble = timeFromInput(document.getElementById('scheduleDefaultAssemble').value) || '09:00';
-  document.getElementById('scheduleDefaultUpload').value = timeInputValue(uploadTimeAfterAssemble(assemble));
-  updateScheduleSummary();
-});
 document.getElementById('scheduleDelete').onclick = async () => {
   const channel = document.getElementById('scheduleChannel').value.trim();
   if (!channel || !confirm('Delete schedule for ' + channel + '?')) return;
@@ -4275,6 +5144,7 @@ document.getElementById('scheduleDelete').onclick = async () => {
     await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'DELETE' });
     document.getElementById('scheduleEditor').hidden = true;
     document.getElementById('scheduleEmpty').hidden = false;
+    await loadScheduleOverview();
   } catch (e) { alert(String(e)); }
 };
 
@@ -4282,14 +5152,17 @@ document.getElementById('scheduleDelete').onclick = async () => {
   renderObsBar();
   setStatsLoading(true);
   setJobsLoading(true);
+  const bootTimeoutMs = 12000;
   try {
-    await Promise.all([
-      loadVersionInfo(),
-      loadChannelOptions(),
-      loadBackgroundFolders(),
-      pollSnapshot({ includeStats: false }),
+    await Promise.race([
+      Promise.all([
+        loadVersionInfo(),
+        loadChannelOptions(),
+        loadBackgroundFolders(),
+        pollSnapshot({ includeStats: false }),
+      ]),
+      new Promise(resolve => setTimeout(resolve, bootTimeoutMs)),
     ]);
-    await refreshStats().catch(e => console.warn('stats', e));
   } catch (e) {
     console.error(e);
     showAuthError('Failed to load dashboard. Try Refresh.');
@@ -4298,6 +5171,7 @@ document.getElementById('scheduleDelete').onclick = async () => {
     setJobsLoading(false);
     hidePageBoot();
   }
+  refreshStats().catch(e => console.warn('stats', e));
   schedulePoll(15000);
 })();
 </script>

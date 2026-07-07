@@ -25,6 +25,7 @@ def list_r2_job_runs(
     *,
     id_prefix: str,
     limit: int = 25,
+    scan_extra_running: bool = True,
 ) -> list[dict[str, Any]]:
     """Return the most recent job runs for ``id_prefix`` (parallel R2 reads).
 
@@ -43,7 +44,7 @@ def list_r2_job_runs(
     run_ids.sort(reverse=True)
     recent = run_ids[: max(limit, 0)]
     extra_running: list[str] = []
-    if len(run_ids) > len(recent):
+    if scan_extra_running and len(run_ids) > len(recent):
         tail = run_ids[len(recent) : len(recent) + 200]
         workers = min(8, len(tail)) or 1
 

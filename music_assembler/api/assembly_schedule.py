@@ -19,9 +19,11 @@ from music_assembler.r2_storage import r2_config_from_env
 SCHEDULES_KEY = "schedules/schedules.json"
 SCHEDULE_RUNS_PREFIX = "schedules/runs/"
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 DEFAULT_WINDOW_MINUTES = 15
 DEFAULT_UPLOAD_OFFSET_MINUTES = 60
+DEFAULT_ASSEMBLE_AT = "11:00"
 VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
 SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
@@ -29,7 +31,7 @@ SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 @dataclass
 class DaySlot:
     enabled: bool = False
-    assemble_at: str = "09:00"
+    assemble_at: str = DEFAULT_ASSEMBLE_AT
     upload_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -44,7 +46,7 @@ class DaySlot:
             return cls()
         return cls(
             enabled=bool(data.get("enabled")),
-            assemble_at=_normalize_time(str(data.get("assemble_at") or "09:00")),
+            assemble_at=_normalize_time(str(data.get("assemble_at") or DEFAULT_ASSEMBLE_AT)),
             upload_at=_normalize_time_optional(data.get("upload_at")),
         )
 
@@ -65,7 +67,7 @@ class ChannelSchedule:
     upload_tags: str = ""
     upload_category_id: str = "10"
     upload_made_for_kids: bool = False
-    default_assemble_at: str = "09:00"
+    default_assemble_at: str = DEFAULT_ASSEMBLE_AT
     default_upload_at: str | None = None
     min_backgrounds: int = 1
     auto_extend: bool = True
@@ -123,7 +125,7 @@ class ChannelSchedule:
             upload_tags=str(data.get("upload_tags") or "").strip(),
             upload_category_id=str(data.get("upload_category_id") or "10").strip() or "10",
             upload_made_for_kids=bool(data.get("upload_made_for_kids", False)),
-            default_assemble_at=_normalize_time(str(data.get("default_assemble_at") or "09:00")),
+            default_assemble_at=_normalize_time(str(data.get("default_assemble_at") or DEFAULT_ASSEMBLE_AT)),
             default_upload_at=_normalize_time_optional(data.get("default_upload_at")),
             min_backgrounds=max(1, int(data.get("min_backgrounds") or 1)),
             auto_extend=bool(data.get("auto_extend", True)),
@@ -405,15 +407,29 @@ def evaluate_resources(
     bucket: str,
     schedule: ChannelSchedule,
     settings: ApiSettings,
+    *,
+    inventory_cache: dict[str, dict[str, int]] | None = None,
+    extend_pending_cache: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     category = _category(schedule, settings)
     images_folder = _images_folder(schedule, settings)
-    inv = category_inventory(client, bucket, category)
-    cfg = r2_config_from_env(category=category)
-    extend_pending = count_pending_r2_sources(client, cfg)
+    inv_cache = inventory_cache if inventory_cache is not None else {}
+    ext_cache = extend_pending_cache if extend_pending_cache is not None else {}
+
+    if category not in inv_cache:
+        inv_cache[category] = category_inventory(client, bucket, category)
+    inv = inv_cache[category]
+
+    if category not in ext_cache:
+        cfg = r2_config_from_env(category=category)
+        ext_cache[category] = count_pending_r2_sources(client, cfg)
+    extend_pending = ext_cache[category]
+
     backgrounds = int(inv.get("backgrounds_available") or 0)
     if images_folder != category:
-        inv_folder = category_inventory(client, bucket, images_folder)
+        if images_folder not in inv_cache:
+            inv_cache[images_folder] = category_inventory(client, bucket, images_folder)
+        inv_folder = inv_cache[images_folder]
         backgrounds = int(inv_folder.get("backgrounds_available") or backgrounds)
     music_tracks = int(inv.get("music_mp3s") or 0)
     blockers: list[str] = []
@@ -463,6 +479,103 @@ def preview_schedule(schedule: ChannelSchedule, *, now_utc: datetime | None = No
         if len(upcoming) >= limit:
             break
     return upcoming
+
+
+def _active_days_summary(schedule: ChannelSchedule) -> list[str]:
+    rows: list[str] = []
+    for i, day in enumerate(schedule.days):
+        if not day.enabled:
+            continue
+        assemble = day.assemble_at or schedule.default_assemble_at
+        upload = resolved_upload_at(day, schedule)
+        rows.append(f"{DAY_ABBR[i]} {assemble}→{upload}")
+    return rows
+
+
+def schedules_overview(
+    client,
+    bucket: str,
+    settings: ApiSettings,
+    *,
+    upcoming_limit: int = 25,
+    runs_limit: int = 40,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Aggregate all channel schedules, upcoming slots, and recent cron ledger entries."""
+    schedules = list_schedules(client, bucket)
+    channels: list[dict[str, Any]] = []
+    all_upcoming: list[dict[str, Any]] = []
+    inventory_cache: dict[str, dict[str, int]] = {}
+    extend_pending_cache: dict[str, int] = {}
+
+    for sched in schedules:
+        upcoming = preview_schedule(sched, now_utc=now_utc, limit=6)
+        resources = evaluate_resources(
+            client,
+            bucket,
+            sched,
+            settings,
+            inventory_cache=inventory_cache,
+            extend_pending_cache=extend_pending_cache,
+        )
+        next_slot = upcoming[0] if upcoming else None
+        active_days = _active_days_summary(sched)
+        channel_upcoming = [
+            {
+                **slot,
+                "channel": sched.channel,
+                "timezone": sched.timezone,
+                "schedule_enabled": sched.enabled,
+            }
+            for slot in upcoming
+        ]
+        channels.append(
+            {
+                "channel": sched.channel,
+                "enabled": sched.enabled,
+                "timezone": sched.timezone,
+                "images_folder": _images_folder(sched, settings),
+                "category": _category(sched, settings),
+                "active_days": active_days,
+                "active_day_count": len(active_days),
+                "default_assemble_at": sched.default_assemble_at,
+                "default_upload_at": resolved_upload_at(
+                    DaySlot(enabled=True, assemble_at=sched.default_assemble_at),
+                    sched,
+                ),
+                "duration_min": sched.duration_min,
+                "queue_youtube": sched.queue_youtube,
+                "upload_schedule_publish": sched.upload_schedule_publish,
+                "upload_privacy": sched.upload_privacy,
+                "resources_ready": resources.get("ready"),
+                "backgrounds_available": resources.get("backgrounds_available"),
+                "blockers": resources.get("blockers") or [],
+                "next_slot": next_slot,
+                "upcoming": channel_upcoming,
+            }
+        )
+        all_upcoming.extend(channel_upcoming)
+
+    channels.sort(key=lambda row: (row.get("channel") or "").lower())
+    all_upcoming.sort(
+        key=lambda row: (
+            (row.get("channel") or "").lower(),
+            row.get("at_local") or "",
+        )
+    )
+    runs = list_schedule_runs(client, bucket, limit=runs_limit)
+
+    return {
+        "cron": {
+            "endpoint": "/v1/cron/run-schedules",
+            "poll_minutes": 15,
+            "match_window_minutes": DEFAULT_WINDOW_MINUTES,
+        },
+        "channels": channels,
+        "channel_count": len(channels),
+        "upcoming": all_upcoming[: max(upcoming_limit, 0)],
+        "recent_runs": runs,
+    }
 
 
 def _patch_meta_schedule_slot(client, bucket: str, execution_id: str, slot_key_value: str) -> None:
