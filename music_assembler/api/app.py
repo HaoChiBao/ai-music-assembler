@@ -4720,7 +4720,7 @@ async function loadScheduleOverview(refresh) {
             + '<td>' + esc(yt) + '</td>'
             + '</tr>';
         }).join('')
-        + '</tbody></table>';
+        + '</tbody></table>');
       bindScheduleChannelJump(chEl, 'tr[data-channel]');
     }
 
@@ -4790,7 +4790,11 @@ async function loadScheduleEditor(channel) {
         auto_extend: true,
         days: defaultScheduleDays(),
       };
-    } else throw e;
+    } else {
+      console.error('schedule editor', e);
+      alert('Failed to load schedule: ' + e);
+      return;
+    }
   }
   fillScheduleForm(data);
   updateScheduleSummary();
