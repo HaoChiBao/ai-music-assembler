@@ -2178,6 +2178,43 @@ _DASHBOARD_HTML = (
       color: var(--color-midnight-ink);
     }
     .schedule-empty .muted { margin: 0; font-size: 14px; }
+    .schedule-empty-actions {
+      margin-top: 16px;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .schedule-notice {
+      padding: 14px 16px;
+      border: 1px solid var(--color-stone-mist);
+      border-left: 3px solid var(--color-midnight-ink);
+      border-radius: var(--radius-buttons);
+      background: color-mix(in srgb, var(--color-cream-paper) 70%, var(--color-white));
+    }
+    .schedule-notice[hidden] { display: none !important; }
+    .schedule-notice-title {
+      margin: 0 0 4px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+    }
+    .schedule-notice .muted { margin: 0; font-size: 13px; line-height: 1.4; }
+    .schedule-view[hidden] { display: none !important; }
+    .schedule-editor-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+      margin-bottom: 16px;
+    }
+    .schedule-editor-toolbar label { min-width: min(280px, 100%); margin: 0; }
+    .schedule-subtabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
     .schedule-editor {
       display: flex;
       flex-direction: column;
@@ -3466,15 +3503,17 @@ _DASHBOARD_HTML = (
         <div class="schedule-page__intro">
           <h2 class="panel-title">Assembly schedule</h2>
           <p class="card-desc">Set weekly assembly and YouTube upload times per channel. Cron runs every 15 minutes.</p>
+          <nav class="schedule-subtabs job-nav" role="tablist" aria-label="Schedule views">
+            <button type="button" class="job-tab schedule-subtab active" data-schedule-tab="overview" id="scheduleTabOverview">Overview</button>
+            <button type="button" class="job-tab schedule-subtab" data-schedule-tab="create" id="scheduleTabCreate">Create / edit</button>
+          </nav>
         </div>
         <div class="schedule-page__toolbar job-toolbar job-toolbar--flush">
-          <label>Channel
-            <select id="scheduleChannel"><option value="">Select channel…</option></select>
-          </label>
           <button type="button" class="btn-secondary btn-sm" id="scheduleReload">Reload</button>
         </div>
       </header>
 
+      <div id="scheduleViewOverview" class="schedule-view">
       <div class="schedule-panel" id="scheduleOverviewPanel">
         <header class="schedule-panel__head">
           <h3 class="schedule-section-title">Scheduled jobs</h3>
@@ -3508,10 +3547,23 @@ _DASHBOARD_HTML = (
           </section>
         </div>
       </div>
+      </div>
+
+      <div id="scheduleViewEditor" class="schedule-view" hidden>
+      <div class="schedule-editor-toolbar">
+        <label>Channel
+          <select id="scheduleChannel"><option value="">Select channel…</option></select>
+        </label>
+      </div>
 
       <div id="scheduleEmpty" class="schedule-empty">
         <p class="schedule-empty-title">Choose a channel</p>
-        <p class="muted">Select a YouTube channel above to configure its weekly schedule.</p>
+        <p class="muted">Pick a YouTube channel to create a new weekly schedule or edit an existing one.</p>
+      </div>
+
+      <div id="scheduleNewBanner" class="schedule-notice" hidden>
+        <p class="schedule-notice-title">No schedule yet for <code id="scheduleNewChannelLabel">channel</code></p>
+        <p class="muted">There isn’t a saved schedule for this channel. Configure the form below and save to create one — defaults are already filled in.</p>
       </div>
 
       <div id="scheduleEditor" class="schedule-editor" hidden>
@@ -3700,6 +3752,7 @@ _DASHBOARD_HTML = (
             </div>
           </div>
         </footer>
+      </div>
       </div>
     </div>
   </section>
@@ -5102,9 +5155,7 @@ function bindScheduleChannelJump(container, selector) {
     el.onclick = () => {
       const ch = el.dataset.channel;
       if (!ch) return;
-      document.getElementById('scheduleChannel').value = ch;
-      loadScheduleEditor(ch);
-      document.getElementById('scheduleEditor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      openScheduleEditorForChannel(ch);
     };
   });
 }
@@ -5142,7 +5193,13 @@ async function loadScheduleOverview(refresh) {
 
     const channels = data.channels || [];
     if (!channels.length) {
-      chEl.innerHTML = '<p class="muted">No schedules saved yet. Select a channel below to create one.</p>';
+      chEl.innerHTML = '<div class="schedule-empty" style="margin:16px;border:none">'
+        + '<p class="schedule-empty-title">No schedules yet</p>'
+        + '<p class="muted">Create a weekly schedule for a YouTube channel to start automatic assembly.</p>'
+        + '<div class="schedule-empty-actions">'
+        + '<button type="button" class="btn-primary btn-sm" id="scheduleOverviewCreateBtn">Create a schedule</button>'
+        + '</div></div>';
+      document.getElementById('scheduleOverviewCreateBtn')?.addEventListener('click', () => showScheduleSubtab('create'));
     } else {
       chEl.innerHTML = wrapScheduleTable('<table class="schedule-table"><thead><tr>'
         + '<th>Channel</th><th>Status</th><th>Timezone</th><th>Active days</th><th>Next assemble</th><th>Resources</th><th>YouTube</th>'
@@ -5211,11 +5268,19 @@ async function loadScheduleOverview(refresh) {
 async function loadScheduleEditor(channel) {
   const empty = document.getElementById('scheduleEmpty');
   const editor = document.getElementById('scheduleEditor');
+  const banner = document.getElementById('scheduleNewBanner');
+  const hint = document.getElementById('scheduleEditorHint');
   if (!channel) {
     empty.hidden = false;
     editor.hidden = true;
+    if (banner) banner.hidden = true;
     const titleEl = document.getElementById('scheduleEditorTitle');
     if (titleEl) titleEl.textContent = 'Channel schedule';
+    if (hint) hint.textContent = 'Configure weekly cadence, defaults, and YouTube upload behavior.';
+    const emptyTitle = empty?.querySelector('.schedule-empty-title');
+    const emptyMuted = empty?.querySelector('.muted');
+    if (emptyTitle) emptyTitle.textContent = 'Choose a channel';
+    if (emptyMuted) emptyMuted.textContent = 'Pick a YouTube channel to create a new weekly schedule or edit an existing one.';
     return;
   }
   empty.hidden = true;
@@ -5223,36 +5288,94 @@ async function loadScheduleEditor(channel) {
   const titleEl = document.getElementById('scheduleEditorTitle');
   if (titleEl) titleEl.textContent = channel;
   let data;
+  let isNew = false;
   try {
     data = await api('/v1/schedules/' + encodeURIComponent(channel));
   } catch (e) {
-    if (String(e).includes('404')) {
-      data = {
-        channel,
-        enabled: true,
-        timezone: 'America/New_York',
-        default_assemble_at: DEFAULT_ASSEMBLE_TIME,
-        default_upload_at: '12:00',
-        duration_min: 90,
-        variance_min: 15,
-        thumbnail_text: '__DEFAULT_THUMBNAIL__',
-        queue_youtube: true,
-        upload_schedule_publish: true,
-        upload_now: false,
-        upload_privacy: 'private',
-        upload_category_id: '10',
-        auto_extend: true,
-        days: defaultScheduleDays(),
-      };
+    if (isScheduleNotFound(e)) {
+      isNew = true;
+      data = defaultNewSchedule(channel);
     } else {
       console.error('schedule editor', e);
-      alert('Failed to load schedule: ' + e);
+      empty.hidden = false;
+      empty.querySelector('.schedule-empty-title').textContent = 'Couldn’t load schedule';
+      empty.querySelector('.muted').textContent = String(e);
+      editor.hidden = true;
+      if (banner) banner.hidden = true;
       return;
     }
   }
+  if (banner) {
+    banner.hidden = !isNew;
+    const label = document.getElementById('scheduleNewChannelLabel');
+    if (label) label.textContent = channel;
+  }
+  if (hint) {
+    hint.textContent = isNew
+      ? 'Creating a new weekly schedule for this channel. Save when you’re ready.'
+      : 'Editing the saved weekly schedule for this channel.';
+  }
+  const saveBtn = document.getElementById('scheduleSave');
+  if (saveBtn) saveBtn.textContent = isNew ? 'Create schedule' : 'Save schedule';
+  const deleteBtn = document.getElementById('scheduleDelete');
+  if (deleteBtn) deleteBtn.hidden = isNew;
   fillScheduleForm(data);
   updateScheduleSummary();
-  loadScheduleEditorDiagnostics(channel);
+  if (!isNew) loadScheduleEditorDiagnostics(channel);
+  else {
+    const resEl = document.getElementById('scheduleResources');
+    const upEl = document.getElementById('scheduleUpcoming');
+    const histEl = document.getElementById('scheduleRunHistory');
+    if (resEl) resEl.textContent = 'Save the schedule to run resource checks.';
+    if (upEl) upEl.innerHTML = '<p class="muted">Save the schedule to preview upcoming slots.</p>';
+    if (histEl) histEl.innerHTML = '<p class="muted">No run history yet.</p>';
+  }
+}
+function isScheduleNotFound(err) {
+  const msg = String(err || '');
+  return msg.includes('Schedule not found') || /\b404\b/.test(msg);
+}
+function defaultNewSchedule(channel) {
+  return {
+    channel,
+    enabled: true,
+    timezone: 'America/New_York',
+    default_assemble_at: DEFAULT_ASSEMBLE_TIME,
+    default_upload_at: '12:00',
+    duration_min: 90,
+    variance_min: 15,
+    thumbnail_text: '__DEFAULT_THUMBNAIL__',
+    queue_youtube: true,
+    upload_schedule_publish: true,
+    upload_now: false,
+    upload_privacy: 'private',
+    upload_category_id: '10',
+    auto_extend: true,
+    days: defaultScheduleDays(),
+  };
+}
+function showScheduleSubtab(tab) {
+  const overview = tab !== 'create';
+  const overviewEl = document.getElementById('scheduleViewOverview');
+  const editorEl = document.getElementById('scheduleViewEditor');
+  if (overviewEl) overviewEl.hidden = !overview;
+  if (editorEl) editorEl.hidden = overview;
+  document.querySelectorAll('.schedule-subtab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.scheduleTab === (overview ? 'overview' : 'create'));
+  });
+  if (overview) {
+    loadScheduleOverview();
+  } else {
+    const ch = document.getElementById('scheduleChannel')?.value.trim() || '';
+    loadScheduleEditor(ch);
+  }
+}
+function openScheduleEditorForChannel(channel) {
+  const sel = document.getElementById('scheduleChannel');
+  if (sel && channel) sel.value = channel;
+  showScheduleSubtab('create');
+  loadScheduleEditor(channel);
+  document.getElementById('scheduleViewEditor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 async function saveSchedule() {
   const channel = document.getElementById('scheduleChannel').value.trim();
@@ -5307,9 +5430,7 @@ function showMainSection(section) {
     loadLibraryTab(activeTab);
   }
   if (section === 'schedule') {
-    loadScheduleOverview();
-    const ch = document.getElementById('scheduleChannel').value.trim();
-    loadScheduleEditor(ch);
+    showScheduleSubtab('overview');
   }
   if (section === 'updates') {
     loadUpdatesPanel();
@@ -5654,11 +5775,18 @@ document.getElementById('scheduleEnabled')?.addEventListener('change', () => {
   syncScheduleEnabledState();
   updateScheduleSummary();
 });
+document.querySelectorAll('.schedule-subtab').forEach((btn) => {
+  btn.addEventListener('click', () => showScheduleSubtab(btn.dataset.scheduleTab || 'overview'));
+});
 document.getElementById('scheduleChannel').addEventListener('change', () => loadScheduleEditor(document.getElementById('scheduleChannel').value.trim()));
 document.getElementById('scheduleReload').onclick = () => {
-  loadScheduleOverview(true);
-  const ch = document.getElementById('scheduleChannel').value.trim();
-  if (ch) loadScheduleEditorDiagnostics(ch);
+  const overviewHidden = document.getElementById('scheduleViewOverview')?.hidden;
+  if (!overviewHidden) {
+    loadScheduleOverview(true);
+  } else {
+    const ch = document.getElementById('scheduleChannel').value.trim();
+    if (ch) loadScheduleEditor(ch);
+  }
 };
 document.getElementById('scheduleSave').onclick = saveSchedule;
 ['scheduleThumb', 'scheduleDuration', 'scheduleVariance', 'scheduleImagesFolder', 'scheduleTimezone', 'scheduleQueueYoutube'].forEach(id => {
@@ -5700,9 +5828,10 @@ document.getElementById('scheduleDelete').onclick = async () => {
   if (!channel || !confirm('Delete schedule for ' + channel + '?')) return;
   try {
     await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'DELETE' });
-    document.getElementById('scheduleEditor').hidden = true;
-    document.getElementById('scheduleEmpty').hidden = false;
+    document.getElementById('scheduleChannel').value = '';
+    await loadScheduleEditor('');
     await loadScheduleOverview();
+    showScheduleSubtab('overview');
   } catch (e) { alert(String(e)); }
 };
 
