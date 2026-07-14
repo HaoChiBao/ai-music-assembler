@@ -188,6 +188,43 @@ def list_background_folders(client, bucket: str) -> list[str]:
     return sorted(seen)
 
 
+def _is_image_filename(name: str) -> bool:
+    lower = name.lower()
+    return any(lower.endswith(ext.lower()) for ext in IMAGE_EXTENSIONS)
+
+
+def count_ready_backgrounds(
+    client,
+    bucket: str,
+    *,
+    folder: str | None = None,
+) -> int:
+    """Count claimable background images under ``post-processed/``.
+
+    When ``folder`` is set, only that subfolder is scanned. Otherwise every
+    subfolder is included. Files in ``used/`` or ``in-flight/`` are excluded;
+    only images sitting directly in a pool folder count (same shape as claimable).
+    """
+    prefix = f"post-processed/{folder.strip().strip('/')}/" if folder else "post-processed/"
+    n = 0
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if _is_skipped_key(key):
+                continue
+            if "/used/" in key or "/in-flight/" in key:
+                continue
+            parts = key.split("/")
+            # post-processed/{folder}/{filename}
+            if len(parts) != 3 or parts[0] != "post-processed":
+                continue
+            if not _is_image_filename(parts[2]):
+                continue
+            n += 1
+    return n
+
+
 def category_inventory(client, bucket: str, category: str) -> dict[str, int]:
     """Count objects in each assembly prefix (6 R2 list scans)."""
     prefixes = {
@@ -200,6 +237,9 @@ def category_inventory(client, bucket: str, category: str) -> dict[str, int]:
     }
     counts: dict[str, int] = {}
     for label, prefix in prefixes.items():
+        if label == "backgrounds_available":
+            counts[label] = count_ready_backgrounds(client, bucket, folder=category)
+            continue
         n = 0
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -207,14 +247,32 @@ def category_inventory(client, bucket: str, category: str) -> dict[str, int]:
                 key = obj["Key"]
                 if _is_skipped_key(key):
                     continue
-                if label == "backgrounds_available":
-                    if "/used/" in key or "/in-flight/" in key:
-                        continue
                 if label == "pre_processed" and "/used/" in key:
                     continue
+                if label == "music_mp3s":
+                    name = key[len(prefix) :]
+                    if not name or "/" in name or not name.lower().endswith(".mp3"):
+                        continue
+                if label == "music_videos":
+                    # Count finished video runs (…/mv_*_video.mp4), not every artifact.
+                    if not key.endswith("_video.mp4"):
+                        continue
                 n += 1
         counts[label] = n
     return counts
+
+
+def dashboard_inventory(client, bucket: str, category: str) -> dict[str, int]:
+    """Category inventory plus dashboard chip aliases (all-folder backgrounds ready)."""
+    inv = category_inventory(client, bucket, category)
+    backgrounds_ready = count_ready_backgrounds(client, bucket)
+    return {
+        **inv,
+        "backgrounds_ready": backgrounds_ready,
+        "post-processed": backgrounds_ready,
+        "music": inv.get("music_mp3s", 0),
+        "music-video": inv.get("music_videos", 0),
+    }
 
 
 def list_video_summaries(

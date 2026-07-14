@@ -19,6 +19,9 @@ def _dashboard_script() -> str:
 def test_dashboard_javascript_syntax():
     js = _dashboard_script()
     assert "async function init()" in js
+    assert "inv.backgrounds_ready" in js
+    assert "inv.music_mp3s" in js
+    assert "inv.music_videos" in js
     tmp = Path("/tmp/dashboard-syntax-test.js")
     tmp.write_text(js, encoding="utf-8")
     subprocess.run(["node", "--check", str(tmp)], check=True)
