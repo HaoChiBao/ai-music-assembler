@@ -14,7 +14,7 @@ See [music-assembly-iam.md](music-assembly-iam.md).
 
 Pushes to **`main`** run tests, then rebuild and redeploy this service via GitHub Actions.
 
-One-time setup (GCP SA + `GCP_SA_KEY` secret): [github-actions-cicd.md](github-actions-cicd.md).
+One-time setup (Workload Identity Federation secrets): [github-actions-cicd.md](github-actions-cicd.md).
 
 ## Build and deploy (manual)
 

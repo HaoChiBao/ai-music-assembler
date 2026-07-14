@@ -4,65 +4,49 @@ CI/CD for the hosted control API / dashboard (`music-assembly-api`).
 
 | Event | Job | Behavior |
 |-------|-----|----------|
-| Pull request → `main` | **Check** | Install `.[api]`, run `pytest` |
+| Pull request → `main` | **Check** | Install API test surface, run `pytest` |
 | Push → `main` | **Check** then **Deploy** | Cloud Build API image → `gcloud run deploy` → `/health` smoke check |
 
 Workflow file: [`.github/workflows/ci-cd.yml`](../.github/workflows/ci-cd.yml).
 
-## One-time GCP setup
+## Auth (Workload Identity Federation)
 
-Create a deploy identity (do **not** reuse `music-assembly-api` for GitHub — keep runtime and deploy separate):
+Deploy uses the same GCP WIF pool as **youtube-uploader** — no JSON key secret.
+
+| GitHub secret | Value |
+|---------------|-------|
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/17161979106/locations/global/workloadIdentityPools/github/providers/github` |
+| `GCP_SERVICE_ACCOUNT` | `github-deploy@youtube-uploader-499603.iam.gserviceaccount.com` |
+
+The OIDC provider attribute condition allows:
+
+- `HaoChiBao/youtube-uploader`
+- `HaoChiBao/ai-music-assembler`
+
+Re-apply secrets (from a machine with `gcloud` + `gh` admin):
 
 ```bash
 export PROJECT_ID=youtube-uploader-499603
-export REGION=northamerica-northeast2
-
-gcloud iam service-accounts create github-actions-deploy \
-  --project="$PROJECT_ID" \
-  --display-name="GitHub Actions deploy" \
-  --description="Build and deploy music-assembly-api from GitHub Actions"
-
-# Push images via Cloud Build + Artifact Registry
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/cloudbuild.builds.editor"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/artifactregistry.writer"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/run.developer"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/storage.admin"
-
-# Allow deploy to attach / update the runtime service account
-gcloud iam service-accounts add-iam-policy-binding \
-  "music-assembly-api@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --member="serviceAccount:github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/iam.serviceAccountUser"
-
-# Cloud Build's default SA must be able to push to Artifact Registry (usually already true)
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/artifactregistry.writer"
+export REPO=HaoChiBao/ai-music-assembler
+PROVIDER="$(gcloud iam workload-identity-pools providers describe github \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool=github \
+  --format='value(name)')"
+gh secret set GCP_WORKLOAD_IDENTITY_PROVIDER --repo "$REPO" --body "$PROVIDER"
+gh secret set GCP_SERVICE_ACCOUNT --repo "$REPO" \
+  --body "github-deploy@${PROJECT_ID}.iam.gserviceaccount.com"
 ```
 
-Create a JSON key and store it in GitHub (prefer Workload Identity Federation later):
+## One-time GCP notes
 
-```bash
-gcloud iam service-accounts keys create github-actions-deploy-key.json \
-  --iam-account="github-actions-deploy@${PROJECT_ID}.iam.gserviceaccount.com"
+Deploy SA: `github-deploy@youtube-uploader-499603.iam.gserviceaccount.com`
 
-gh secret set GCP_SA_KEY < github-actions-deploy-key.json
-rm github-actions-deploy-key.json
-```
+Needed roles (already granted for both repos when WIF was wired):
 
-Repo → **Settings → Secrets and variables → Actions →** secret name **`GCP_SA_KEY`**.
+- `roles/artifactregistry.writer`
+- `roles/run.admin`
+- `roles/cloudbuild.builds.editor`
+- `roles/storage.admin` (Cloud Build source upload)
+- `roles/iam.serviceAccountUser` on `music-assembly-api@…` (and the uploader runtime SA)
 
 ## Behavior notes
 
