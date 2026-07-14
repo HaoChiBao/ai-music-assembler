@@ -125,8 +125,9 @@ jobs:
             exit 1
           fi
 
-          # Also keep :latest for manual / docs commands.
-          gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest"
+          # Also keep :latest for manual / docs commands (best-effort; SHA tag is authoritative).
+          gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest" \
+            || echo "::warning::Could not move :latest tag (continuing with ${IMAGE_TAGGED})"
 
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
           echo "IMAGE_TAGGED=${IMAGE_TAGGED}" >> "$GITHUB_ENV"
