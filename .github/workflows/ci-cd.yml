@@ -70,6 +70,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 40
+
+      - name: Write deploy manifest
+        run: |
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python scripts/write_deploy_manifest.py --ref main --limit 30
+          echo "DEPLOYED_AT=${DEPLOYED_AT}" >> "$GITHUB_ENV"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -108,7 +116,7 @@ jobs:
             --region="${{ env.GCP_REGION }}" \
             --platform=managed \
             --quiet \
-            --update-env-vars="ASSEMBLY_BUILD_ID=${SHORT_SHA}"
+            --update-env-vars="ASSEMBLY_BUILD_ID=${SHORT_SHA},ASSEMBLY_DEPLOYED_AT=${DEPLOYED_AT}"
 
       - name: Smoke check
         run: |
