@@ -254,7 +254,9 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "youtube-uploader pending queue after R2 upload (worker needs ``UPLOADER_API_URL`` + "
             "``UPLOADER_API_KEY``). Set ``queue_youtube: false`` to skip.\n\n"
             "Optional YouTube flags: ``upload_privacy``, ``upload_schedule_publish``, ``publish_at`` / "
-            "``upload_at`` (RFC3339 UTC), ``upload_tags``, ``upload_category_id``, ``upload_made_for_kids``."
+            "``upload_at`` (RFC3339 UTC), ``upload_tags``, ``upload_category_id``, ``upload_made_for_kids``. "
+            "When ``upload_schedule_publish`` is false, the worker registers with uploader "
+            "``upload_now`` + ``no_schedule`` so upload starts as soon as assembly finishes."
         ),
         "request_example": {
             "category": "korean",

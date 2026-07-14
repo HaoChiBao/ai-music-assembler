@@ -102,7 +102,8 @@ class StartJobRequest(BaseModel):
         default=False,
         description=(
             "When true with publish_at, register with YouTube publishAt (and upload_at). "
-            "When false, queue for immediate upload using upload_privacy."
+            "When false with queue_youtube, register with upload_now + no_schedule so the "
+            "uploader dispatches immediately using upload_privacy."
         ),
     )
     publish_at: str | None = Field(
@@ -567,12 +568,18 @@ def start_job(
 
     publish_at = (body.publish_at or "").strip() or None
     upload_at = (body.upload_at or "").strip() or None
+    upload_now = False
     if body.queue_youtube and body.upload_schedule_publish:
         if not publish_at and not upload_at:
             raise HTTPException(
                 status_code=400,
                 detail="publish_at or upload_at is required when upload_schedule_publish is true",
             )
+    elif body.queue_youtube and not body.upload_schedule_publish:
+        # Post immediately: uploader register with upload_now + no_schedule.
+        publish_at = None
+        upload_at = None
+        upload_now = True
     elif not body.upload_schedule_publish:
         publish_at = None
         upload_at = None
@@ -615,6 +622,7 @@ def start_job(
                 upload_privacy=body.upload_privacy if body.queue_youtube else None,
                 publish_at=publish_at if body.queue_youtube else None,
                 upload_at=upload_at if body.queue_youtube else None,
+                upload_now=upload_now if body.queue_youtube else False,
                 upload_tags=body.upload_tags.strip() or None if body.queue_youtube else None,
                 upload_category_id=body.upload_category_id.strip() or None if body.queue_youtube else None,
                 upload_made_for_kids=body.upload_made_for_kids if body.queue_youtube else None,
@@ -1961,6 +1969,64 @@ _DASHBOARD_HTML = (
     }
     .checkbox-row input { width: auto; margin: 2px 0 0; }
     .checkbox-row label { margin: 0; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    .run-publish-mode {
+      margin: 0;
+      padding: 10px 12px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .run-publish-mode legend {
+      padding: 0 4px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-midnight-ink);
+    }
+    .run-youtube-timing {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .run-youtube-timing-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-midnight-ink);
+    }
+    .run-timing-seg {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      overflow: hidden;
+      background: var(--color-white);
+    }
+    .run-timing-seg button {
+      flex: 1 1 auto;
+      min-width: 7.5rem;
+      margin: 0;
+      border: none;
+      border-radius: 0;
+      border-right: 1px solid var(--color-stone-mist);
+      background: transparent;
+      color: var(--color-graphite-veil);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .run-timing-seg button:last-child { border-right: none; }
+    .run-timing-seg button:hover { color: var(--color-midnight-ink); background: color-mix(in srgb, var(--color-cream-paper) 80%, var(--color-white)); }
+    .run-timing-seg button.active {
+      background: var(--color-midnight-ink);
+      color: var(--color-white);
+    }
     .run-youtube-block {
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-buttons);
@@ -1974,7 +2040,7 @@ _DASHBOARD_HTML = (
       color: var(--color-midnight-ink);
     }
     .run-youtube-options[hidden],
-    #runScheduleFields[hidden] { display: none !important; }
+    #runScheduleFieldsMain[hidden] { display: none !important; }
     .run-youtube-options { margin-top: 4px; }
     .schedule-page {
       display: flex;
@@ -3160,6 +3226,29 @@ _DASHBOARD_HTML = (
             <select id="runImagesFolder" required><option value="">Loading…</option></select>
             <p class="hint">Pool under <code>post-processed/{folder}/</code> on R2 — each video claims one random still from this folder.</p>
           </div>
+          <div class="run-youtube-timing" id="runYoutubeTiming">
+            <span class="run-youtube-timing-label">YouTube after assembly</span>
+            <div class="run-timing-seg" role="group" aria-label="YouTube upload timing">
+              <button type="button" class="active" data-timing="immediate" id="runTimingImmediate">Upload immediately</button>
+              <button type="button" data-timing="schedule" id="runTimingSchedule">Schedule…</button>
+              <button type="button" data-timing="skip" id="runTimingSkip">Skip upload</button>
+            </div>
+            <p class="hint" id="runTimingHint">Dispatches to youtube-uploader with <code>upload_now</code> as soon as the video is ready.</p>
+            <div id="runScheduleFieldsMain" class="form-stack" hidden>
+              <div class="form-row-2">
+                <div>
+                  <label for="runPublishAt">Goes live (local time)</label>
+                  <input id="runPublishAt" type="datetime-local"/>
+                  <p class="hint">YouTube publishAt — video stays private until this time.</p>
+                </div>
+                <div>
+                  <label for="runUploadAt">Upload to YouTube (optional)</label>
+                  <input id="runUploadAt" type="datetime-local"/>
+                  <p class="hint">Queue pickup time. Leave blank to upload at go-live time.</p>
+                </div>
+              </div>
+            </div>
+          </div>
           <details class="advanced">
             <summary>More options</summary>
             <div class="form-stack">
@@ -3170,54 +3259,30 @@ _DASHBOARD_HTML = (
               </div>
 
               <div class="run-youtube-block">
-                <h3 class="run-youtube-title">YouTube upload</h3>
-                <p class="hint">Queue the finished video on youtube-uploader, or skip upload entirely.</p>
-                <div class="form-stack">
-                  <div class="checkbox-row">
-                    <input type="checkbox" id="runQueueYoutube" checked/>
-                    <label for="runQueueYoutube">Queue for YouTube upload when finished</label>
+                <h3 class="run-youtube-title">YouTube upload details</h3>
+                <p class="hint">Privacy, tags, and kids flag. Timing is set above.</p>
+                <div id="runYoutubeOptions" class="form-stack run-youtube-options">
+                  <div class="form-row-3">
+                    <div>
+                      <label for="runUploadPrivacy">Privacy</label>
+                      <select id="runUploadPrivacy">
+                        <option value="private" selected>Private (recommended for scheduled publish)</option>
+                        <option value="unlisted">Unlisted</option>
+                        <option value="public">Public</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="runUploadCategory">Category ID</label>
+                      <input id="runUploadCategory" value="10" placeholder="10 = Music"/>
+                    </div>
+                    <div>
+                      <label for="runUploadTags">Tags (comma-separated)</label>
+                      <input id="runUploadTags" placeholder="lofi, chill, study"/>
+                    </div>
                   </div>
-                  <div id="runYoutubeOptions" class="form-stack run-youtube-options">
-                    <div class="form-row-3">
-                      <div>
-                        <label for="runUploadPrivacy">Privacy</label>
-                        <select id="runUploadPrivacy">
-                          <option value="private" selected>Private (recommended for scheduled publish)</option>
-                          <option value="unlisted">Unlisted</option>
-                          <option value="public">Public</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label for="runUploadCategory">Category ID</label>
-                        <input id="runUploadCategory" value="10" placeholder="10 = Music"/>
-                      </div>
-                      <div>
-                        <label for="runUploadTags">Tags (comma-separated)</label>
-                        <input id="runUploadTags" placeholder="lofi, chill, study"/>
-                      </div>
-                    </div>
-                    <div class="checkbox-row">
-                      <input type="checkbox" id="runUploadSchedulePublish"/>
-                      <label for="runUploadSchedulePublish">Schedule upload / publish for a specific date &amp; time</label>
-                    </div>
-                    <div id="runScheduleFields" class="form-stack" hidden>
-                      <div class="form-row-2">
-                        <div>
-                          <label for="runPublishAt">Goes live (local time)</label>
-                          <input id="runPublishAt" type="datetime-local"/>
-                          <p class="hint">YouTube publishAt — video stays private until this time.</p>
-                        </div>
-                        <div>
-                          <label for="runUploadAt">Upload to YouTube (optional)</label>
-                          <input id="runUploadAt" type="datetime-local"/>
-                          <p class="hint">Queue pickup time. Leave blank to upload at go-live time.</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div class="checkbox-row">
-                      <input type="checkbox" id="runUploadMadeForKids"/>
-                      <label for="runUploadMadeForKids">Made for kids</label>
-                    </div>
+                  <div class="checkbox-row">
+                    <input type="checkbox" id="runUploadMadeForKids"/>
+                    <label for="runUploadMadeForKids">Made for kids</label>
                   </div>
                 </div>
               </div>
@@ -5324,15 +5389,16 @@ document.getElementById('runBtn').onclick = async () => {
   if (!channel) { alert('Select or enter a YouTube channel'); return; }
   const imagesFolder = document.getElementById('runImagesFolder').value.trim();
   if (!imagesFolder) { alert('Select a background folder'); return; }
-  const queueYoutube = document.getElementById('runQueueYoutube').checked;
-  const schedulePublish = document.getElementById('runUploadSchedulePublish').checked;
+  const timing = runYoutubeTiming();
+  const queueYoutube = timing !== 'skip';
+  const schedulePublish = timing === 'schedule';
   let publishAt = null;
   let uploadAt = null;
   if (queueYoutube && schedulePublish) {
     publishAt = localDatetimeToRfc3339(document.getElementById('runPublishAt').value);
     uploadAt = localDatetimeToRfc3339(document.getElementById('runUploadAt').value);
     if (!publishAt && !uploadAt) {
-      alert('Pick a go-live or upload date & time, or turn off scheduling');
+      alert('Pick a go-live or upload date & time, or choose “Upload immediately”');
       return;
     }
     if (!publishAt && uploadAt) publishAt = uploadAt;
@@ -5392,21 +5458,42 @@ function defaultLocalDatetimeValue(hoursAhead) {
     + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
+function runYoutubeTiming() {
+  const active = document.querySelector('.run-timing-seg button.active');
+  return active?.dataset?.timing || 'immediate';
+}
+
 function syncRunYoutubeOptions() {
-  const queueOn = document.getElementById('runQueueYoutube')?.checked;
-  const scheduleOn = document.getElementById('runUploadSchedulePublish')?.checked;
+  const timing = runYoutubeTiming();
+  const queueOn = timing !== 'skip';
+  const scheduleOn = timing === 'schedule';
   const opts = document.getElementById('runYoutubeOptions');
-  const fields = document.getElementById('runScheduleFields');
+  const fields = document.getElementById('runScheduleFieldsMain');
+  const hint = document.getElementById('runTimingHint');
   if (opts) opts.hidden = !queueOn;
-  if (fields) fields.hidden = !(queueOn && scheduleOn);
-  if (queueOn && scheduleOn) {
+  if (fields) fields.hidden = !scheduleOn;
+  if (hint) {
+    if (timing === 'immediate') {
+      hint.innerHTML = 'Dispatches to youtube-uploader with <code>upload_now</code> as soon as the video is ready.';
+    } else if (timing === 'schedule') {
+      hint.textContent = 'Queues for upload and YouTube go-live at the times you pick below.';
+    } else {
+      hint.textContent = 'Assembly only — no YouTube register after encode.';
+    }
+  }
+  if (scheduleOn) {
     const pub = document.getElementById('runPublishAt');
     if (pub && !pub.value) pub.value = defaultLocalDatetimeValue(24);
   }
 }
 
-document.getElementById('runQueueYoutube')?.addEventListener('change', syncRunYoutubeOptions);
-document.getElementById('runUploadSchedulePublish')?.addEventListener('change', syncRunYoutubeOptions);
+document.querySelectorAll('.run-timing-seg button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.run-timing-seg button').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    syncRunYoutubeOptions();
+  });
+});
 syncRunYoutubeOptions();
 document.getElementById('extendBtn').onclick = async () => {
   const btn = document.getElementById('extendBtn');

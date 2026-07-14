@@ -115,6 +115,38 @@ def test_register_youtube_upload_explicit_upload_at():
     assert captured["body"]["privacy"] == "private"
 
 
+def test_register_youtube_upload_upload_now():
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=30):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        resp = MagicMock()
+        resp.read.return_value = b'{"job_id": "mv_test", "status": "pending"}'
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        uploader_client.register_youtube_upload(
+            api_url="https://uploader.example",
+            api_key="secret",
+            channel="nappabeats",
+            title="Go live now",
+            video_uri="s3://music-assembly-data/music-video/nappabeats/mv_test/mv_test_video.mp4",
+            privacy="public",
+            publish_at="2026-08-01T18:00:00Z",
+            upload_at="2026-08-01T12:00:00Z",
+            upload_now=True,
+            no_schedule=True,
+        )
+
+    assert captured["body"]["upload_now"] is True
+    assert captured["body"]["no_schedule"] is True
+    assert captured["body"]["privacy"] == "public"
+    assert "publish_at" not in captured["body"]
+    assert "upload_at" not in captured["body"]
+
+
 def test_register_youtube_upload_requires_title():
     with pytest.raises(ValueError, match="title"):
         uploader_client.register_youtube_upload(
