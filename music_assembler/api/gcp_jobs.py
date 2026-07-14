@@ -190,6 +190,7 @@ def start_assembly_job(
     queue_youtube: bool = True,
     upload_privacy: str | None = None,
     publish_at: str | None = None,
+    upload_at: str | None = None,
     upload_tags: str | None = None,
     upload_category_id: str | None = None,
     upload_made_for_kids: bool | None = None,
@@ -220,6 +221,8 @@ def start_assembly_job(
         env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_PRIVACY", value=upload_privacy))
     if publish_at:
         env.append(run_v2.EnvVar(name="ASSEMBLY_PUBLISH_AT", value=publish_at))
+    if upload_at:
+        env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_AT", value=upload_at))
     if upload_tags:
         env.append(run_v2.EnvVar(name="ASSEMBLY_UPLOAD_TAGS", value=upload_tags))
     if upload_category_id:

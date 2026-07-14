@@ -254,6 +254,7 @@ def _maybe_queue_youtube_upload(
     print(f"    video: {video_uri}")
     upload_privacy = os.environ.get("ASSEMBLY_UPLOAD_PRIVACY", "").strip() or None
     publish_at = os.environ.get("ASSEMBLY_PUBLISH_AT", "").strip() or None
+    upload_at = os.environ.get("ASSEMBLY_UPLOAD_AT", "").strip() or None
     upload_tags_raw = os.environ.get("ASSEMBLY_UPLOAD_TAGS", "").strip()
     upload_tags = [t.strip() for t in upload_tags_raw.split(",") if t.strip()] if upload_tags_raw else None
     category_id = os.environ.get("ASSEMBLY_UPLOAD_CATEGORY_ID", "").strip() or None
@@ -272,6 +273,7 @@ def _maybe_queue_youtube_upload(
             tags=upload_tags,
             privacy=upload_privacy,
             publish_at=publish_at,
+            upload_at=upload_at,
             category_id=category_id,
             made_for_kids=made_for_kids,
         )
