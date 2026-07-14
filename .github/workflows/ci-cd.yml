@@ -65,8 +65,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      IMAGE: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/music-assembly-api
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,6 +93,8 @@ jobs:
       - name: Build and push API image
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
+          # Job-level env cannot reference ${{ env.* }}; build the image path here.
+          IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/music-assembly-api"
           IMAGE_TAGGED="${IMAGE}:${SHORT_SHA}"
 
           gcloud builds submit \
@@ -106,6 +106,7 @@ jobs:
           # Also keep :latest for manual / docs commands.
           gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest"
 
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
           echo "IMAGE_TAGGED=${IMAGE_TAGGED}" >> "$GITHUB_ENV"
           echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
 
@@ -127,5 +128,7 @@ jobs:
           curl -fsS --retry 5 --retry-delay 3 "${URL}/health"
           echo
           curl -fsS "${URL}/v1/version" || true
+          echo
+          curl -fsS "${URL}/v1/updates" || true
           echo
           echo "Deployed ${SHORT_SHA} → ${URL}"

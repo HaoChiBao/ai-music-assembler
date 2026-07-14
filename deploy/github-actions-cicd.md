@@ -68,6 +68,7 @@ Repo → **Settings → Secrets and variables → Actions →** secret name **`G
 
 - Existing Cloud Run env vars / secrets / identity are preserved; only the container image, `ASSEMBLY_BUILD_ID` (short commit SHA), and `ASSEMBLY_DEPLOYED_AT` are updated.
 - Before Cloud Build, CI runs `scripts/write_deploy_manifest.py` so the image includes recent `main` commits. The live dashboard **Updates** tab (and `GET /v1/updates`) shows that log.
+- The Artifact Registry image path is built inside the deploy step (job-level `env` cannot reference `${{ env.* }}`).
 - Images are tagged `…/music-assembly-api:<sha>` and retagged `:latest`.
 - Worker jobs (`music-assemble`, `music-extend`) are **not** auto-redeployed — update those manually when the encode/extend images change (see [cloud-run-job.md](cloud-run-job.md)).
 
