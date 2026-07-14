@@ -72,6 +72,7 @@ class ChannelSchedule:
     queue_youtube: bool = True
     upload_privacy: str = "private"
     upload_schedule_publish: bool = True
+    upload_now: bool = False
     upload_tags: str = ""
     upload_category_id: str = "10"
     upload_made_for_kids: bool = False
@@ -94,6 +95,7 @@ class ChannelSchedule:
             "queue_youtube": self.queue_youtube,
             "upload_privacy": self.upload_privacy,
             "upload_schedule_publish": self.upload_schedule_publish,
+            "upload_now": self.upload_now,
             "upload_tags": self.upload_tags,
             "upload_category_id": self.upload_category_id,
             "upload_made_for_kids": self.upload_made_for_kids,
@@ -114,6 +116,11 @@ class ChannelSchedule:
         for i in range(7):
             item = raw_days[i] if i < len(raw_days) and isinstance(raw_days[i], dict) else {}
             days.append(DaySlot.from_dict(item))
+        upload_now = bool(data.get("upload_now", False))
+        upload_schedule_publish = bool(data.get("upload_schedule_publish", True))
+        # Immediate dispatch and timed publishAt are mutually exclusive.
+        if upload_now:
+            upload_schedule_publish = False
         sched = cls(
             channel=channel,
             enabled=bool(data.get("enabled", True)),
@@ -129,7 +136,8 @@ class ChannelSchedule:
                 if str(data.get("upload_privacy") or "private").strip().lower() in VALID_UPLOAD_PRIVACY
                 else "private"
             ),
-            upload_schedule_publish=bool(data.get("upload_schedule_publish", True)),
+            upload_schedule_publish=upload_schedule_publish,
+            upload_now=upload_now,
             upload_tags=str(data.get("upload_tags") or "").strip(),
             upload_category_id=str(data.get("upload_category_id") or "10").strip() or "10",
             upload_made_for_kids=bool(data.get("upload_made_for_kids", False)),
@@ -244,7 +252,7 @@ def _normalize_upload_privacy(value: Any) -> str:
 
 def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str | None:
     """RFC3339 UTC go-live / upload pickup time from slot upload_at, or None if unscheduled."""
-    if not schedule.queue_youtube or not schedule.upload_schedule_publish:
+    if not schedule.queue_youtube or schedule.upload_now or not schedule.upload_schedule_publish:
         return None
     upload_at = slot.get("upload_at") or resolved_upload_at(
         DaySlot(
@@ -634,6 +642,7 @@ def schedules_overview(
                 "duration_min": sched.duration_min,
                 "queue_youtube": sched.queue_youtube,
                 "upload_schedule_publish": sched.upload_schedule_publish,
+                "upload_now": sched.upload_now,
                 "upload_privacy": sched.upload_privacy,
                 "resources_ready": resources.get("ready"),
                 "backgrounds_available": resources.get("backgrounds_available"),
@@ -716,6 +725,7 @@ def start_scheduled_assembly(
         extra={"schedule_slot_key": slot["slot_key"]},
     )
     publish_at = slot_publish_at_utc(slot, schedule)
+    upload_now = bool(schedule.queue_youtube and schedule.upload_now)
     result = gcp_jobs.start_assembly_job(
         settings,
         execution_id=execution_id,
@@ -726,12 +736,13 @@ def start_scheduled_assembly(
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
         queue_youtube=schedule.queue_youtube,
-        upload_privacy=schedule.upload_privacy,
-        publish_at=publish_at,
-        upload_at=publish_at,
-        upload_tags=schedule.upload_tags or None,
-        upload_category_id=schedule.upload_category_id,
-        upload_made_for_kids=schedule.upload_made_for_kids,
+        upload_privacy=schedule.upload_privacy if schedule.queue_youtube else None,
+        publish_at=None if upload_now else publish_at,
+        upload_at=None if upload_now else publish_at,
+        upload_now=upload_now,
+        upload_tags=schedule.upload_tags or None if schedule.queue_youtube else None,
+        upload_category_id=schedule.upload_category_id if schedule.queue_youtube else None,
+        upload_made_for_kids=schedule.upload_made_for_kids if schedule.queue_youtube else None,
     )
     gcp_id = result.get("gcp_execution_id")
     if gcp_id:
