@@ -84,7 +84,7 @@ class StartJobRequest(BaseModel):
         examples=["korean"],
     )
     thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["PLAYLIST"])
-    duration_min: int | None = Field(default=None, ge=15, le=300, description="Target mix length in minutes.")
+    duration_min: int | None = Field(default=None, ge=5, le=300, description="Target mix length in minutes.")
     variance_min: int | None = Field(default=None, ge=0, le=60, description="Random length variance (+/- minutes).")
     count: int = Field(default=1, ge=1, le=10, description="Parallel assembly jobs to start (one video each).")
     queue_youtube: bool = Field(
@@ -172,7 +172,7 @@ class ChannelScheduleRequest(BaseModel):
         description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
-    duration_min: int = Field(default=90, ge=15, le=300)
+    duration_min: int = Field(default=90, ge=5, le=300)
     variance_min: int = Field(default=15, ge=0, le=60)
     thumbnail_text: str | None = None
     queue_youtube: bool = True
@@ -3229,7 +3229,7 @@ _DASHBOARD_HTML = (
               <div class="form-row-3">
                 <div>
                   <label for="runDuration">Duration (min)</label>
-                  <input id="runDuration" type="number" min="15" max="300" step="1" value="90"/>
+                  <input id="runDuration" type="number" min="5" max="300" step="1" value="90"/>
                 </div>
                 <div>
                   <label for="runVariance">Variance (min)</label>
@@ -3479,7 +3479,7 @@ _DASHBOARD_HTML = (
               </div>
               <div>
                 <label for="scheduleDuration">Duration (min)</label>
-                <input id="scheduleDuration" type="number" min="15" max="300" value="90"/>
+                <input id="scheduleDuration" type="number" min="5" max="300" value="90"/>
               </div>
               <div>
                 <label for="scheduleVariance">Variance (min)</label>
@@ -4705,7 +4705,7 @@ function readScheduleVideoSettings() {
   if (!Number.isFinite(variance)) variance = 15;
   return {
     thumbnail_text: thumb || null,
-    duration_min: Math.min(300, Math.max(15, duration)),
+    duration_min: Math.min(300, Math.max(5, duration)),
     variance_min: Math.min(60, Math.max(0, variance)),
   };
 }
@@ -5341,7 +5341,7 @@ document.getElementById('runBtn').onclick = async () => {
   let varianceMin = parseInt(document.getElementById('runVariance').value, 10);
   if (!Number.isFinite(durationMin)) durationMin = 90;
   if (!Number.isFinite(varianceMin)) varianceMin = 15;
-  durationMin = Math.min(300, Math.max(15, durationMin));
+  durationMin = Math.min(300, Math.max(5, durationMin));
   varianceMin = Math.min(60, Math.max(0, varianceMin));
   setBtnLoading(btn, true, 'Starting…');
   try {
