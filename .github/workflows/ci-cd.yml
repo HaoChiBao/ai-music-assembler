@@ -1,0 +1,123 @@
+name: CI / CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GCP_PROJECT_ID: youtube-uploader-499603
+  GCP_REGION: northamerica-northeast2
+  CLOUD_RUN_SERVICE: music-assembly-api
+  ARTIFACT_REPO: music-assembler
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          # API + unit-test surface only (skip rembg/onnxruntime — not needed for pytest).
+          pip install \
+            pytest \
+            "fastapi>=0.115.0" \
+            "python-multipart>=0.0.9" \
+            "uvicorn[standard]>=0.32.0" \
+            "google-cloud-run>=0.10.0" \
+            "boto3>=1.28.0" \
+            "python-dotenv>=0.0.0" \
+            "Pillow>=10.0.0" \
+            "openai>=1.0.0" \
+            "google-genai>=1.0.0"
+          pip install --no-deps .
+
+      - name: Run tests
+        run: pytest -q
+
+  deploy:
+    name: Deploy dashboard
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/music-assembly-api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ env.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build and push API image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAGGED="${IMAGE}:${SHORT_SHA}"
+
+          gcloud builds submit \
+            --config=cloudbuild.api.yaml \
+            --substitutions="_IMAGE=${IMAGE_TAGGED}" \
+            --quiet \
+            .
+
+          # Also keep :latest for manual / docs commands.
+          gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest"
+
+          echo "IMAGE_TAGGED=${IMAGE_TAGGED}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Deploy Cloud Run service
+        run: |
+          gcloud run deploy "${{ env.CLOUD_RUN_SERVICE }}" \
+            --image="${IMAGE_TAGGED}" \
+            --region="${{ env.GCP_REGION }}" \
+            --platform=managed \
+            --quiet \
+            --update-env-vars="ASSEMBLY_BUILD_ID=${SHORT_SHA}"
+
+      - name: Smoke check
+        run: |
+          URL="$(gcloud run services describe "${{ env.CLOUD_RUN_SERVICE }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --format='value(status.url)')"
+          echo "Service URL: ${URL}"
+          curl -fsS --retry 5 --retry-delay 3 "${URL}/health"
+          echo
+          curl -fsS "${URL}/v1/version" || true
+          echo
+          echo "Deployed ${SHORT_SHA} → ${URL}"

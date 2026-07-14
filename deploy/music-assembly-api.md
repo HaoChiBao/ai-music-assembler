@@ -10,7 +10,13 @@ Lightweight Cloud Run **Service** that triggers the **Job** `music-assemble` and
 
 See [music-assembly-iam.md](music-assembly-iam.md).
 
-## Build and deploy
+## CI/CD (recommended)
+
+Pushes to **`main`** run tests, then rebuild and redeploy this service via GitHub Actions.
+
+One-time setup (GCP SA + `GCP_SA_KEY` secret): [github-actions-cicd.md](github-actions-cicd.md).
+
+## Build and deploy (manual)
 
 ```bash
 export PROJECT_ID=youtube-uploader-499603

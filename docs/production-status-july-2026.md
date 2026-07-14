@@ -81,3 +81,4 @@ Extend pipeline is **flat-only** on R2 today (`list_claimable_pre_processed_keys
 
 - Dashboard: https://music-assembly-api-q3uklh4a6a-pd.a.run.app
 - Repo: `FUTURE_PLAN.md`, `docs/r2-bucket-layout.md`, `deploy/cloud-run-job.md` (YAN-46 cron setup)
+- CI/CD: [deploy/github-actions-cicd.md](../deploy/github-actions-cicd.md) — tests on PRs; deploy dashboard on push to `main`
