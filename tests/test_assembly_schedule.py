@@ -114,6 +114,36 @@ def test_slot_publish_at_utc_uses_resolved_upload_at():
     assert slot_publish_at_utc(slot, sched) == "2026-07-14T16:00:00Z"
 
 
+def test_slot_publish_at_utc_none_when_upload_now():
+    from music_assembler.api.assembly_schedule import slot_publish_at_utc
+
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="America/New_York",
+        queue_youtube=True,
+        upload_schedule_publish=True,
+        upload_now=True,
+        default_assemble_at="11:00",
+        default_upload_at="12:00",
+        days=[DaySlot(enabled=True, assemble_at="11:00", upload_at="12:00")] + [DaySlot() for _ in range(6)],
+    )
+    slot = {"local_date": "2026-07-14", "assemble_at": "11:00", "upload_at": "12:00"}
+    assert slot_publish_at_utc(slot, sched) is None
+
+
+def test_channel_schedule_from_dict_upload_now_disables_schedule_publish():
+    sched = ChannelSchedule.from_dict(
+        {
+            "channel": "ch",
+            "upload_now": True,
+            "upload_schedule_publish": True,
+            "days": [{"enabled": True, "assemble_at": "11:00"}] + [{} for _ in range(6)],
+        }
+    )
+    assert sched.upload_now is True
+    assert sched.upload_schedule_publish is False
+
+
 def test_effective_schedule_at_keeps_future():
     from music_assembler.api.assembly_schedule import effective_schedule_at
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from music_assembler import __version__
 from music_assembler.assemble_options import normalize_channel
@@ -179,6 +179,13 @@ class ChannelScheduleRequest(BaseModel):
     queue_youtube: bool = True
     upload_privacy: str = "private"
     upload_schedule_publish: bool = True
+    upload_now: bool = Field(
+        default=False,
+        description=(
+            "When true with queue_youtube, register with uploader upload_now after assembly. "
+            "Mutually exclusive with upload_schedule_publish (timed publishAt)."
+        ),
+    )
     upload_tags: str = ""
     upload_category_id: str = "10"
     upload_made_for_kids: bool = False
@@ -202,10 +209,19 @@ class ChannelScheduleRequest(BaseModel):
             raise ValueError(f"upload_privacy must be one of {assembly_schedule.VALID_UPLOAD_PRIVACY}")
         return raw
 
+    @model_validator(mode="after")
+    def _exclusive_youtube_upload_mode(self) -> ChannelScheduleRequest:
+        if self.upload_now and self.upload_schedule_publish:
+            # Prefer immediate dispatch when both are sent.
+            self.upload_schedule_publish = False
+        return self
+
 
 def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assembly_schedule.ChannelSchedule:
     if len(body.days) != 7:
         raise HTTPException(status_code=400, detail="days must contain exactly 7 entries (Sun–Sat)")
+    upload_now = bool(body.queue_youtube and body.upload_now)
+    upload_schedule_publish = bool(body.queue_youtube and body.upload_schedule_publish and not upload_now)
     sched = assembly_schedule.ChannelSchedule(
         channel=normalize_channel(channel),
         enabled=body.enabled,
@@ -217,7 +233,8 @@ def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assemb
         thumbnail_text=body.thumbnail_text,
         queue_youtube=body.queue_youtube,
         upload_privacy=body.upload_privacy,
-        upload_schedule_publish=body.upload_schedule_publish,
+        upload_schedule_publish=upload_schedule_publish,
+        upload_now=upload_now,
         upload_tags=body.upload_tags.strip(),
         upload_category_id=body.upload_category_id.strip() or "10",
         upload_made_for_kids=body.upload_made_for_kids,
@@ -2219,6 +2236,34 @@ _DASHBOARD_HTML = (
       opacity: 0.55;
       pointer-events: none;
     }
+    .schedule-editor.is-upload-times-disabled .schedule-upload-time-control {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+    .schedule-editor.is-upload-times-disabled .schedule-day-time-grid {
+      grid-template-columns: 1fr;
+    }
+    .schedule-editor.is-upload-times-disabled .schedule-day-field--upload {
+      display: none;
+    }
+    .schedule-upload-mode {
+      margin: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .schedule-upload-mode legend {
+      padding: 0 4px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-midnight-ink);
+    }
+    .schedule-upload-mode .hint { margin: 0 0 4px 24px; }
     .schedule-section {
       border: 1px solid var(--color-stone-mist);
       border-radius: var(--radius-nav);
@@ -3501,7 +3546,7 @@ _DASHBOARD_HTML = (
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3 class="schedule-section-title">Weekly cadence</h3>
-            <p class="hint">Toggle days on (lavender). Assembly and upload run at the times you set for each enabled day.</p>
+            <p class="hint" id="scheduleCadenceHint">Toggle days on (lavender). Assembly and upload run at the times you set for each enabled day.</p>
           </div>
           <div class="schedule-section-body">
             <div class="schedule-day-bar" id="scheduleDayBar" role="group" aria-label="Weekly schedule days">
@@ -3521,7 +3566,7 @@ _DASHBOARD_HTML = (
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3 class="schedule-section-title">Defaults &amp; video</h3>
-            <p class="hint">Default upload is 1 hour after assemble. Apply defaults to all enabled days, then tweak per day above.</p>
+            <p class="hint" id="scheduleDefaultsHint">Default upload is 1 hour after assemble. Apply defaults to all enabled days, then tweak per day above.</p>
           </div>
           <div class="schedule-section-body form-stack">
             <div class="schedule-default-times">
@@ -3529,7 +3574,7 @@ _DASHBOARD_HTML = (
                 <label for="scheduleDefaultAssemble">Default assemble time</label>
                 <input type="hidden" id="scheduleDefaultAssemble" value="11:00"/>
               </div>
-              <div>
+              <div class="schedule-upload-time-control" id="scheduleDefaultUploadWrap">
                 <label for="scheduleDefaultUpload">Default upload time</label>
                 <input type="hidden" id="scheduleDefaultUpload" value="12:00"/>
               </div>
@@ -3561,14 +3606,13 @@ _DASHBOARD_HTML = (
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3 class="schedule-section-title">YouTube upload</h3>
-            <p class="hint">After assembly finishes, register the video with youtube-uploader. Use the day's <strong>upload time</strong> to auto-upload and publish.</p>
+            <p class="hint">After assembly finishes, register the video with youtube-uploader. Choose immediate dispatch, a timed go-live, or queue-only.</p>
           </div>
           <div class="schedule-section-body form-stack">
             <div class="checkbox-row">
               <input type="checkbox" id="scheduleQueueYoutube" checked/>
               <label for="scheduleQueueYoutube">Queue for YouTube after assembly</label>
             </div>
-            <p class="hint" style="margin:0 0 8px">Registers the finished video into the uploader queue. Does not upload by itself unless auto-schedule is on.</p>
             <div id="scheduleYoutubeOptions" class="form-stack run-youtube-options">
               <div class="form-row-3">
                 <div>
@@ -3588,14 +3632,24 @@ _DASHBOARD_HTML = (
                   <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
                 </div>
               </div>
-              <div class="checkbox-row">
-                <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
-                <label for="scheduleUploadSchedulePublish">Auto-upload &amp; publish at the day's upload time</label>
-              </div>
-              <p class="hint" id="scheduleUploadScheduleHint" style="margin:0">
-                Arms Cloud Scheduler for that day's upload time (same as YouTube publishAt).
-                If assembly finishes late, upload/publish defaults to 5 minutes after the video is ready.
-              </p>
+              <fieldset class="schedule-upload-mode" id="scheduleUploadMode">
+                <legend>Upload timing</legend>
+                <div class="checkbox-row">
+                  <input type="radio" name="scheduleUploadMode" id="scheduleModeImmediate" value="immediate"/>
+                  <label for="scheduleModeImmediate">Upload immediately after assembly</label>
+                </div>
+                <p class="hint">Dispatches with <code>upload_now</code> as soon as the video is ready. Day upload times are unused.</p>
+                <div class="checkbox-row">
+                  <input type="radio" name="scheduleUploadMode" id="scheduleModeScheduled" value="scheduled" checked/>
+                  <label for="scheduleModeScheduled">Auto-upload &amp; publish at the day’s upload time</label>
+                </div>
+                <p class="hint">Arms Cloud Scheduler for that day’s upload time (YouTube publishAt). Late assembly defaults to 5 minutes after ready.</p>
+                <div class="checkbox-row">
+                  <input type="radio" name="scheduleUploadMode" id="scheduleModeQueueOnly" value="queue_only"/>
+                  <label for="scheduleModeQueueOnly">Queue only — don’t auto-dispatch</label>
+                </div>
+                <p class="hint">Registers on the uploader queue for a later manual <code>/runs</code> (or other dispatch).</p>
+              </fieldset>
               <div class="checkbox-row">
                 <input type="checkbox" id="scheduleUploadMadeForKids"/>
                 <label for="scheduleUploadMadeForKids">Made for kids</label>
@@ -4716,7 +4770,7 @@ function renderScheduleDayTimes(days) {
       + '<div class="schedule-day-time-grid">'
       + '<label class="schedule-day-field"><span class="schedule-day-field-label">Assemble</span>'
       + '<input type="hidden" class="schedule-day-assemble-visible" data-day="' + i + '" value="' + esc(assembleVal) + '"></label>'
-      + '<label class="schedule-day-field"><span class="schedule-day-field-label">Upload</span>'
+      + '<label class="schedule-day-field schedule-day-field--upload schedule-upload-time-control"><span class="schedule-day-field-label">Upload</span>'
       + '<input type="hidden" class="schedule-day-upload-visible" data-day="' + i + '" value="' + esc(uploadVal) + '"></label>'
       + '</div></div>';
   }).join('');
@@ -4737,6 +4791,7 @@ function renderScheduleDayTimes(days) {
       updateScheduleSummary();
     });
   });
+  syncScheduleUploadTimingUi();
 }
 function collectScheduleDays() {
   return SCHEDULE_DAY_NAMES.map((_, i) => {
@@ -4752,11 +4807,22 @@ function collectScheduleDays() {
     return { enabled, assemble_at, upload_at };
   });
 }
+function scheduleUploadMode() {
+  const selected = document.querySelector('input[name="scheduleUploadMode"]:checked');
+  return selected?.value || 'scheduled';
+}
+function setScheduleUploadMode(mode) {
+  const value = mode === 'immediate' || mode === 'queue_only' ? mode : 'scheduled';
+  const el = document.querySelector('input[name="scheduleUploadMode"][value="' + value + '"]');
+  if (el) el.checked = true;
+}
 function readScheduleUploadSettings() {
+  const mode = scheduleUploadMode();
   return {
     queue_youtube: document.getElementById('scheduleQueueYoutube')?.checked !== false,
     upload_privacy: document.getElementById('scheduleUploadPrivacy')?.value || 'private',
-    upload_schedule_publish: document.getElementById('scheduleUploadSchedulePublish')?.checked !== false,
+    upload_schedule_publish: mode === 'scheduled',
+    upload_now: mode === 'immediate',
     upload_tags: document.getElementById('scheduleUploadTags')?.value.trim() || '',
     upload_category_id: document.getElementById('scheduleUploadCategory')?.value.trim() || '10',
     upload_made_for_kids: document.getElementById('scheduleUploadMadeForKids')?.checked || false,
@@ -4782,29 +4848,65 @@ function updateScheduleSummary() {
   const tz = document.getElementById('scheduleTimezone')?.value.trim() || 'America/New_York';
   const video = readScheduleVideoSettings();
   const upload = readScheduleUploadSettings();
+  const useUploadTimes = upload.queue_youtube && upload.upload_schedule_publish;
   const enabledDays = collectScheduleDays()
     .map((d, i) => (d.enabled
-      ? SCHEDULE_DAY_ABBR[i] + ' ' + formatTimeDisplay(d.assemble_at) + ' → ' + formatTimeDisplay(d.upload_at)
+      ? SCHEDULE_DAY_ABBR[i] + ' ' + formatTimeDisplay(d.assemble_at)
+        + (useUploadTimes ? ' → ' + formatTimeDisplay(d.upload_at) : '')
       : null))
     .filter(Boolean);
+  let youtubeLabel = 'Off';
+  if (upload.queue_youtube) {
+    if (upload.upload_now) youtubeLabel = esc(upload.upload_privacy) + ' · upload immediately after assemble';
+    else if (upload.upload_schedule_publish) youtubeLabel = esc(upload.upload_privacy) + ' · auto-upload at day upload time';
+    else youtubeLabel = esc(upload.upload_privacy) + ' · queue only (manual upload)';
+  }
   el.innerHTML =
     '<dt>Channel</dt><dd><code>' + esc(channel) + '</code></dd>'
     + '<dt>Background pool</dt><dd><code>post-processed/' + esc(folder) + '/</code></dd>'
     + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
     + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
     + '<dt>Thumbnail</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
-    + '<dt>YouTube</dt><dd>' + (upload.queue_youtube
-      ? esc(upload.upload_privacy) + (upload.upload_schedule_publish
-        ? ' · auto-upload at day upload time'
-        : ' · queue only (manual upload)')
-      : 'Off') + '</dd>'
+    + '<dt>YouTube</dt><dd>' + youtubeLabel + '</dd>'
     + '<dt>Timezone</dt><dd>' + esc(tz) + '</dd>'
     + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None — toggle days above') + '</dd>';
+}
+function syncScheduleUploadTimingUi() {
+  const queueOn = document.getElementById('scheduleQueueYoutube')?.checked !== false;
+  const mode = scheduleUploadMode();
+  const disableUploadTimes = !queueOn || mode !== 'scheduled';
+  const editor = document.getElementById('scheduleEditor');
+  if (editor) editor.classList.toggle('is-upload-times-disabled', disableUploadTimes);
+  const cadenceHint = document.getElementById('scheduleCadenceHint');
+  const defaultsHint = document.getElementById('scheduleDefaultsHint');
+  if (cadenceHint) {
+    if (!queueOn) {
+      cadenceHint.textContent = 'Toggle days on (lavender). Assembly runs at the times you set for each enabled day.';
+    } else if (mode === 'immediate') {
+      cadenceHint.textContent = 'Toggle days on (lavender). Assembly runs at each day’s time; YouTube upload starts as soon as encode finishes.';
+    } else if (mode === 'queue_only') {
+      cadenceHint.textContent = 'Toggle days on (lavender). Assembly runs at each day’s time; YouTube stays queued until you dispatch manually.';
+    } else {
+      cadenceHint.textContent = 'Toggle days on (lavender). Assembly and upload run at the times you set for each enabled day.';
+    }
+  }
+  if (defaultsHint) {
+    defaultsHint.textContent = disableUploadTimes
+      ? 'Set a default assemble time, apply it to enabled days, then tweak per day above. Upload times are unused for this YouTube mode.'
+      : 'Default upload is 1 hour after assemble. Apply defaults to all enabled days, then tweak per day above.';
+  }
+  document.querySelectorAll('.schedule-day-upload-visible, #scheduleDefaultUpload').forEach((el) => {
+    el.disabled = disableUploadTimes;
+  });
+  document.querySelectorAll('.schedule-upload-time-control .time-picker button, .schedule-upload-time-control .time-picker select, .schedule-upload-time-control .time-picker input').forEach((el) => {
+    el.disabled = disableUploadTimes;
+  });
 }
 function syncScheduleYoutubeOptions() {
   const queueOn = document.getElementById('scheduleQueueYoutube')?.checked !== false;
   const opts = document.getElementById('scheduleYoutubeOptions');
   if (opts) opts.hidden = !queueOn;
+  syncScheduleUploadTimingUi();
   updateScheduleSummary();
 }
 function syncScheduleEnabledState() {
@@ -4830,7 +4932,9 @@ function fillScheduleForm(data) {
   document.getElementById('scheduleVariance').value = data.variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
   document.getElementById('scheduleUploadPrivacy').value = data.upload_privacy || 'private';
-  document.getElementById('scheduleUploadSchedulePublish').checked = data.upload_schedule_publish !== false;
+  if (data.upload_now) setScheduleUploadMode('immediate');
+  else if (data.upload_schedule_publish === false) setScheduleUploadMode('queue_only');
+  else setScheduleUploadMode('scheduled');
   document.getElementById('scheduleUploadTags').value = data.upload_tags || '';
   document.getElementById('scheduleUploadCategory').value = data.upload_category_id || '10';
   document.getElementById('scheduleUploadMadeForKids').checked = !!data.upload_made_for_kids;
@@ -5050,7 +5154,9 @@ async function loadScheduleOverview(refresh) {
               + '<br><span class="muted">' + esc(next.at_local) + '</span>'
             : '<span class="muted">—</span>';
           const yt = row.queue_youtube
-            ? esc(row.upload_privacy) + (row.upload_schedule_publish ? ' · auto @ upload time' : ' · queue only')
+            ? esc(row.upload_privacy) + (row.upload_now
+              ? ' · upload after assemble'
+              : (row.upload_schedule_publish ? ' · auto @ upload time' : ' · queue only'))
             : 'Off';
           const rowClass = ((row.enabled ? '' : 'is-disabled ') + 'is-clickable').trim();
           return '<tr class="' + rowClass + '" data-channel="' + esc(row.channel) + '">'
@@ -5132,6 +5238,7 @@ async function loadScheduleEditor(channel) {
         thumbnail_text: '__DEFAULT_THUMBNAIL__',
         queue_youtube: true,
         upload_schedule_publish: true,
+        upload_now: false,
         upload_privacy: 'private',
         upload_category_id: '10',
         auto_extend: true,
@@ -5167,6 +5274,7 @@ async function saveSchedule() {
       queue_youtube: upload.queue_youtube,
       upload_privacy: upload.upload_privacy,
       upload_schedule_publish: upload.upload_schedule_publish,
+      upload_now: upload.upload_now,
       upload_tags: upload.upload_tags,
       upload_category_id: upload.upload_category_id,
       upload_made_for_kids: upload.upload_made_for_kids,
@@ -5574,10 +5682,16 @@ document.getElementById('scheduleApplyDefault').onclick = () => {
   });
   updateScheduleSummary();
 };
-['scheduleUploadPrivacy', 'scheduleUploadSchedulePublish', 'scheduleUploadTags', 'scheduleUploadCategory', 'scheduleUploadMadeForKids', 'scheduleQueueYoutube'].forEach(id => {
+['scheduleUploadPrivacy', 'scheduleUploadTags', 'scheduleUploadCategory', 'scheduleUploadMadeForKids', 'scheduleQueueYoutube'].forEach(id => {
   document.getElementById(id)?.addEventListener('change', () => {
     if (id === 'scheduleQueueYoutube') syncScheduleYoutubeOptions();
     else updateScheduleSummary();
+  });
+});
+document.querySelectorAll('input[name="scheduleUploadMode"]').forEach((el) => {
+  el.addEventListener('change', () => {
+    syncScheduleUploadTimingUi();
+    updateScheduleSummary();
   });
 });
 document.getElementById('scheduleQueueYoutube')?.addEventListener('change', syncScheduleYoutubeOptions);
