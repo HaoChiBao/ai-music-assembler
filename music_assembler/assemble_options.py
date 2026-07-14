@@ -161,7 +161,10 @@ def resolve_duration_bounds(
         margin = variance_sec if variance_sec is not None else DEFAULT_VARIANCE_SEC
         if margin < 0:
             raise ValueError("variance must be non-negative.")
-        return DurationBounds(min_sec=duration_sec - margin, max_sec=duration_sec + margin)
+        # Keep a positive floor so short targets (e.g. 15±15) do not yield min_sec <= 0.
+        lo = max(1.0, duration_sec - margin)
+        hi = max(lo, duration_sec + margin)
+        return DurationBounds(min_sec=lo, max_sec=hi)
 
     return DurationBounds(
         min_sec=DEFAULT_TARGET_SEC - DEFAULT_VARIANCE_SEC,

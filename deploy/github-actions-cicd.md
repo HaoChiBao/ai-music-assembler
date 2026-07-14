@@ -54,7 +54,8 @@ Needed roles (already granted for both repos when WIF was wired):
 - Before Cloud Build, CI runs `scripts/write_deploy_manifest.py` so the image includes recent `main` commits. The live dashboard **Updates** tab (and `GET /v1/updates`) shows that log.
 - The Artifact Registry image path is built inside the deploy step (job-level `env` cannot reference `${{ env.* }}`).
 - Images are tagged `…/music-assembly-api:<sha>` and retagged `:latest`.
-- Worker jobs (`music-assemble`, `music-extend`) are **not** auto-redeployed — update those manually when the encode/extend images change (see [cloud-run-job.md](cloud-run-job.md)).
+- The assemble worker job (`music-assemble`) is rebuilt from `Dockerfile` / `cloudbuild.assemble.yaml` and updated on each `main` deploy (image tagged by commit SHA; `task-timeout` set for long mixes up to 5 hours).
+- The extend worker (`music-extend`) is **not** auto-redeployed — update that manually when the extend image changes (see [cloud-run-job.md](cloud-run-job.md)).
 
 ## Manual fallback
 

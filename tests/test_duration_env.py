@@ -38,6 +38,17 @@ class TestDurationEnv(unittest.TestCase):
         os.environ["ASSEMBLY_VARIANCE_MIN"] = "-1"
         self.assertEqual(duration_bounds_from_env(), (None, None))
 
+    def test_short_duration_variance_keeps_positive_min(self) -> None:
+        """15±15 must not produce min_sec <= 0 (DurationBounds rejects that)."""
+        bounds = resolve_duration_bounds(
+            duration_sec=15 * 60,
+            variance_sec=15 * 60,
+            min_sec=None,
+            max_sec=None,
+        )
+        self.assertGreater(bounds.min_sec, 0)
+        self.assertEqual(bounds.max_sec, 30 * 60)
+
 
 if __name__ == "__main__":
     unittest.main()

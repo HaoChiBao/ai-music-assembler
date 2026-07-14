@@ -3229,11 +3229,11 @@ _DASHBOARD_HTML = (
               <div class="form-row-3">
                 <div>
                   <label for="runDuration">Duration (min)</label>
-                  <input id="runDuration" type="number" min="15" max="300" value="90"/>
+                  <input id="runDuration" type="number" min="15" max="300" step="1" value="90"/>
                 </div>
                 <div>
                   <label for="runVariance">Variance (min)</label>
-                  <input id="runVariance" type="number" value="15"/>
+                  <input id="runVariance" type="number" min="0" max="60" step="1" value="15"/>
                 </div>
                 <div>
                   <label for="runCount">Parallel jobs</label>
@@ -4699,12 +4699,14 @@ function readScheduleUploadSettings() {
 }
 function readScheduleVideoSettings() {
   const thumb = document.getElementById('scheduleThumb')?.value.trim() || '';
-  const duration = parseInt(document.getElementById('scheduleDuration')?.value, 10);
-  const variance = parseInt(document.getElementById('scheduleVariance')?.value, 10);
+  let duration = parseInt(document.getElementById('scheduleDuration')?.value, 10);
+  let variance = parseInt(document.getElementById('scheduleVariance')?.value, 10);
+  if (!Number.isFinite(duration)) duration = 90;
+  if (!Number.isFinite(variance)) variance = 15;
   return {
     thumbnail_text: thumb || null,
-    duration_min: Number.isFinite(duration) ? duration : 90,
-    variance_min: Number.isFinite(variance) ? variance : 15,
+    duration_min: Math.min(300, Math.max(15, duration)),
+    variance_min: Math.min(60, Math.max(0, variance)),
   };
 }
 function updateScheduleSummary() {
@@ -5335,14 +5337,20 @@ document.getElementById('runBtn').onclick = async () => {
     }
     if (!publishAt && uploadAt) publishAt = uploadAt;
   }
+  let durationMin = parseInt(document.getElementById('runDuration').value, 10);
+  let varianceMin = parseInt(document.getElementById('runVariance').value, 10);
+  if (!Number.isFinite(durationMin)) durationMin = 90;
+  if (!Number.isFinite(varianceMin)) varianceMin = 15;
+  durationMin = Math.min(300, Math.max(15, durationMin));
+  varianceMin = Math.min(60, Math.max(0, varianceMin));
   setBtnLoading(btn, true, 'Starting…');
   try {
     const payload = {
       channel: channel,
       images_folder: imagesFolder,
       thumbnail_text: document.getElementById('runThumb').value,
-      duration_min: parseInt(document.getElementById('runDuration').value, 10),
-      variance_min: parseInt(document.getElementById('runVariance').value, 10),
+      duration_min: durationMin,
+      variance_min: varianceMin,
       count: parseInt(document.getElementById('runCount').value, 10),
       queue_youtube: queueYoutube,
     };

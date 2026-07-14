@@ -22,7 +22,7 @@ gcloud builds submit --tag "$IMAGE" .
 gcloud run jobs create music-assemble \
   --image "$IMAGE" \
   --region "$REGION" \
-  --task-timeout 10800 \
+  --task-timeout 28800 \
   --memory 16Gi \
   --cpu 4 \
   --max-retries 0 \
@@ -32,7 +32,7 @@ gcloud run jobs create music-assemble \
 
 Store R2 keys in [Secret Manager](https://cloud.google.com/secret-manager) and reference them as above, or pass env vars directly for a first test.
 
-`task-timeout` is in seconds (10800 = 3 hours) for long ffmpeg encodes.
+`task-timeout` is in seconds (28800 = 8 hours) for long ffmpeg encodes. Mix targets go up to **300 minutes (5 hours)** via `ASSEMBLY_DURATION_MIN`; wall-clock encode time needs headroom beyond the mix length.
 
 ## 4. Run once
 
