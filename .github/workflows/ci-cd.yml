@@ -98,11 +98,32 @@ jobs:
           IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/music-assembly-api"
           IMAGE_TAGGED="${IMAGE}:${SHORT_SHA}"
 
-          gcloud builds submit \
+          # Async + poll: deploy SA often cannot stream default Cloud Build logs,
+          # which makes a successful `gcloud builds submit` exit non-zero.
+          BUILD_ID="$(gcloud builds submit \
             --config=cloudbuild.api.yaml \
             --substitutions="_IMAGE=${IMAGE_TAGGED}" \
-            --quiet \
-            .
+            --async \
+            --format='value(id)' \
+            .)"
+          echo "Cloud Build id: ${BUILD_ID}"
+          for _ in $(seq 1 90); do
+            STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+            echo "status=${STATUS}"
+            case "${STATUS}" in
+              SUCCESS) break ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+                gcloud builds describe "${BUILD_ID}" --format='yaml(status,failureInfo,logUrl)'
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+          if [[ "${STATUS}" != "SUCCESS" ]]; then
+            echo "Build did not succeed: ${STATUS}"
+            exit 1
+          fi
 
           # Also keep :latest for manual / docs commands.
           gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest"
