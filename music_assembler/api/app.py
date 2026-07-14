@@ -94,6 +94,28 @@ class StartJobRequest(BaseModel):
             "(default on; set false to skip). Requires UPLOADER_API_* on the music-assemble worker."
         ),
     )
+    upload_privacy: str = Field(
+        default="private",
+        description="YouTube privacy when queued (private | unlisted | public). Scheduled publish forces private until go-live.",
+    )
+    upload_schedule_publish: bool = Field(
+        default=False,
+        description=(
+            "When true with publish_at, register with YouTube publishAt (and upload_at). "
+            "When false, queue for immediate upload using upload_privacy."
+        ),
+    )
+    publish_at: str | None = Field(
+        default=None,
+        description="RFC3339 UTC go-live time. Also used as upload_at when upload_at is omitted.",
+    )
+    upload_at: str | None = Field(
+        default=None,
+        description="RFC3339 UTC queue pickup time for youtube-uploader. Defaults to publish_at when omitted.",
+    )
+    upload_tags: str = Field(default="", description="Comma-separated YouTube tags for the queued job.")
+    upload_category_id: str = Field(default="10", description="YouTube category id (10 = Music).")
+    upload_made_for_kids: bool = Field(default=False, description="YouTube madeForKids flag on the queued job.")
 
     @field_validator("channel")
     @classmethod
@@ -106,6 +128,14 @@ class StartJobRequest(BaseModel):
     @classmethod
     def _validate_images_folder(cls, value: str) -> str:
         return _normalize_images_folder(value)
+
+    @field_validator("upload_privacy")
+    @classmethod
+    def _validate_start_upload_privacy(cls, value: str) -> str:
+        raw = value.strip().lower()
+        if raw not in assembly_schedule.VALID_UPLOAD_PRIVACY:
+            raise ValueError(f"upload_privacy must be one of {assembly_schedule.VALID_UPLOAD_PRIVACY}")
+        return raw
 
 
 class StartExtendRequest(BaseModel):
@@ -534,6 +564,18 @@ def start_job(
     if body.images_folder != category:
         _invalidate_category_cache(body.images_folder)
 
+    publish_at = (body.publish_at or "").strip() or None
+    upload_at = (body.upload_at or "").strip() or None
+    if body.queue_youtube and body.upload_schedule_publish:
+        if not publish_at and not upload_at:
+            raise HTTPException(
+                status_code=400,
+                detail="publish_at or upload_at is required when upload_schedule_publish is true",
+            )
+    elif not body.upload_schedule_publish:
+        publish_at = None
+        upload_at = None
+
     jobs: list[dict[str, Any]] = []
     assigned_gcp: set[str] = set()
     for _ in range(body.count):
@@ -569,6 +611,12 @@ def start_job(
                 duration_min=body.duration_min,
                 variance_min=body.variance_min,
                 queue_youtube=body.queue_youtube,
+                upload_privacy=body.upload_privacy if body.queue_youtube else None,
+                publish_at=publish_at if body.queue_youtube else None,
+                upload_at=upload_at if body.queue_youtube else None,
+                upload_tags=body.upload_tags.strip() or None if body.queue_youtube else None,
+                upload_category_id=body.upload_category_id.strip() or None if body.queue_youtube else None,
+                upload_made_for_kids=body.upload_made_for_kids if body.queue_youtube else None,
                 exclude_gcp_ids=assigned_gcp,
             )
         except Exception as e:
@@ -1912,6 +1960,21 @@ _DASHBOARD_HTML = (
     }
     .checkbox-row input { width: auto; margin: 2px 0 0; }
     .checkbox-row label { margin: 0; font-size: 14px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    .run-youtube-block {
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      padding: 14px;
+      background: color-mix(in srgb, var(--color-white) 70%, var(--color-cream-paper));
+    }
+    .run-youtube-title {
+      margin: 0 0 4px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+    }
+    .run-youtube-options[hidden],
+    #runScheduleFields[hidden] { display: none !important; }
+    .run-youtube-options { margin-top: 4px; }
     .schedule-page {
       display: flex;
       flex-direction: column;
@@ -3104,10 +3167,60 @@ _DASHBOARD_HTML = (
                 <input id="runChannelCustom" placeholder="e.g. nappabeats"/>
                 <p class="hint">Overrides the dropdown when set.</p>
               </div>
-              <div class="checkbox-row">
-                <input type="checkbox" id="runQueueYoutube" checked/>
-                <label for="runQueueYoutube">Queue for YouTube upload when finished</label>
+
+              <div class="run-youtube-block">
+                <h3 class="run-youtube-title">YouTube upload</h3>
+                <p class="hint">Queue the finished video on youtube-uploader, or skip upload entirely.</p>
+                <div class="form-stack">
+                  <div class="checkbox-row">
+                    <input type="checkbox" id="runQueueYoutube" checked/>
+                    <label for="runQueueYoutube">Queue for YouTube upload when finished</label>
+                  </div>
+                  <div id="runYoutubeOptions" class="form-stack run-youtube-options">
+                    <div class="form-row-3">
+                      <div>
+                        <label for="runUploadPrivacy">Privacy</label>
+                        <select id="runUploadPrivacy">
+                          <option value="private" selected>Private (recommended for scheduled publish)</option>
+                          <option value="unlisted">Unlisted</option>
+                          <option value="public">Public</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label for="runUploadCategory">Category ID</label>
+                        <input id="runUploadCategory" value="10" placeholder="10 = Music"/>
+                      </div>
+                      <div>
+                        <label for="runUploadTags">Tags (comma-separated)</label>
+                        <input id="runUploadTags" placeholder="lofi, chill, study"/>
+                      </div>
+                    </div>
+                    <div class="checkbox-row">
+                      <input type="checkbox" id="runUploadSchedulePublish"/>
+                      <label for="runUploadSchedulePublish">Schedule upload / publish for a specific date &amp; time</label>
+                    </div>
+                    <div id="runScheduleFields" class="form-stack" hidden>
+                      <div class="form-row-2">
+                        <div>
+                          <label for="runPublishAt">Goes live (local time)</label>
+                          <input id="runPublishAt" type="datetime-local"/>
+                          <p class="hint">YouTube publishAt — video stays private until this time.</p>
+                        </div>
+                        <div>
+                          <label for="runUploadAt">Upload to YouTube (optional)</label>
+                          <input id="runUploadAt" type="datetime-local"/>
+                          <p class="hint">Queue pickup time. Leave blank to upload at go-live time.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="checkbox-row">
+                      <input type="checkbox" id="runUploadMadeForKids"/>
+                      <label for="runUploadMadeForKids">Made for kids</label>
+                    </div>
+                  </div>
+                </div>
               </div>
+
               <div>
                 <label for="runThumb">Thumbnail text</label>
                 <input id="runThumb" value="PLAYLIST"/>
@@ -5187,17 +5300,42 @@ document.getElementById('runBtn').onclick = async () => {
   if (!channel) { alert('Select or enter a YouTube channel'); return; }
   const imagesFolder = document.getElementById('runImagesFolder').value.trim();
   if (!imagesFolder) { alert('Select a background folder'); return; }
+  const queueYoutube = document.getElementById('runQueueYoutube').checked;
+  const schedulePublish = document.getElementById('runUploadSchedulePublish').checked;
+  let publishAt = null;
+  let uploadAt = null;
+  if (queueYoutube && schedulePublish) {
+    publishAt = localDatetimeToRfc3339(document.getElementById('runPublishAt').value);
+    uploadAt = localDatetimeToRfc3339(document.getElementById('runUploadAt').value);
+    if (!publishAt && !uploadAt) {
+      alert('Pick a go-live or upload date & time, or turn off scheduling');
+      return;
+    }
+    if (!publishAt && uploadAt) publishAt = uploadAt;
+  }
   setBtnLoading(btn, true, 'Starting…');
   try {
-    const r = await api('/v1/assembly/jobs', { method: 'POST', body: JSON.stringify({
+    const payload = {
       channel: channel,
       images_folder: imagesFolder,
       thumbnail_text: document.getElementById('runThumb').value,
       duration_min: parseInt(document.getElementById('runDuration').value, 10),
       variance_min: parseInt(document.getElementById('runVariance').value, 10),
       count: parseInt(document.getElementById('runCount').value, 10),
-      queue_youtube: document.getElementById('runQueueYoutube').checked,
-    })});
+      queue_youtube: queueYoutube,
+    };
+    if (queueYoutube) {
+      payload.upload_privacy = document.getElementById('runUploadPrivacy').value || 'private';
+      payload.upload_schedule_publish = schedulePublish;
+      payload.upload_tags = document.getElementById('runUploadTags').value || '';
+      payload.upload_category_id = document.getElementById('runUploadCategory').value || '10';
+      payload.upload_made_for_kids = document.getElementById('runUploadMadeForKids').checked;
+      if (schedulePublish) {
+        if (publishAt) payload.publish_at = publishAt;
+        if (uploadAt) payload.upload_at = uploadAt;
+      }
+    }
+    const r = await api('/v1/assembly/jobs', { method: 'POST', body: JSON.stringify(payload)});
     showResultBlock('runResult', JSON.stringify(r, null, 2));
     ui.tabsLoaded.videos = false;
     ui.lastStatsAt = 0;
@@ -5208,6 +5346,38 @@ document.getElementById('runBtn').onclick = async () => {
   } catch (e) { showResultBlock('runResult', String(e)); }
   setBtnLoading(btn, false);
 };
+
+function localDatetimeToRfc3339(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function defaultLocalDatetimeValue(hoursAhead) {
+  const d = new Date(Date.now() + (hoursAhead || 24) * 3600 * 1000);
+  d.setMinutes(0, 0, 0);
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+    + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+function syncRunYoutubeOptions() {
+  const queueOn = document.getElementById('runQueueYoutube')?.checked;
+  const scheduleOn = document.getElementById('runUploadSchedulePublish')?.checked;
+  const opts = document.getElementById('runYoutubeOptions');
+  const fields = document.getElementById('runScheduleFields');
+  if (opts) opts.hidden = !queueOn;
+  if (fields) fields.hidden = !(queueOn && scheduleOn);
+  if (queueOn && scheduleOn) {
+    const pub = document.getElementById('runPublishAt');
+    if (pub && !pub.value) pub.value = defaultLocalDatetimeValue(24);
+  }
+}
+
+document.getElementById('runQueueYoutube')?.addEventListener('change', syncRunYoutubeOptions);
+document.getElementById('runUploadSchedulePublish')?.addEventListener('change', syncRunYoutubeOptions);
+syncRunYoutubeOptions();
 document.getElementById('extendBtn').onclick = async () => {
   const btn = document.getElementById('extendBtn');
   setBtnLoading(btn, true, 'Starting…');

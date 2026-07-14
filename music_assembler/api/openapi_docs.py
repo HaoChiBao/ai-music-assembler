@@ -252,7 +252,9 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "Set ``count`` > 1 to render multiple videos in parallel (separate Cloud Run executions).\n\n"
             "By default ``queue_youtube`` is **true**: each finished video is registered on the "
             "youtube-uploader pending queue after R2 upload (worker needs ``UPLOADER_API_URL`` + "
-            "``UPLOADER_API_KEY``). Set ``queue_youtube: false`` to skip."
+            "``UPLOADER_API_KEY``). Set ``queue_youtube: false`` to skip.\n\n"
+            "Optional YouTube flags: ``upload_privacy``, ``upload_schedule_publish``, ``publish_at`` / "
+            "``upload_at`` (RFC3339 UTC), ``upload_tags``, ``upload_category_id``, ``upload_made_for_kids``."
         ),
         "request_example": {
             "category": "korean",
@@ -263,6 +265,9 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "variance_min": 15,
             "count": 1,
             "queue_youtube": True,
+            "upload_privacy": "private",
+            "upload_schedule_publish": True,
+            "publish_at": "2026-08-01T16:00:00Z",
         },
         "response_example": {
             "api_execution_id": "asm_20260623_120000_a1b2c3d4",
