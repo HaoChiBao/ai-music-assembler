@@ -255,13 +255,15 @@ def _maybe_queue_youtube_upload(
     upload_privacy = os.environ.get("ASSEMBLY_UPLOAD_PRIVACY", "").strip() or None
     publish_at = os.environ.get("ASSEMBLY_PUBLISH_AT", "").strip() or None
     upload_at = os.environ.get("ASSEMBLY_UPLOAD_AT", "").strip() or None
+    upload_now_raw = os.environ.get("ASSEMBLY_UPLOAD_NOW", "").strip().lower()
+    upload_now = upload_now_raw in ("1", "true", "yes", "on")
     # Late-assembly guard: if the planned go-live/upload time already passed while
     # encoding, bump to a few minutes after finish so Cloud Scheduler can still arm.
     try:
         from music_assembler.api.assembly_schedule import effective_schedule_at
     except ImportError:  # pragma: no cover
         effective_schedule_at = None  # type: ignore[assignment,misc]
-    if effective_schedule_at is not None:
+    if not upload_now and effective_schedule_at is not None:
         adjusted_publish = effective_schedule_at(publish_at)
         adjusted_upload = effective_schedule_at(upload_at or publish_at)
         if publish_at and adjusted_publish and adjusted_publish != publish_at:
@@ -275,11 +277,16 @@ def _maybe_queue_youtube_upload(
             )
         publish_at = adjusted_publish
         upload_at = adjusted_upload
+    elif upload_now:
+        publish_at = None
+        upload_at = None
     upload_tags_raw = os.environ.get("ASSEMBLY_UPLOAD_TAGS", "").strip()
     upload_tags = [t.strip() for t in upload_tags_raw.split(",") if t.strip()] if upload_tags_raw else None
     category_id = os.environ.get("ASSEMBLY_UPLOAD_CATEGORY_ID", "").strip() or None
     made_for_kids_raw = os.environ.get("ASSEMBLY_UPLOAD_MADE_FOR_KIDS", "").strip().lower()
     made_for_kids = made_for_kids_raw in ("1", "true", "yes", "on") if made_for_kids_raw else None
+    if upload_now:
+        print("    mode: upload_now (dispatch immediately after register)")
     try:
         response = register_youtube_upload(
             api_url=api_url,
@@ -296,6 +303,8 @@ def _maybe_queue_youtube_upload(
             upload_at=upload_at,
             category_id=category_id,
             made_for_kids=made_for_kids,
+            upload_now=upload_now,
+            no_schedule=upload_now,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"warning: YouTube queue register failed: {exc}", file=sys.stderr)
