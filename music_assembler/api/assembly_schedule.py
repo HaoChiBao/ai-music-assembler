@@ -24,6 +24,7 @@ _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 DEFAULT_WINDOW_MINUTES = 15
 DEFAULT_UPLOAD_OFFSET_MINUTES = 60
 DEFAULT_ASSEMBLE_AT = "11:00"
+DEFAULT_LATE_UPLOAD_GRACE_MINUTES = 5
 VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
 SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
@@ -35,19 +36,26 @@ class DaySlot:
     upload_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"enabled": self.enabled, "assemble_at": self.assemble_at}
-        if self.upload_at:
-            out["upload_at"] = self.upload_at
+        out: dict[str, Any] = {
+            "enabled": self.enabled,
+            "assemble_at": self.assemble_at,
+        }
+        # Always persist upload_at so weekly slots keep an explicit go-live time.
+        out["upload_at"] = self.upload_at or upload_time_after_assemble(self.assemble_at)
         return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> DaySlot:
         if not data:
             return cls()
+        assemble_at = _normalize_time(str(data.get("assemble_at") or DEFAULT_ASSEMBLE_AT))
+        upload_at = _normalize_time_optional(data.get("upload_at"))
+        if not upload_at:
+            upload_at = upload_time_after_assemble(assemble_at)
         return cls(
             enabled=bool(data.get("enabled")),
-            assemble_at=_normalize_time(str(data.get("assemble_at") or DEFAULT_ASSEMBLE_AT)),
-            upload_at=_normalize_time_optional(data.get("upload_at")),
+            assemble_at=assemble_at,
+            upload_at=upload_at,
         )
 
 
@@ -106,7 +114,7 @@ class ChannelSchedule:
         for i in range(7):
             item = raw_days[i] if i < len(raw_days) and isinstance(raw_days[i], dict) else {}
             days.append(DaySlot.from_dict(item))
-        return cls(
+        sched = cls(
             channel=channel,
             enabled=bool(data.get("enabled", True)),
             timezone=str(data.get("timezone") or "America/New_York").strip(),
@@ -131,6 +139,8 @@ class ChannelSchedule:
             auto_extend=bool(data.get("auto_extend", True)),
             days=days,
         )
+        ensure_schedule_upload_times(sched)
+        return sched
 
 
 def resolved_upload_at(day: DaySlot, schedule: ChannelSchedule) -> str:
@@ -168,6 +178,63 @@ def upload_time_after_assemble(
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def ensure_schedule_upload_times(schedule: ChannelSchedule) -> bool:
+    """Fill missing ``default_upload_at`` / per-day ``upload_at``. Returns True if mutated."""
+    changed = False
+    if not schedule.default_upload_at:
+        schedule.default_upload_at = upload_time_after_assemble(schedule.default_assemble_at)
+        changed = True
+    for day in schedule.days:
+        assemble_at = day.assemble_at or schedule.default_assemble_at
+        if not day.assemble_at:
+            day.assemble_at = assemble_at
+            changed = True
+        if not day.upload_at:
+            day.upload_at = schedule.default_upload_at or upload_time_after_assemble(assemble_at)
+            changed = True
+    return changed
+
+
+def parse_schedule_timestamp(value: str | None) -> datetime | None:
+    """Parse an RFC3339 / ISO timestamp to aware UTC datetime."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def effective_schedule_at(
+    value: str | None,
+    *,
+    now_utc: datetime | None = None,
+    grace_minutes: int = DEFAULT_LATE_UPLOAD_GRACE_MINUTES,
+) -> str | None:
+    """Return scheduled UTC time, or ``now + grace`` when the planned time is already past.
+
+    Protects late assemblies: if encode finishes after the day's upload/publish time,
+    bump both upload_at and publish_at to a few minutes after finish instead of
+    registering a due/past time (or leaving the job unscheduled).
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    when = parse_schedule_timestamp(raw)
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    if when is None or when <= now:
+        return (now + timedelta(minutes=max(0, int(grace_minutes)))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _normalize_upload_privacy(value: Any) -> str:
     raw = str(value or "private").strip().lower()
     if raw not in VALID_UPLOAD_PRIVACY:
@@ -176,10 +243,17 @@ def _normalize_upload_privacy(value: Any) -> str:
 
 
 def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str | None:
-    """RFC3339 UTC publish time from slot upload_at, or None for immediate upload."""
+    """RFC3339 UTC go-live / upload pickup time from slot upload_at, or None if unscheduled."""
     if not schedule.queue_youtube or not schedule.upload_schedule_publish:
         return None
-    upload_at = slot.get("upload_at")
+    upload_at = slot.get("upload_at") or resolved_upload_at(
+        DaySlot(
+            enabled=True,
+            assemble_at=str(slot.get("assemble_at") or schedule.default_assemble_at),
+            upload_at=None,
+        ),
+        schedule,
+    )
     if not upload_at:
         return None
     local_date = date.fromisoformat(str(slot["local_date"]))
@@ -256,25 +330,39 @@ def save_schedules_document(client, bucket: str, doc: dict[str, Any]) -> None:
     )
 
 
-def list_schedules(client, bucket: str) -> list[ChannelSchedule]:
+def list_schedules(client, bucket: str, *, persist_backfill: bool = False) -> list[ChannelSchedule]:
     doc = load_schedules_document(client, bucket)
     rows = []
+    mutated = False
     for item in doc.get("schedules") or []:
         if isinstance(item, dict) and item.get("channel"):
-            rows.append(ChannelSchedule.from_dict(item))
+            sched = ChannelSchedule.from_dict(item)
+            # from_dict already ensures times in memory; detect missing fields in stored JSON.
+            if ensure_schedule_upload_times(sched):
+                mutated = True
+            if not item.get("default_upload_at") or any(
+                isinstance(d, dict) and d.get("enabled") and not d.get("upload_at")
+                for d in (item.get("days") or [])
+            ):
+                mutated = True
+            rows.append(sched)
     rows.sort(key=lambda s: s.channel.lower())
+    if persist_backfill and mutated:
+        doc["schedules"] = [s.to_dict() for s in rows]
+        save_schedules_document(client, bucket, doc)
     return rows
 
 
 def get_schedule(client, bucket: str, channel: str) -> ChannelSchedule | None:
     channel = channel.strip()
-    for sched in list_schedules(client, bucket):
+    for sched in list_schedules(client, bucket, persist_backfill=True):
         if sched.channel == channel:
             return sched
     return None
 
 
 def upsert_schedule(client, bucket: str, schedule: ChannelSchedule) -> ChannelSchedule:
+    ensure_schedule_upload_times(schedule)
     doc = load_schedules_document(client, bucket)
     schedules = [ChannelSchedule.from_dict(s) for s in doc.get("schedules") or [] if isinstance(s, dict)]
     replaced = False
@@ -502,7 +590,7 @@ def schedules_overview(
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Aggregate all channel schedules, upcoming slots, and recent cron ledger entries."""
-    schedules = list_schedules(client, bucket)
+    schedules = list_schedules(client, bucket, persist_backfill=True)
     channels: list[dict[str, Any]] = []
     all_upcoming: list[dict[str, Any]] = []
     inventory_cache: dict[str, dict[str, int]] = {}
@@ -640,6 +728,7 @@ def start_scheduled_assembly(
         queue_youtube=schedule.queue_youtube,
         upload_privacy=schedule.upload_privacy,
         publish_at=publish_at,
+        upload_at=publish_at,
         upload_tags=schedule.upload_tags or None,
         upload_category_id=schedule.upload_category_id,
         upload_made_for_kids=schedule.upload_made_for_kids,
@@ -676,7 +765,7 @@ def run_due_schedules(
 ) -> dict[str, Any]:
     """Evaluate all schedules; start assembly or record skip/defer."""
     results: list[dict[str, Any]] = []
-    for schedule in list_schedules(client, bucket):
+    for schedule in list_schedules(client, bucket, persist_backfill=True):
         for slot in due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes):
             entry = read_ledger(client, bucket, slot["slot_key"])
             if ledger_is_terminal(entry):
