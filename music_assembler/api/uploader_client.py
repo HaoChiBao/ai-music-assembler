@@ -133,11 +133,16 @@ def register_youtube_upload(
     tags: list[str] | None = None,
     privacy: str | None = None,
     publish_at: str | None = None,
+    upload_at: str | None = None,
     category_id: str | None = None,
     made_for_kids: bool | None = None,
     timeout: float = 30,
 ) -> dict[str, Any]:
-    """Register a finished video with ``POST /v1/channels/{channel}/jobs/register``."""
+    """Register a finished video with ``POST /v1/channels/{channel}/jobs/register``.
+
+    When ``publish_at`` is set and ``upload_at`` is omitted, ``upload_at`` defaults to
+    the same timestamp so the uploader can auto-dispatch at go-live time.
+    """
     base = api_url.strip().rstrip("/")
     channel_ref = channel.strip()
     if not base or not api_key.strip():
@@ -165,6 +170,9 @@ def register_youtube_upload(
         payload["privacy"] = privacy.strip().lower()
     if publish_at:
         payload["publish_at"] = publish_at.strip()
+    effective_upload_at = (upload_at or publish_at or "").strip()
+    if effective_upload_at:
+        payload["upload_at"] = effective_upload_at
     if category_id:
         payload["category_id"] = str(category_id).strip()
     if made_for_kids is not None:
