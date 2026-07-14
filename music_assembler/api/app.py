@@ -33,6 +33,7 @@ from music_assembler.api import asset_upload
 from music_assembler.api import r2_catalog
 from music_assembler.api import uploader_client
 from music_assembler.api.cache import dashboard_cache
+from music_assembler.api.deploy_manifest import load_deploy_manifest
 from music_assembler.api.media import stream_r2_object
 from music_assembler.api.openapi_docs import install_openapi_docs
 from music_assembler.api.progress_store import read_progress_json, write_meta_json, write_progress_json
@@ -236,6 +237,22 @@ def _version_info() -> dict[str, str]:
         "revision": revision,
         "build": build,
         "dashboard": f"v{__version__} · {revision}",
+        "deployed_at": (os.environ.get("ASSEMBLY_DEPLOYED_AT") or "").strip(),
+    }
+
+
+def _updates_payload() -> dict[str, Any]:
+    info = _version_info()
+    manifest = load_deploy_manifest()
+    return {
+        **info,
+        "ref": manifest.get("ref"),
+        "git_sha": manifest.get("git_sha"),
+        "git_sha_short": manifest.get("git_sha_short") or info.get("build"),
+        "generated_at": manifest.get("generated_at") or info.get("deployed_at") or None,
+        "repo_url": manifest.get("repo_url"),
+        "commits": manifest.get("commits") or [],
+        "source": manifest.get("source", "file"),
     }
 
 
@@ -409,6 +426,12 @@ def api_version() -> dict[str, str]:
     return _version_info()
 
 
+@app.get("/v1/updates")
+def api_updates() -> dict[str, Any]:
+    """Deployed build identity + commits baked into this Cloud Run revision."""
+    return _updates_payload()
+
+
 @app.get("/v1/capabilities")
 def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
     return {
@@ -450,6 +473,8 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/categories/{category}/inventory",
             "GET /v1/background-folders",
             "GET /v1/channels",
+            "GET /v1/updates",
+            "GET /v1/version",
             "GET /v1/cron/assembly-health",
             "POST /v1/cron/assembly-health",
             "GET /v1/schedules",
@@ -2604,7 +2629,63 @@ _DASHBOARD_HTML = (
       font-family: ui-monospace, monospace;
       font-size: 11px;
       white-space: nowrap;
+      cursor: pointer;
+      background: none;
+      border: none;
+      padding: 0;
     }
+    .obs-version:hover { color: var(--color-midnight-ink); text-decoration: underline; }
+    .updates-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 12px 20px;
+      margin: 16px 0 24px;
+    }
+    .updates-meta dt {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-graphite-veil);
+      margin: 0;
+    }
+    .updates-meta dd {
+      margin: 2px 0 0;
+      font-family: ui-monospace, monospace;
+      font-size: 13px;
+      color: var(--color-midnight-ink);
+      word-break: break-all;
+    }
+    .updates-hint {
+      margin: 0 0 16px;
+      color: var(--color-smoke);
+      font-size: 13px;
+      max-width: 52rem;
+    }
+    .updates-commits {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .updates-commits th {
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-graphite-veil);
+      padding: 8px 10px 8px 0;
+      border-bottom: 1px solid var(--color-stone-mist);
+    }
+    .updates-commits td {
+      padding: 10px 10px 10px 0;
+      border-bottom: 1px solid var(--color-stone-mist);
+      vertical-align: top;
+      font-size: 13px;
+    }
+    .updates-commits code {
+      font-size: 12px;
+    }
+    .updates-commits a { color: var(--color-deep-forest-teal); }
     .obs-hit { color: var(--color-deep-forest-teal); font-weight: 600; }
     .obs-miss { color: var(--color-graphite-veil); }
     .list-row {
@@ -2963,6 +3044,7 @@ _DASHBOARD_HTML = (
     <button type="button" class="main-tab" data-section="create">New run</button>
     <button type="button" class="main-tab" data-section="library">Library</button>
     <button type="button" class="main-tab" data-section="schedule">Schedule</button>
+    <button type="button" class="main-tab" data-section="updates">Updates</button>
   </nav>
 
   <section id="sectionJobs" class="main-section active">
@@ -3382,6 +3464,28 @@ _DASHBOARD_HTML = (
     </div>
   </section>
 
+  <section id="sectionUpdates" class="main-section">
+    <div class="card section-card">
+      <h2 class="panel-title">Hosted site updates</h2>
+      <p class="card-desc">What is running on this Cloud Run revision — compare the build SHA to <code>main</code> on GitHub to confirm you are up to date.</p>
+      <dl class="updates-meta" id="updatesMeta">
+        <div><dt>Version</dt><dd id="updVersion">—</dd></div>
+        <div><dt>Build</dt><dd id="updBuild">—</dd></div>
+        <div><dt>Revision</dt><dd id="updRevision">—</dd></div>
+        <div><dt>Branch</dt><dd id="updRef">—</dd></div>
+        <div><dt>Deployed</dt><dd id="updDeployed">—</dd></div>
+      </dl>
+      <p class="updates-hint" id="updatesHint">Loading…</p>
+      <h3 class="schedule-section-title">Commits in this build</h3>
+      <div class="job-table-wrap">
+        <table class="updates-commits">
+          <thead><tr><th>SHA</th><th>Date</th><th>Subject</th></tr></thead>
+          <tbody id="updatesCommits"><tr><td colspan="3" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <div id="modal" class="modal" aria-hidden="true">
     <div class="modal-inner">
       <button type="button" class="modal-close" id="modalClose" aria-label="Close">×</button>
@@ -3397,7 +3501,7 @@ _DASHBOARD_HTML = (
     <span>Last fetch: <strong id="obsLastMs">—</strong></span>
     <span>Cache: <span class="obs-hit" id="obsHits">0 hit</span> / <span class="obs-miss" id="obsMiss">0 miss</span></span>
     <span id="obsRunning" style="display:none">● jobs running</span>
-    <span class="obs-version" id="obsVersion" title="API version and Cloud Run revision">v…</span>
+    <button type="button" class="obs-version" id="obsVersion" title="Open Updates — API version and Cloud Run revision">v…</button>
   </div>
 
 <script>
@@ -3663,9 +3767,47 @@ async function loadVersionInfo() {
     const label = v.dashboard || ('v' + (v.version || '?') + ' · ' + (v.revision || 'local'));
     const el = document.getElementById('obsVersion');
     el.textContent = label;
-    el.title = 'music-assembly-api ' + label + (v.build && v.build !== v.revision ? ' (build ' + v.build + ')' : '');
+    el.title = 'Open Updates — music-assembly-api ' + label + (v.build && v.build !== v.revision ? ' (build ' + v.build + ')' : '');
   } catch (_) {
     document.getElementById('obsVersion').textContent = 'v?';
+  }
+}
+async function loadUpdatesPanel() {
+  const tbody = document.getElementById('updatesCommits');
+  const hint = document.getElementById('updatesHint');
+  tbody.innerHTML = '<tr><td colspan="3">' + loadingBlockHtml('Loading update log…') + '</td></tr>';
+  try {
+    const u = await api('/v1/updates');
+    document.getElementById('updVersion').textContent = u.version || '—';
+    document.getElementById('updBuild').textContent = u.build || u.git_sha_short || '—';
+    document.getElementById('updRevision').textContent = u.revision || '—';
+    document.getElementById('updRef').textContent = u.ref || '—';
+    document.getElementById('updDeployed').textContent = u.generated_at || u.deployed_at || '—';
+    const repo = (u.repo_url || 'https://github.com/HaoChiBao/ai-music-assembler').replace(/\/$/, '');
+    const build = u.build || u.git_sha_short || '';
+    const tip = (u.commits && u.commits[0] && u.commits[0].short) || u.git_sha_short || '';
+    if (u.source === 'missing' || !(u.commits && u.commits.length)) {
+      hint.textContent = 'No deploy manifest in this image (local or pre-CI build). After merging to main, the Deploy dashboard job bakes recent commits into /v1/updates.';
+    } else if (build && tip && build === tip) {
+      hint.innerHTML = 'This revision matches tip commit <code>' + esc(tip) + '</code>. On GitHub, confirm <a href="' + esc(repo) + '/commits/main" target="_blank" rel="noopener">main</a> starts with the same SHA.';
+    } else {
+      hint.innerHTML = 'Live build <code>' + esc(build || '?') + '</code>. Commit list is from the image manifest' + (tip ? ' (tip <code>' + esc(tip) + '</code>)' : '') + '.';
+    }
+    const rows = (u.commits || []).map(c => {
+      const sha = esc(c.short || (c.sha || '').slice(0, 7) || '?');
+      const shaLink = c.sha
+        ? '<a href="' + esc(repo) + '/commit/' + esc(c.sha) + '" target="_blank" rel="noopener"><code>' + sha + '</code></a>'
+        : '<code>' + sha + '</code>';
+      let subject = esc(c.subject || '');
+      if (c.pr) {
+        subject += ' <a href="' + esc(repo) + '/pull/' + esc(String(c.pr)) + '" target="_blank" rel="noopener">#' + esc(String(c.pr)) + '</a>';
+      }
+      return '<tr><td>' + shaLink + '</td><td class="muted">' + esc(c.date || '—') + '</td><td>' + subject + '</td></tr>';
+    });
+    tbody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="3" class="muted">No commits recorded.</td></tr>';
+  } catch (e) {
+    hint.textContent = String(e);
+    tbody.innerHTML = '<tr><td colspan="3" class="muted">Failed to load.</td></tr>';
   }
 }
 function renderObsPanel() {
@@ -4859,6 +5001,9 @@ function showMainSection(section) {
     const ch = document.getElementById('scheduleChannel').value.trim();
     loadScheduleEditor(ch);
   }
+  if (section === 'updates') {
+    loadUpdatesPanel();
+  }
 }
 async function loadLibraryTab(btn) {
   if (!btn) return;
@@ -4879,6 +5024,7 @@ async function loadLibraryTab(btn) {
 document.querySelectorAll('.main-tab').forEach(btn => {
   btn.onclick = () => showMainSection(btn.dataset.section);
 });
+document.getElementById('obsVersion').onclick = () => showMainSection('updates');
 document.querySelectorAll('.job-tab').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('.job-tab').forEach(b => b.classList.remove('active'));
