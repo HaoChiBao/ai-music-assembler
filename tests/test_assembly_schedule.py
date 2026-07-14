@@ -10,6 +10,7 @@ from music_assembler.api.assembly_schedule import (
     DaySlot,
     apply_default_times,
     due_slots,
+    ensure_schedule_upload_times,
     ledger_is_terminal,
     preview_schedule,
     slot_key,
@@ -78,6 +79,53 @@ def test_ledger_is_terminal():
     assert ledger_is_terminal({"status": "succeeded"})
     assert not ledger_is_terminal({"status": "skipped"})
     assert not ledger_is_terminal(None)
+
+
+def test_ensure_schedule_upload_times_fills_missing():
+    sched = ChannelSchedule(
+        channel="ch",
+        default_assemble_at="11:00",
+        default_upload_at=None,
+        days=[DaySlot(enabled=True, assemble_at="11:00", upload_at=None)] + [DaySlot() for _ in range(6)],
+    )
+    assert ensure_schedule_upload_times(sched) is True
+    assert sched.default_upload_at == "12:00"
+    assert sched.days[0].upload_at == "12:00"
+
+
+def test_slot_publish_at_utc_uses_resolved_upload_at():
+    from music_assembler.api.assembly_schedule import slot_publish_at_utc
+
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="America/New_York",
+        queue_youtube=True,
+        upload_schedule_publish=True,
+        default_assemble_at="11:00",
+        default_upload_at="12:00",
+        days=[DaySlot(enabled=True, assemble_at="11:00", upload_at=None)] + [DaySlot() for _ in range(6)],
+    )
+    ensure_schedule_upload_times(sched)
+    slot = {
+        "local_date": "2026-07-14",
+        "assemble_at": "11:00",
+        "upload_at": sched.days[0].upload_at,
+    }
+    assert slot_publish_at_utc(slot, sched) == "2026-07-14T16:00:00Z"
+
+
+def test_effective_schedule_at_keeps_future():
+    from music_assembler.api.assembly_schedule import effective_schedule_at
+
+    now = datetime(2026, 7, 14, 15, 0, tzinfo=timezone.utc)
+    assert effective_schedule_at("2026-07-14T16:00:00Z", now_utc=now) == "2026-07-14T16:00:00Z"
+
+
+def test_effective_schedule_at_bumps_past_by_grace():
+    from music_assembler.api.assembly_schedule import effective_schedule_at
+
+    now = datetime(2026, 7, 14, 16, 10, tzinfo=timezone.utc)
+    assert effective_schedule_at("2026-07-14T16:00:00Z", now_utc=now, grace_minutes=5) == "2026-07-14T16:15:00Z"
 
 
 def test_preview_schedule_returns_future_slots():

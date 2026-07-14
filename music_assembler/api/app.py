@@ -233,6 +233,7 @@ def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assemb
             assemble_at=body.default_assemble_at,
             upload_at=body.default_upload_at,
         )
+    assembly_schedule.ensure_schedule_upload_times(sched)
     return sched
 
 
@@ -3495,38 +3496,45 @@ _DASHBOARD_HTML = (
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3 class="schedule-section-title">YouTube upload</h3>
-            <p class="hint">Queue uploads after assembly and control publish timing on YouTube.</p>
+            <p class="hint">After assembly finishes, register the video with youtube-uploader. Use the day's <strong>upload time</strong> to auto-upload and publish.</p>
           </div>
           <div class="schedule-section-body form-stack">
             <div class="checkbox-row">
               <input type="checkbox" id="scheduleQueueYoutube" checked/>
-              <label for="scheduleQueueYoutube">Upload to YouTube when assembly finishes</label>
+              <label for="scheduleQueueYoutube">Queue for YouTube after assembly</label>
             </div>
-            <div class="form-row-3">
-              <div>
-                <label for="scheduleUploadPrivacy">Privacy</label>
-                <select id="scheduleUploadPrivacy">
-                  <option value="private">Private (recommended for scheduled publish)</option>
-                  <option value="unlisted">Unlisted</option>
-                  <option value="public">Public</option>
-                </select>
+            <p class="hint" style="margin:0 0 8px">Registers the finished video into the uploader queue. Does not upload by itself unless auto-schedule is on.</p>
+            <div id="scheduleYoutubeOptions" class="form-stack run-youtube-options">
+              <div class="form-row-3">
+                <div>
+                  <label for="scheduleUploadPrivacy">Privacy</label>
+                  <select id="scheduleUploadPrivacy">
+                    <option value="private">Private (recommended for scheduled publish)</option>
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public">Public</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="scheduleUploadCategory">Category ID</label>
+                  <input id="scheduleUploadCategory" value="10" placeholder="10 = Music"/>
+                </div>
+                <div>
+                  <label for="scheduleUploadTags">Tags (comma-separated)</label>
+                  <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
+                </div>
               </div>
-              <div>
-                <label for="scheduleUploadCategory">Category ID</label>
-                <input id="scheduleUploadCategory" value="10" placeholder="10 = Music"/>
+              <div class="checkbox-row">
+                <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
+                <label for="scheduleUploadSchedulePublish">Auto-upload &amp; publish at the day's upload time</label>
               </div>
-              <div>
-                <label for="scheduleUploadTags">Tags (comma-separated)</label>
-                <input id="scheduleUploadTags" placeholder="lofi, chill, study"/>
+              <p class="hint" id="scheduleUploadScheduleHint" style="margin:0">
+                Arms Cloud Scheduler for that day's upload time (same as YouTube publishAt).
+                If assembly finishes late, upload/publish defaults to 5 minutes after the video is ready.
+              </p>
+              <div class="checkbox-row">
+                <input type="checkbox" id="scheduleUploadMadeForKids"/>
+                <label for="scheduleUploadMadeForKids">Made for kids</label>
               </div>
-            </div>
-            <div class="checkbox-row">
-              <input type="checkbox" id="scheduleUploadSchedulePublish" checked/>
-              <label for="scheduleUploadSchedulePublish">Schedule YouTube publish at upload time</label>
-            </div>
-            <div class="checkbox-row">
-              <input type="checkbox" id="scheduleUploadMadeForKids"/>
-              <label for="scheduleUploadMadeForKids">Made for kids</label>
             </div>
           </div>
         </section>
@@ -4718,9 +4726,19 @@ function updateScheduleSummary() {
     + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
     + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
     + '<dt>Thumbnail</dt><dd>' + esc(video.thumbnail_text || '(none)') + '</dd>'
-    + '<dt>YouTube</dt><dd>' + (upload.queue_youtube ? esc(upload.upload_privacy) + (upload.upload_schedule_publish ? ' @ upload time' : ' immediate') : 'Off') + '</dd>'
+    + '<dt>YouTube</dt><dd>' + (upload.queue_youtube
+      ? esc(upload.upload_privacy) + (upload.upload_schedule_publish
+        ? ' · auto-upload at day upload time'
+        : ' · queue only (manual upload)')
+      : 'Off') + '</dd>'
     + '<dt>Timezone</dt><dd>' + esc(tz) + '</dd>'
     + '<dt>Active days</dt><dd>' + (enabledDays.length ? esc(enabledDays.join(' · ')) : 'None — toggle days above') + '</dd>';
+}
+function syncScheduleYoutubeOptions() {
+  const queueOn = document.getElementById('scheduleQueueYoutube')?.checked !== false;
+  const opts = document.getElementById('scheduleYoutubeOptions');
+  if (opts) opts.hidden = !queueOn;
+  updateScheduleSummary();
 }
 function syncScheduleEnabledState() {
   const editor = document.getElementById('scheduleEditor');
@@ -4751,6 +4769,7 @@ function fillScheduleForm(data) {
   document.getElementById('scheduleUploadMadeForKids').checked = !!data.upload_made_for_kids;
   document.getElementById('scheduleAutoExtend').checked = data.auto_extend !== false;
   syncScheduleEnabledState();
+  syncScheduleYoutubeOptions();
   renderScheduleDays(data.days || defaultScheduleDays());
   updateScheduleSummary();
 }
@@ -4964,7 +4983,7 @@ async function loadScheduleOverview(refresh) {
               + '<br><span class="muted">' + esc(next.at_local) + '</span>'
             : '<span class="muted">—</span>';
           const yt = row.queue_youtube
-            ? esc(row.upload_privacy) + (row.upload_schedule_publish ? ' @ publish' : ' immediate')
+            ? esc(row.upload_privacy) + (row.upload_schedule_publish ? ' · auto @ upload time' : ' · queue only')
             : 'Off';
           const rowClass = ((row.enabled ? '' : 'is-disabled ') + 'is-clickable').trim();
           return '<tr class="' + rowClass + '" data-channel="' + esc(row.channel) + '">'
@@ -5045,6 +5064,9 @@ async function loadScheduleEditor(channel) {
         variance_min: 15,
         thumbnail_text: '__DEFAULT_THUMBNAIL__',
         queue_youtube: true,
+        upload_schedule_publish: true,
+        upload_privacy: 'private',
+        upload_category_id: '10',
         auto_extend: true,
         days: defaultScheduleDays(),
       };
@@ -5458,8 +5480,12 @@ document.getElementById('scheduleApplyDefault').onclick = () => {
   updateScheduleSummary();
 };
 ['scheduleUploadPrivacy', 'scheduleUploadSchedulePublish', 'scheduleUploadTags', 'scheduleUploadCategory', 'scheduleUploadMadeForKids', 'scheduleQueueYoutube'].forEach(id => {
-  document.getElementById(id)?.addEventListener('change', updateScheduleSummary);
+  document.getElementById(id)?.addEventListener('change', () => {
+    if (id === 'scheduleQueueYoutube') syncScheduleYoutubeOptions();
+    else updateScheduleSummary();
+  });
 });
+document.getElementById('scheduleQueueYoutube')?.addEventListener('change', syncScheduleYoutubeOptions);
 document.getElementById('scheduleDelete').onclick = async () => {
   const channel = document.getElementById('scheduleChannel').value.trim();
   if (!channel || !confirm('Delete schedule for ' + channel + '?')) return;
