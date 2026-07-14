@@ -968,7 +968,7 @@ def dashboard_stats(
         cfg = r2_config_from_env(category=cat)
         return {
             "category": cat,
-            "inventory": r2_catalog.category_inventory(client, bucket, cat),
+            "inventory": r2_catalog.dashboard_inventory(client, bucket, cat),
             "extend_pending": count_pending_r2_sources(client, cfg, force=False),
         }
 
@@ -1154,7 +1154,7 @@ def dashboard_snapshot(
         def load_stats() -> dict[str, Any]:
             cfg = r2_config_from_env(category=cat)
             return {
-                "inventory": r2_catalog.category_inventory(client, bucket, cat),
+                "inventory": r2_catalog.dashboard_inventory(client, bucket, cat),
                 "extend_pending": count_pending_r2_sources(client, cfg, force=False),
             }
 
@@ -3699,9 +3699,12 @@ function updateStatsStrip() {
 function applyInventory(d) {
   const inv = d.inventory || {};
   document.getElementById('inventory').textContent = JSON.stringify(inv, null, 2);
-  setStat('statPostProcessed', inv['post-processed']);
-  setStat('statMusic', inv.music ?? inv['music']);
-  setStat('statVideos', inv['music-video']);
+  setStat(
+    'statPostProcessed',
+    inv.backgrounds_ready ?? inv['post-processed'] ?? inv.backgrounds_available
+  );
+  setStat('statMusic', inv.music_mp3s ?? inv.music ?? inv['music']);
+  setStat('statVideos', inv.music_videos ?? inv['music-video']);
   if (typeof d.extend_pending === 'number') {
     setStat('statExtendPending', d.extend_pending);
     document.getElementById('extendPending').textContent = d.extend_pending;
