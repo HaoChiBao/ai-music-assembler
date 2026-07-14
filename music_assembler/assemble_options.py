@@ -117,6 +117,33 @@ def parse_duration(value: str) -> float:
     return total
 
 
+def duration_bounds_from_env() -> tuple[float | None, float | None]:
+    """Read ``ASSEMBLY_DURATION_MIN`` / ``ASSEMBLY_VARIANCE_MIN`` (minutes) as seconds.
+
+    Cloud Run jobs set these via the control plane; CLI flags take precedence when set.
+    Returns ``(duration_sec, variance_sec)`` with ``None`` for missing/invalid values.
+    """
+    duration_sec: float | None = None
+    variance_sec: float | None = None
+    raw_duration = os.environ.get("ASSEMBLY_DURATION_MIN", "").strip()
+    if raw_duration:
+        try:
+            minutes = float(raw_duration)
+            if minutes > 0:
+                duration_sec = minutes * 60.0
+        except ValueError:
+            pass
+    raw_variance = os.environ.get("ASSEMBLY_VARIANCE_MIN", "").strip()
+    if raw_variance:
+        try:
+            minutes = float(raw_variance)
+            if minutes >= 0:
+                variance_sec = minutes * 60.0
+        except ValueError:
+            pass
+    return duration_sec, variance_sec
+
+
 def resolve_duration_bounds(
     *,
     duration_sec: float | None,

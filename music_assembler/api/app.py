@@ -82,8 +82,8 @@ class StartJobRequest(BaseModel):
         description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
-    thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["OMYO"])
-    duration_min: int | None = Field(default=None, ge=15, le=240, description="Target mix length in minutes.")
+    thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["PLAYLIST"])
+    duration_min: int | None = Field(default=None, ge=15, le=300, description="Target mix length in minutes.")
     variance_min: int | None = Field(default=None, ge=0, le=60, description="Random length variance (+/- minutes).")
     count: int = Field(default=1, ge=1, le=10, description="Parallel assembly jobs to start (one video each).")
     queue_youtube: bool = Field(
@@ -141,7 +141,7 @@ class ChannelScheduleRequest(BaseModel):
         description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
-    duration_min: int = Field(default=90, ge=15, le=240)
+    duration_min: int = Field(default=90, ge=15, le=300)
     variance_min: int = Field(default=15, ge=0, le=60)
     thumbnail_text: str | None = None
     queue_youtube: bool = True
@@ -3028,12 +3028,12 @@ _DASHBOARD_HTML = (
               </div>
               <div>
                 <label for="runThumb">Thumbnail text</label>
-                <input id="runThumb" value="OMYO"/>
+                <input id="runThumb" value="PLAYLIST"/>
               </div>
               <div class="form-row-3">
                 <div>
                   <label for="runDuration">Duration (min)</label>
-                  <input id="runDuration" type="number" value="90"/>
+                  <input id="runDuration" type="number" min="15" max="300" value="90"/>
                 </div>
                 <div>
                   <label for="runVariance">Variance (min)</label>
@@ -3283,7 +3283,7 @@ _DASHBOARD_HTML = (
               </div>
               <div>
                 <label for="scheduleDuration">Duration (min)</label>
-                <input id="scheduleDuration" type="number" min="15" max="240" value="90"/>
+                <input id="scheduleDuration" type="number" min="15" max="300" value="90"/>
               </div>
               <div>
                 <label for="scheduleVariance">Variance (min)</label>
