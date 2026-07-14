@@ -6,7 +6,8 @@ Windows and anywhere Python is available.
 Bucket layout: see ``docs/r2-bucket-layout.md``.
 
 Required ``.env`` keys: ``CLOUDFLARE_R2_*`` and ``ASSEMBLY_CATEGORY`` (or folder flags).
-Optional: ``THUMBNAIL_TEXT``, ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` for YouTube metadata.
+Optional: ``THUMBNAIL_TEXT``, ``ASSEMBLY_DURATION_MIN`` / ``ASSEMBLY_VARIANCE_MIN``,
+``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` for YouTube metadata.
 Optional: ``--queue-youtube`` / ``ASSEMBLY_QUEUE_YOUTUBE`` to register on the youtube-uploader
 pending queue after R2 upload (needs ``UPLOADER_API_URL`` + ``UPLOADER_API_KEY``).
 """
@@ -28,6 +29,7 @@ from music_assembler import __version__
 from music_assembler.assemble_options import (
     add_duration_arguments,
     add_r2_folder_arguments,
+    duration_bounds_from_env,
     resolve_duration_bounds,
     resolve_folder_args,
     resolve_r2_assembly_prefixes,
@@ -312,9 +314,17 @@ def main(argv: list[str] | None = None) -> int:
         output_folder=output_folder,
         channel=channel,
     )
+    duration_sec = args.duration
+    variance_sec = args.variance
+    if duration_sec is None or variance_sec is None:
+        env_duration_sec, env_variance_sec = duration_bounds_from_env()
+        if duration_sec is None:
+            duration_sec = env_duration_sec
+        if variance_sec is None:
+            variance_sec = env_variance_sec
     duration = resolve_duration_bounds(
-        duration_sec=args.duration,
-        variance_sec=args.variance,
+        duration_sec=duration_sec,
+        variance_sec=variance_sec,
         min_sec=args.min_sec,
         max_sec=args.max_sec,
     )
