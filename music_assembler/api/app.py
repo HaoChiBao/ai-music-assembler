@@ -2983,6 +2983,27 @@ _DASHBOARD_HTML = (
     .asset-upload-status { margin-top: 10px; font-size: 14px; }
     .asset-upload-status.ok { color: var(--color-deep-forest-teal); }
     .asset-upload-status.err { color: #9b2c2c; }
+    .asset-upload-progress {
+      display: none;
+      margin-top: 12px;
+    }
+    .asset-upload-progress.active { display: block; }
+    .asset-upload-progress .bar {
+      height: 10px;
+      margin-top: 6px;
+    }
+    .asset-upload-progress-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--color-smoke);
+    }
+    .asset-upload-progress-pct {
+      font-variant-numeric: tabular-nums;
+      color: var(--color-midnight-ink);
+      font-weight: 600;
+    }
     .modal {
       position: fixed;
       inset: 0;
@@ -3461,7 +3482,7 @@ _DASHBOARD_HTML = (
 
     <div id="panelAssets" class="panel card">
       <h2>Background images</h2>
-      <p class="card-desc">Browse R2 pools by folder. Upload multiple images at once to Cloudflare R2.</p>
+      <p class="card-desc">Browse R2 pools by folder. Upload hundreds of images in batches to Cloudflare R2 (jpg, png, webp).</p>
       <label class="asset-folder-label" id="assetFolderWrap" hidden>Background folder
         <select id="assetImagesFolder"><option value="">Loading…</option></select>
       </label>
@@ -3486,6 +3507,15 @@ _DASHBOARD_HTML = (
           <button type="button" class="btn-primary" id="assetUploadBtn">Upload to R2</button>
         </div>
         <p class="asset-upload-hint" id="assetUploadHint">Uploads to <code>pre-processed/{category}/</code> for extend.</p>
+        <div id="assetUploadProgress" class="asset-upload-progress" aria-hidden="true">
+          <div class="asset-upload-progress-meta">
+            <span id="assetUploadProgressLabel">Preparing…</span>
+            <span class="asset-upload-progress-pct" id="assetUploadProgressPct">0%</span>
+          </div>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="assetUploadProgressBar">
+            <span id="assetUploadProgressFill" style="width:0%"></span>
+          </div>
+        </div>
         <div id="assetUploadStatus" class="asset-upload-status" aria-live="polite"></div>
       </div>
       <div id="assetList"><p class="muted">Select a pool above to load filenames.</p></div>
@@ -4510,6 +4540,186 @@ async function loadAssetList() {
   ui.tabsLoaded.assets = true;
 }
 
+/** Cloud Run HTTP/1 max request body is 32 MiB — pack by estimated wire size under that. */
+const ASSET_UPLOAD_MAX_FILES = 50;
+const ASSET_UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const ASSET_UPLOAD_MAX_REQUEST_BYTES = 28 * 1024 * 1024;
+const ASSET_UPLOAD_FORM_OVERHEAD = 4096;
+const ASSET_UPLOAD_PART_OVERHEAD = 512;
+
+function setAssetUploadProgress(pct, label) {
+  const wrap = document.getElementById('assetUploadProgress');
+  const fill = document.getElementById('assetUploadProgressFill');
+  const bar = document.getElementById('assetUploadProgressBar');
+  const pctEl = document.getElementById('assetUploadProgressPct');
+  const labelEl = document.getElementById('assetUploadProgressLabel');
+  if (!wrap) return;
+  const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+  wrap.classList.add('active');
+  wrap.setAttribute('aria-hidden', 'false');
+  if (fill) fill.style.width = clamped + '%';
+  if (bar) bar.setAttribute('aria-valuenow', String(clamped));
+  if (pctEl) pctEl.textContent = clamped + '%';
+  if (labelEl && label != null) labelEl.textContent = label;
+}
+
+function hideAssetUploadProgress() {
+  const wrap = document.getElementById('assetUploadProgress');
+  if (!wrap) return;
+  wrap.classList.remove('active');
+  wrap.setAttribute('aria-hidden', 'true');
+}
+
+function estimateAssetUploadWireBytes(files) {
+  let total = ASSET_UPLOAD_FORM_OVERHEAD;
+  for (const file of files) {
+    total += file.size + ASSET_UPLOAD_PART_OVERHEAD + (file.name ? file.name.length : 0);
+  }
+  return total;
+}
+
+function packAssetUploadBatches(fileList) {
+  const batches = [];
+  const skipped = [];
+  let current = [];
+  for (const file of fileList) {
+    if (file.size > ASSET_UPLOAD_MAX_FILE_BYTES) {
+      skipped.push({
+        name: file.name,
+        error: 'File exceeds ' + (ASSET_UPLOAD_MAX_FILE_BYTES / (1024 * 1024)) + ' MB limit',
+      });
+      continue;
+    }
+    const next = current.concat(file);
+    const wouldExceed =
+      current.length > 0 &&
+      (current.length >= ASSET_UPLOAD_MAX_FILES ||
+        estimateAssetUploadWireBytes(next) > ASSET_UPLOAD_MAX_REQUEST_BYTES);
+    if (wouldExceed) {
+      batches.push(current);
+      current = [];
+    }
+    current.push(file);
+  }
+  if (current.length) batches.push(current);
+  return { batches, skipped };
+}
+
+function formatUploadError(status, text) {
+  const raw = (text || '').trim();
+  if (status === 413 || /Request Entity Too Large/i.test(raw)) {
+    return 'Request too large for Cloud Run (HTTP 413). Files should be auto-batched under 28 MB — retry, or upload fewer at once.';
+  }
+  if (raw.startsWith('{')) {
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j.detail === 'string') return j.detail;
+      if (Array.isArray(j.detail)) {
+        return j.detail.map(function (d) {
+          return d.msg || (typeof d === 'string' ? d : JSON.stringify(d));
+        }).join('; ');
+      }
+      if (typeof j.message === 'string') return j.message;
+    } catch (_) { /* fall through */ }
+  }
+  if (/<\s*html/i.test(raw)) {
+    const title = raw.match(/<title>([^<]+)<\/title>/i);
+    return ((title && title[1].trim()) || 'Upload failed') + ' (HTTP ' + status + ')';
+  }
+  return raw || ('Upload failed (HTTP ' + status + ')');
+}
+
+function postAssetUploadBatch(fd, onProgress) {
+  return new Promise(function (resolve, reject) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/v1/assets/upload');
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = function () {
+      const text = xhr.responseText || '';
+      if (xhr.status === 401) {
+        const err = new Error('Session expired');
+        err.status = 401;
+        reject(err);
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const err = new Error(formatUploadError(xhr.status, text));
+        err.status = xhr.status;
+        err.body = text;
+        reject(err);
+        return;
+      }
+      try {
+        resolve(JSON.parse(text));
+      } catch (_) {
+        reject(new Error('Invalid upload response'));
+      }
+    };
+    xhr.onerror = function () { reject(new Error('Network error during upload')); };
+    xhr.onabort = function () { reject(new Error('Upload aborted')); };
+    xhr.send(fd);
+  });
+}
+
+function buildAssetUploadFormData(batch, imagesFolder, overwrite) {
+  const fd = new FormData();
+  fd.append('pool', ui.assetPool);
+  fd.append('category', cat());
+  if (imagesFolder) fd.append('images_folder', imagesFolder);
+  if (overwrite) fd.append('overwrite', 'true');
+  for (const file of batch) fd.append('files', file);
+  return fd;
+}
+
+function mergeUploadResults(a, b) {
+  return {
+    count: (a.count || 0) + (b.count || 0),
+    errors: [].concat(a.errors || [], b.errors || []),
+    images_folder: b.images_folder || a.images_folder || null,
+    uploaded: [].concat(a.uploaded || [], b.uploaded || []),
+  };
+}
+
+async function uploadAssetBatchWithRetry(batch, imagesFolder, overwrite, onProgress) {
+  try {
+    return await postAssetUploadBatch(
+      buildAssetUploadFormData(batch, imagesFolder, overwrite),
+      onProgress
+    );
+  } catch (e) {
+    if (e && e.status === 413 && batch.length > 1) {
+      const mid = Math.ceil(batch.length / 2);
+      const first = batch.slice(0, mid);
+      const second = batch.slice(mid);
+      let firstResult = { count: 0, errors: [], uploaded: [], images_folder: null };
+      try {
+        firstResult = await uploadAssetBatchWithRetry(first, imagesFolder, overwrite, function (loaded, total) {
+          const ratio = total > 0 ? loaded / total : 0;
+          onProgress(ratio * estimateAssetUploadWireBytes(first), estimateAssetUploadWireBytes(batch));
+        });
+        const secondResult = await uploadAssetBatchWithRetry(second, imagesFolder, overwrite, function (loaded, total) {
+          const ratio = total > 0 ? loaded / total : 0;
+          const firstDone = estimateAssetUploadWireBytes(first);
+          onProgress(firstDone + ratio * estimateAssetUploadWireBytes(second), estimateAssetUploadWireBytes(batch));
+        });
+        return mergeUploadResults(firstResult, secondResult);
+      } catch (splitErr) {
+        const nested = splitErr.partialResult;
+        if (firstResult && firstResult.count) {
+          splitErr.partialResult = nested
+            ? mergeUploadResults(firstResult, nested)
+            : firstResult;
+        }
+        throw splitErr;
+      }
+    }
+    throw e;
+  }
+}
+
 async function uploadAssetFiles() {
   const input = document.getElementById('assetUploadInput');
   const statusEl = document.getElementById('assetUploadStatus');
@@ -4528,60 +4738,134 @@ async function uploadAssetFiles() {
     }
     return;
   }
-  const fd = new FormData();
-  fd.append('pool', ui.assetPool);
-  fd.append('category', cat());
+
+  let imagesFolder = null;
   if (ui.assetPool === 'post-processed') {
-    const folder = uploadTargetImagesFolder();
-    if (!folder) {
+    imagesFolder = uploadTargetImagesFolder();
+    if (!imagesFolder) {
       if (statusEl) {
         statusEl.className = 'asset-upload-status err';
         statusEl.textContent = 'Select or type a background folder for post-processed uploads.';
       }
       return;
     }
-    fd.append('images_folder', folder);
   }
-  if (document.getElementById('assetUploadOverwrite')?.checked) {
-    fd.append('overwrite', 'true');
+  const overwrite = !!document.getElementById('assetUploadOverwrite')?.checked;
+  const { batches, skipped } = packAssetUploadBatches(Array.from(input.files));
+  if (!batches.length) {
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status err';
+      statusEl.textContent = skipped.length
+        ? 'No files under the 20 MB limit. ' + skipped.length + ' skipped.'
+        : 'Choose one or more images first.';
+    }
+    return;
   }
-  for (const file of input.files) fd.append('files', file);
+
+  const totalFiles = batches.reduce(function (n, b) { return n + b.length; }, 0);
+  const totalBytes = batches.reduce(function (n, b) {
+    return n + b.reduce(function (s, f) { return s + f.size; }, 0);
+  }, 0);
+  let uploadedCount = 0;
+  let allErrors = skipped.slice();
+  let completedBytes = 0;
+  let filesCompleted = 0;
+  let lastFolder = imagesFolder;
 
   setBtnLoading(btn, true, 'Uploading…');
   if (statusEl) {
     statusEl.className = 'asset-upload-status';
-    statusEl.textContent = 'Uploading ' + input.files.length + ' file(s)…';
+    statusEl.textContent = '';
   }
+  setAssetUploadProgress(0, 'Uploading 0 / ' + totalFiles + '…');
+
   try {
-    const t0 = performance.now();
-    const r = await fetch('/v1/assets/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
-    const ms = Math.round(performance.now() - t0);
-    obs.fetches.unshift({ at: new Date().toLocaleTimeString(), path: '/v1/assets/upload', ms, cache: '—' });
-    if (obs.fetches.length > 25) obs.fetches.pop();
-    renderObsBar();
-    if (r.status === 401) { window.location.reload(); throw new Error('Session expired'); }
-    if (!r.ok) throw new Error(await r.text());
-    const d = await r.json();
-    const errCount = (d.errors || []).length;
-    const msg = 'Uploaded ' + d.count + ' image(s) to R2.'
-      + (errCount ? ' ' + errCount + ' failed.' : '');
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const batchBytes = batch.reduce(function (s, f) { return s + f.size; }, 0);
+      setAssetUploadProgress(
+        totalBytes > 0 ? (completedBytes / totalBytes) * 100 : 0,
+        'Uploading ' + filesCompleted + ' / ' + totalFiles +
+          ' · batch ' + (i + 1) + '/' + batches.length
+      );
+
+      const t0 = performance.now();
+      const d = await uploadAssetBatchWithRetry(
+        batch,
+        imagesFolder,
+        overwrite,
+        function (loaded, total) {
+          const ratio = total > 0 ? loaded / total : 0;
+          const overallBytes = completedBytes + ratio * batchBytes;
+          const pct = totalBytes > 0 ? (overallBytes / totalBytes) * 100 : 0;
+          const approxDone = filesCompleted + Math.min(batch.length, Math.floor(ratio * batch.length));
+          setAssetUploadProgress(
+            pct,
+            'Uploading ' + approxDone + ' / ' + totalFiles +
+              ' · batch ' + (i + 1) + '/' + batches.length
+          );
+        }
+      );
+      const ms = Math.round(performance.now() - t0);
+      obs.fetches.unshift({ at: new Date().toLocaleTimeString(), path: '/v1/assets/upload', ms, cache: '—' });
+      if (obs.fetches.length > 25) obs.fetches.pop();
+      renderObsBar();
+
+      uploadedCount += d.count || 0;
+      if (d.errors && d.errors.length) allErrors = allErrors.concat(d.errors);
+      if (d.images_folder) lastFolder = d.images_folder;
+      completedBytes += batchBytes;
+      filesCompleted += batch.length;
+      setAssetUploadProgress(
+        totalBytes > 0 ? (completedBytes / totalBytes) * 100 : 100,
+        'Uploaded ' + filesCompleted + ' / ' + totalFiles
+      );
+    }
+
+    const errCount = allErrors.length;
+    const msg = 'Uploaded ' + uploadedCount + ' image(s) to R2 in ' + batches.length + ' batch(es).'
+      + (errCount ? ' ' + errCount + ' failed/skipped.' : '');
     if (statusEl) {
-      statusEl.className = 'asset-upload-status' + (errCount && !d.count ? ' err' : ' ok');
+      statusEl.className = 'asset-upload-status' + (errCount && !uploadedCount ? ' err' : ' ok');
       statusEl.textContent = msg;
     }
+    setAssetUploadProgress(100, 'Done — ' + uploadedCount + ' uploaded');
     input.value = '';
     ui.tabsLoaded.assets = false;
-    if (ui.assetPool === 'post-processed' && d.images_folder) {
-      await populateBackgroundFolderSelect('assetImagesFolder', d.images_folder);
+    if (ui.assetPool === 'post-processed' && lastFolder) {
+      await populateBackgroundFolderSelect('assetImagesFolder', lastFolder);
       const folderInput = document.getElementById('assetUploadFolder');
-      if (folderInput) folderInput.value = d.images_folder;
+      if (folderInput) folderInput.value = lastFolder;
     }
     await refreshStats();
     await loadAssetList();
   } catch (e) {
+    if (String(e && e.message || e).includes('Session expired')) {
+      window.location.reload();
+      return;
+    }
+    if (e && e.partialResult) {
+      uploadedCount += e.partialResult.count || 0;
+      if (e.partialResult.errors && e.partialResult.errors.length) {
+        allErrors = allErrors.concat(e.partialResult.errors);
+      }
+      if (e.partialResult.images_folder) lastFolder = e.partialResult.images_folder;
+    }
+    const pct = totalBytes > 0 ? (completedBytes / totalBytes) * 100 : 0;
+    setAssetUploadProgress(pct, 'Failed after ' + uploadedCount + ' uploaded');
     if (statusEl) {
       statusEl.className = 'asset-upload-status err';
-      statusEl.textContent = String(e);
+      const partial = uploadedCount
+        ? 'Uploaded ' + uploadedCount + ' before failure. '
+        : '';
+      statusEl.textContent = partial + String(e && e.message || e);
+    }
+    if (uploadedCount) {
+      ui.tabsLoaded.assets = false;
+      try {
+        await refreshStats();
+        await loadAssetList();
+      } catch (_) { /* keep error message */ }
     }
   } finally {
     setBtnLoading(btn, false);
