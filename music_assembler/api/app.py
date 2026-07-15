@@ -1926,17 +1926,20 @@ _DASHBOARD_HTML = (
       background: transparent;
       color: var(--color-smoke);
       border: none;
-      padding: 0 0 10px;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      padding: 0 0 8px;
+      margin: 0 0 -1px;
       font-size: 14px;
       font-weight: 500;
-      margin: 0;
       text-decoration: none;
     }
     .job-tab:hover { color: var(--color-midnight-ink); }
     .job-tab.active {
       color: var(--color-midnight-ink);
       font-weight: 600;
-      box-shadow: inset 0 -2px 0 var(--color-deep-forest-teal);
+      border-bottom-color: var(--color-lavender-whisper);
+      box-shadow: none;
       text-decoration: none;
     }
     .job-panel { display: none; }
@@ -5456,9 +5459,9 @@ document.querySelectorAll('.main-tab').forEach(btn => {
   btn.onclick = () => showMainSection(btn.dataset.section);
 });
 document.getElementById('obsVersion').onclick = () => showMainSection('updates');
-document.querySelectorAll('.job-tab').forEach(btn => {
+document.querySelectorAll('#sectionJobs .job-tab[data-job]').forEach(btn => {
   btn.onclick = () => {
-    document.querySelectorAll('.job-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#sectionJobs .job-tab[data-job]').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.job-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     const panel = btn.dataset.job === 'extend' ? 'jobPanelExtend' : 'jobPanelAssembly';
