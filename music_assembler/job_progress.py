@@ -114,6 +114,7 @@ def write_meta_json(
     process_all: bool | None = None,
     channel: str | None = None,
     images_folder: str | None = None,
+    source_folder: str | None = None,
 ) -> None:
     existing = read_meta_json(client, bucket, execution_id)
     created_at = (existing or {}).get("created_at") or datetime.now(timezone.utc).isoformat()
@@ -122,6 +123,7 @@ def write_meta_json(
         "category": category,
         "channel": channel,
         "images_folder": images_folder,
+        "source_folder": source_folder,
         "duration_min": duration_min,
         "variance_min": variance_min,
         "thumbnail_text": thumbnail_text,

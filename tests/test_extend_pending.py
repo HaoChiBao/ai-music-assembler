@@ -60,6 +60,22 @@ class PendingR2SourcesTests(unittest.TestCase):
 
         self.assertEqual(pending, pre)
 
+    def test_source_folder_scopes_prefix(self) -> None:
+        cfg = _cfg()
+        client = MagicMock()
+        pre = ["pre-processed/lofi/a.jpg"]
+
+        with unittest.mock.patch(
+            "music_assembler.extend_from_r2.list_claimable_pre_processed_keys",
+            return_value=pre,
+        ) as list_mock:
+            pending = pending_r2_sources(client, cfg, force=False, source_folder="lofi")
+
+        self.assertEqual(pending, pre)
+        kwargs = list_mock.call_args.kwargs
+        self.assertEqual(kwargs["pre_processed_prefix"], "pre-processed/lofi/")
+        self.assertEqual(kwargs["images_prefix"], "post-processed/lofi/")
+
 
 if __name__ == "__main__":
     unittest.main()

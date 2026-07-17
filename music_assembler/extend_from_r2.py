@@ -43,7 +43,9 @@ from music_assembler.extend_backgrounds import (
     extend_one_with_retry,
 )
 from music_assembler.r2_storage import (
+    ExtendPrefixes,
     claim_pre_processed_on_r2,
+    extend_prefixes_for_config,
     list_claimable_pre_processed_keys,
     move_object,
     pre_processed_in_flight_key,
@@ -60,13 +62,15 @@ def pending_r2_sources(
     cfg,
     *,
     force: bool,
+    source_folder: str | None = None,
 ) -> list[str]:
     """Full R2 keys for pre-processed images that still need extending."""
+    prefixes = extend_prefixes_for_config(cfg, source_folder)
     return list_claimable_pre_processed_keys(
         client,
         cfg.bucket,
-        pre_processed_prefix=cfg.pre_processed_prefix,
-        images_prefix=cfg.images_prefix,
+        pre_processed_prefix=prefixes.pre_processed_prefix,
+        images_prefix=prefixes.images_prefix,
         force=force,
     )
 
@@ -94,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--category",
         default=None,
         help="Genre subfolder (default: ASSEMBLY_CATEGORY from .env).",
+    )
+    p.add_argument(
+        "--source-folder",
+        default=None,
+        help="Folder under pre-processed/ to extend (default: same as --category).",
     )
     p.add_argument("--work-dir", type=Path, default=None, help="Local scratch directory.")
     p.add_argument("--keep-work-dir", action="store_true", help="Keep scratch dir when done.")
@@ -157,13 +166,15 @@ def count_pending_r2_sources(
     cfg,
     *,
     force: bool = False,
+    source_folder: str | None = None,
 ) -> int:
-    return len(pending_r2_sources(client, cfg, force=force))
+    return len(pending_r2_sources(client, cfg, force=force, source_folder=source_folder))
 
 
 def run_extend_from_r2(
     *,
     category: str | None = None,
+    source_folder: str | None = None,
     limit: int | None = 1,
     process_all: bool = False,
     force: bool = False,
@@ -193,11 +204,14 @@ def run_extend_from_r2(
 
     cfg_r2 = r2_config_from_env(category=category)
     client = r2_client(cfg_r2)
+    prefixes = extend_prefixes_for_config(cfg_r2, source_folder)
 
     if source_keys is not None:
         pending_keys = list(source_keys)
     else:
-        pending_keys = pending_r2_sources(client, cfg_r2, force=force)
+        pending_keys = pending_r2_sources(
+            client, cfg_r2, force=force, source_folder=source_folder
+        )
     if not pending_keys:
         if on_progress:
             on_progress(100, "No pending images")
@@ -388,7 +402,7 @@ def run_extend_from_r2(
         if on_progress:
             on_progress(80, f"Uploading {len(uploaded_pngs)} PNG(s) to R2…")
         for i, png in enumerate(uploaded_pngs):
-            key = f"{cfg_r2.images_prefix}{png.name}"
+            key = f"{prefixes.images_prefix}{png.name}"
             upload_file(client, cfg_r2.bucket, key, png)
             if on_progress:
                 on_progress(
@@ -398,7 +412,7 @@ def run_extend_from_r2(
 
         for r2_key in moved_r2_keys:
             name = Path(r2_key).name
-            used_key = f"{cfg_r2.used_pre_processed_prefix}{name}"
+            used_key = f"{prefixes.used_pre_processed_prefix}{name}"
             move_object(client, cfg_r2.bucket, r2_key, used_key)
 
     if is_temp and not keep_work_dir:
@@ -449,9 +463,13 @@ def extend_one_claimed_on_r2(
     work_dir: Path,
     gemini_client: Any,
     gemini_settings: dict[str, Any],
+    prefixes: ExtendPrefixes | None = None,
 ) -> tuple[bool, str | None]:
     """Extend a single photo already claimed under pre-processed/.../in-flight/{execution_id}/."""
-    in_flight_key = pre_processed_in_flight_key(cfg.pre_processed_prefix, execution_id, filename)
+    resolved = prefixes or extend_prefixes_for_config(cfg)
+    in_flight_key = pre_processed_in_flight_key(
+        resolved.pre_processed_prefix, execution_id, filename
+    )
     input_dir = work_dir / "pre-processed"
     output_dir = work_dir / "post-processed"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -476,18 +494,18 @@ def extend_one_claimed_on_r2(
         release_pre_processed_claim(
             client,
             cfg.bucket,
-            pre_processed_prefix=cfg.pre_processed_prefix,
+            pre_processed_prefix=resolved.pre_processed_prefix,
             execution_id=execution_id,
             filename=filename,
         )
         return False, str(exc)
 
-    upload_file(client, cfg.bucket, f"{cfg.images_prefix}{local_out.name}", local_out)
+    upload_file(client, cfg.bucket, f"{resolved.images_prefix}{local_out.name}", local_out)
     retire_claimed_pre_processed_on_r2(
         client,
         cfg.bucket,
-        pre_processed_prefix=cfg.pre_processed_prefix,
-        used_pre_processed_prefix=cfg.used_pre_processed_prefix,
+        pre_processed_prefix=resolved.pre_processed_prefix,
+        used_pre_processed_prefix=resolved.used_pre_processed_prefix,
         execution_id=execution_id,
         filename=filename,
     )
@@ -498,6 +516,7 @@ def run_extend_cloud_worker(
     execution_id: str,
     *,
     category: str | None = None,
+    source_folder: str | None = None,
     max_images: int | None = None,
     force: bool = False,
     work_dir: Path | None = None,
@@ -521,6 +540,7 @@ def run_extend_cloud_worker(
 
     cfg = r2_config_from_env(category=category)
     client = r2_client(cfg)
+    prefixes = extend_prefixes_for_config(cfg, source_folder)
     work_dir, is_temp = _resolve_work_dir(work_dir)
 
     try:
@@ -564,8 +584,8 @@ def run_extend_cloud_worker(
         filename = claim_pre_processed_on_r2(
             client,
             cfg.bucket,
-            pre_processed_prefix=cfg.pre_processed_prefix,
-            images_prefix=cfg.images_prefix,
+            pre_processed_prefix=prefixes.pre_processed_prefix,
+            images_prefix=prefixes.images_prefix,
             execution_id=execution_id,
             force=force,
         )
@@ -586,6 +606,7 @@ def run_extend_cloud_worker(
             work_dir=work_dir,
             gemini_client=gemini,
             gemini_settings=gemini_settings,
+            prefixes=prefixes,
         )
         if succeeded:
             ok += 1
@@ -632,6 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         from music_assembler.job_progress import write_progress_json
 
         category = os.environ.get("ASSEMBLY_CATEGORY", "").strip() or None
+        source_folder = os.environ.get("EXTEND_SOURCE_FOLDER", "").strip() or None
         force = os.environ.get("EXTEND_FORCE", "").strip().lower() in ("1", "true", "yes")
         max_raw = os.environ.get("EXTEND_MAX_IMAGES", "").strip()
         max_images = int(max_raw) if max_raw.isdigit() else None
@@ -639,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
         client = r2_client(cfg)
         bucket = cfg.bucket
         cat = category or cfg.category
+        prefixes = extend_prefixes_for_config(cfg, source_folder)
 
         def on_progress(pct: float, stage: str, *, status: str = "running") -> None:
             write_progress_json(
@@ -649,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage=stage,
                 category=cat,
                 status=status,
-                extra={"job_type": "extend"},
+                extra={"job_type": "extend", "source_folder": prefixes.source_folder},
             )
 
         on_progress(0, "Starting on Cloud Run…")
@@ -657,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
             result = run_extend_cloud_worker(
                 execution_id,
                 category=category,
+                source_folder=source_folder,
                 max_images=max_images,
                 force=force,
                 on_progress=lambda pct, stage: on_progress(pct, stage),
@@ -670,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
             on_progress(0, "Cancelled", status="cancelled")
             return 0
         if result.get("empty"):
-            print(f"No pending images in s3://{cfg.bucket}/{cfg.pre_processed_prefix}")
+            print(f"No pending images in s3://{cfg.bucket}/{prefixes.pre_processed_prefix}")
             on_progress(100, "No pending images", status="succeeded")
             return 0
         ok = int(result.get("ok", 0))
@@ -703,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run_extend_from_r2(
             category=args.category,
+            source_folder=args.source_folder,
             limit=limit,
             process_all=process_all,
             force=args.force,
@@ -729,7 +754,8 @@ def main(argv: list[str] | None = None) -> int:
     failures = result.get("failures", [])
     if ok == 0 and not failures and pending == 0:
         cfg_r2 = r2_config_from_env(category=args.category)
-        print(f"No pending images in s3://{cfg_r2.bucket}/{cfg_r2.pre_processed_prefix}")
+        prefixes = extend_prefixes_for_config(cfg_r2, args.source_folder)
+        print(f"No pending images in s3://{cfg_r2.bucket}/{prefixes.pre_processed_prefix}")
         return 0
     if args.download_only:
         print("==> Download-only; files saved locally")

@@ -17,6 +17,7 @@ def run_extend_job(
     execution_id: str,
     *,
     category: str,
+    source_folder: str | None = None,
     max_images: int | None = 1,
     force: bool = False,
 ) -> None:
@@ -40,7 +41,11 @@ def run_extend_job(
                 stage=stage,
                 category=category,
                 status=status,
-                extra={"job_type": "extend", "host": "local"},
+                extra={
+                    "job_type": "extend",
+                    "host": "local",
+                    "source_folder": source_folder,
+                },
             )
 
     on_progress(0, "Starting locally…")
@@ -51,6 +56,7 @@ def run_extend_job(
         result: dict[str, Any] = run_extend_cloud_worker(
             execution_id,
             category=category,
+            source_folder=source_folder,
             max_images=max_images,
             force=force,
             should_cancel=should_cancel,
