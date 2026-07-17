@@ -128,7 +128,7 @@ class ChannelSchedule:
             category=(str(data["category"]).strip() if data.get("category") else None),
             images_folder=(str(data["images_folder"]).strip() if data.get("images_folder") else None),
             duration_min=int(data.get("duration_min") or 90),
-            variance_min=int(data.get("variance_min") or 15),
+            variance_min=int(data["variance_min"]) if data.get("variance_min") is not None else 15,
             thumbnail_text=(str(data["thumbnail_text"]).strip() if data.get("thumbnail_text") else None),
             queue_youtube=bool(data.get("queue_youtube", True)),
             upload_privacy=(
