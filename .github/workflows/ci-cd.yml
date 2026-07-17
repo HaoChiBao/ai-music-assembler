@@ -15,9 +15,12 @@ env:
   GCP_REGION: northamerica-northeast2
   CLOUD_RUN_SERVICE: music-assembly-api
   CLOUD_RUN_ASSEMBLE_JOB: music-assemble
+  CLOUD_RUN_EXTEND_JOB: music-extend
   ARTIFACT_REPO: music-assembler
   # Wall-clock encode budget for long mixes (target up to 300 min / 5 h).
   ASSEMBLE_TASK_TIMEOUT_SEC: "28800"
+  # Gemini extend budget (matches deploy/cloud-run-job.md).
+  EXTEND_TASK_TIMEOUT_SEC: "3600"
 
 jobs:
   check:
@@ -189,6 +192,50 @@ jobs:
             --task-timeout="${{ env.ASSEMBLE_TASK_TIMEOUT_SEC }}" \
             --quiet
 
+      - name: Build and push extend worker image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/music-extend"
+          IMAGE_TAGGED="${IMAGE}:${SHORT_SHA}"
+
+          BUILD_ID="$(gcloud builds submit \
+            --config=cloudbuild.extend.yaml \
+            --substitutions="_IMAGE=${IMAGE_TAGGED}" \
+            --async \
+            --format='value(id)' \
+            .)"
+          echo "Extend Cloud Build id: ${BUILD_ID}"
+          for _ in $(seq 1 90); do
+            STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+            echo "status=${STATUS}"
+            case "${STATUS}" in
+              SUCCESS) break ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+                gcloud builds describe "${BUILD_ID}" --format='yaml(status,failureInfo,logUrl)'
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          STATUS="$(gcloud builds describe "${BUILD_ID}" --format='value(status)')"
+          if [[ "${STATUS}" != "SUCCESS" ]]; then
+            echo "Extend build did not succeed: ${STATUS}"
+            exit 1
+          fi
+
+          gcloud artifacts docker tags add "${IMAGE_TAGGED}" "${IMAGE}:latest" \
+            || echo "::warning::Could not move music-extend :latest (continuing with ${IMAGE_TAGGED})"
+
+          echo "EXTEND_IMAGE_TAGGED=${IMAGE_TAGGED}" >> "$GITHUB_ENV"
+
+      - name: Update music-extend Cloud Run Job
+        run: |
+          gcloud run jobs update "${{ env.CLOUD_RUN_EXTEND_JOB }}" \
+            --image="${EXTEND_IMAGE_TAGGED}" \
+            --region="${{ env.GCP_REGION }}" \
+            --task-timeout="${{ env.EXTEND_TASK_TIMEOUT_SEC }}" \
+            --quiet
+
       - name: Smoke check
         run: |
           URL="$(gcloud run services describe "${{ env.CLOUD_RUN_SERVICE }}" \
@@ -203,3 +250,4 @@ jobs:
           echo
           echo "Deployed API ${SHORT_SHA} → ${URL}"
           echo "Updated job ${{ env.CLOUD_RUN_ASSEMBLE_JOB }} → ${ASSEMBLE_IMAGE_TAGGED}"
+          echo "Updated job ${{ env.CLOUD_RUN_EXTEND_JOB }} → ${EXTEND_IMAGE_TAGGED}"
