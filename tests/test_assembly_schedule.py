@@ -194,10 +194,15 @@ def test_upsert_schedule_roundtrip():
     client.put_object.side_effect = put_object
     client.get_object.side_effect = get_object
 
-    sched = ChannelSchedule(channel="nappabeats", days=[DaySlot(enabled=True) for _ in range(7)])
+    sched = ChannelSchedule(
+        channel="nappabeats",
+        variance_min=0,
+        days=[DaySlot(enabled=True) for _ in range(7)],
+    )
     upsert_schedule(client, bucket, sched)
     from music_assembler.api.assembly_schedule import get_schedule
 
     loaded = get_schedule(client, bucket, "nappabeats")
     assert loaded is not None
     assert loaded.channel == "nappabeats"
+    assert loaded.variance_min == 0
