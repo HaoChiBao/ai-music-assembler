@@ -5796,9 +5796,6 @@ function showScheduleSubtab(tab) {
   });
   if (overview) {
     loadScheduleOverview();
-  } else {
-    const ch = document.getElementById('scheduleChannel')?.value.trim() || '';
-    loadScheduleEditor(ch);
   }
 }
 function openScheduleEditorForChannel(channel) {

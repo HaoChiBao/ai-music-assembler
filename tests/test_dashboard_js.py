@@ -60,3 +60,12 @@ if (!pool || pool[1] !== 'post-processed') {{
     tmp.write_text(harness, encoding="utf-8")
     subprocess.run(["node", str(tmp)], check=True)
 
+
+def test_schedule_subtab_switch_preserves_unsaved_editor_state():
+    js = _dashboard_script()
+    start = js.index("function showScheduleSubtab(tab)")
+    end = js.index("\nfunction openScheduleEditorForChannel", start)
+
+    assert "loadScheduleOverview()" in js[start:end]
+    assert "loadScheduleEditor(" not in js[start:end]
+
