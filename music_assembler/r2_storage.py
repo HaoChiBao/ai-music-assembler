@@ -67,6 +67,50 @@ class R2Config:
         return f"music-video/{self.category}/"
 
 
+@dataclass(frozen=True)
+class ExtendPrefixes:
+    """R2 prefixes for an extend job scoped to a pre-processed source folder."""
+
+    source_folder: str
+    pre_processed_prefix: str
+    used_pre_processed_prefix: str
+    images_prefix: str
+
+
+def normalize_source_folder(value: str) -> str:
+    """Validate a single folder name under ``pre-processed/``."""
+    folder = value.strip().strip("/")
+    if not folder or ".." in folder or "/" in folder or "\\" in folder:
+        raise ValueError("source_folder must be a single folder name under pre-processed/")
+    if folder in ("used", "in-flight"):
+        raise ValueError("source_folder cannot be 'used' or 'in-flight'")
+    return folder
+
+
+def extend_prefixes_for_folder(source_folder: str) -> ExtendPrefixes:
+    """Prefixes for extending images from ``pre-processed/{folder}/`` into ``post-processed/{folder}/``."""
+    folder = normalize_source_folder(source_folder)
+    pre = f"pre-processed/{folder}/"
+    return ExtendPrefixes(
+        source_folder=folder,
+        pre_processed_prefix=pre,
+        used_pre_processed_prefix=f"{pre}used/",
+        images_prefix=f"post-processed/{folder}/",
+    )
+
+
+def extend_prefixes_for_config(cfg: R2Config, source_folder: str | None = None) -> ExtendPrefixes:
+    """Resolve extend prefixes; ``source_folder`` overrides the category default."""
+    if source_folder is not None and str(source_folder).strip():
+        return extend_prefixes_for_folder(source_folder)
+    return ExtendPrefixes(
+        source_folder=cfg.category,
+        pre_processed_prefix=cfg.pre_processed_prefix,
+        used_pre_processed_prefix=cfg.used_pre_processed_prefix,
+        images_prefix=cfg.images_prefix,
+    )
+
+
 def _require_boto3() -> None:
     if boto3 is None or Config is None:
         print(

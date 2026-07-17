@@ -39,7 +39,7 @@ from music_assembler.api.openapi_docs import install_openapi_docs
 from music_assembler.api.progress_store import read_progress_json, write_meta_json, write_progress_json
 from music_assembler.api.progress_store import patch_meta_gcp_execution_id
 from music_assembler.extend_from_r2 import count_pending_r2_sources
-from music_assembler.r2_storage import r2_client, r2_config_from_env
+from music_assembler.r2_storage import normalize_source_folder, r2_client, r2_config_from_env
 
 app = FastAPI(
     title="Music Assembly API",
@@ -64,6 +64,18 @@ def _assert_background_folder_exists(client, bucket: str, folder: str) -> None:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown background folder {folder!r}. Available: {', '.join(known) or '(none)'}",
+        )
+
+
+def _assert_pre_processed_folder_exists(client, bucket: str, folder: str) -> None:
+    known = r2_catalog.list_pre_processed_folders(client, bucket)
+    if folder not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown pre-processed folder {folder!r}. "
+                f"Available: {', '.join(known) or '(none)'}"
+            ),
         )
 
 
@@ -141,13 +153,30 @@ class StartJobRequest(BaseModel):
 
 class StartExtendRequest(BaseModel):
     category: str | None = Field(default=None, description="R2 category (defaults to ASSEMBLY_CATEGORY).")
-    limit: int | None = Field(default=1, ge=1, le=20, description="Images per batch when process_all is false.")
+    source_folder: str = Field(
+        ...,
+        description="R2 subfolder under pre-processed/ to extend (required).",
+        examples=["korean"],
+    )
+    limit: int | None = Field(
+        default=1,
+        ge=1,
+        description="Images per batch when process_all is false (must be ≥ 1 and ≤ pending).",
+    )
     process_all: bool = Field(default=False, description="Extend every pending pre-processed image.")
     force: bool = Field(default=False, description="Include images that would normally be skipped.")
     parallel: bool = Field(
         default=True,
         description="When limit>1, start one Cloud Run Job per image (recommended).",
     )
+
+    @field_validator("source_folder")
+    @classmethod
+    def _validate_source_folder(cls, value: str) -> str:
+        try:
+            return normalize_source_folder(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class DashboardLoginRequest(BaseModel):
@@ -321,6 +350,7 @@ def _queue_extend_job_local(
     *,
     execution_id: str,
     category: str,
+    source_folder: str,
     max_images: int | None,
     force: bool,
 ) -> dict[str, Any]:
@@ -337,6 +367,7 @@ def _queue_extend_job_local(
         job_type="extend",
         limit=max_images,
         process_all=max_images is None,
+        source_folder=source_folder,
     )
     write_progress_json(
         client,
@@ -346,13 +377,14 @@ def _queue_extend_job_local(
         stage=f"Queued locally — {label}…",
         category=category,
         status="running",
-        extra={"job_type": "extend", "host": "local"},
+        extra={"job_type": "extend", "host": "local", "source_folder": source_folder},
     )
     threading.Thread(
         target=run_extend_job,
         kwargs={
             "execution_id": execution_id,
             "category": category,
+            "source_folder": source_folder,
             "max_images": max_images,
             "force": force,
         },
@@ -362,6 +394,7 @@ def _queue_extend_job_local(
         "execution_id": execution_id,
         "status": "running",
         "category": category,
+        "source_folder": source_folder,
         "max_images": max_images,
         "host": "local",
     }
@@ -374,6 +407,7 @@ def _queue_extend_job(
     *,
     execution_id: str,
     category: str,
+    source_folder: str,
     max_images: int | None,
     force: bool,
     exclude_gcp_ids: set[str],
@@ -384,6 +418,7 @@ def _queue_extend_job(
             bucket,
             execution_id=execution_id,
             category=category,
+            source_folder=source_folder,
             max_images=max_images,
             force=force,
         )
@@ -400,6 +435,7 @@ def _queue_extend_job(
         job_type="extend",
         limit=max_images,
         process_all=max_images is None,
+        source_folder=source_folder,
     )
     write_progress_json(
         client,
@@ -409,13 +445,14 @@ def _queue_extend_job(
         stage=f"Queued on Cloud Run — {label}…",
         category=category,
         status="running",
-        extra={"job_type": "extend"},
+        extra={"job_type": "extend", "source_folder": source_folder},
     )
     try:
         result = gcp_jobs.start_extend_job(
             settings,
             execution_id=execution_id,
             category=category,
+            source_folder=source_folder,
             max_images=max_images,
             force=force,
             exclude_gcp_ids=exclude_gcp_ids,
@@ -453,6 +490,7 @@ def _queue_extend_job(
         "execution_id": execution_id,
         "status": "running",
         "category": category,
+        "source_folder": source_folder,
         "gcp_execution_id": gcp_id,
         "max_images": max_images,
         "host": "cloud_run",
@@ -521,6 +559,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/categories",
             "GET /v1/categories/{category}/inventory",
             "GET /v1/background-folders",
+            "GET /v1/pre-processed-folders",
             "GET /v1/channels",
             "GET /v1/updates",
             "GET /v1/version",
@@ -1279,14 +1318,34 @@ def start_extend(
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
     category = (body.category or settings.default_category).strip()
+    source_folder = body.source_folder
     client, bucket = _r2()
+    _assert_pre_processed_folder_exists(client, bucket, source_folder)
     _invalidate_category_cache(category)
     cfg = r2_config_from_env(category=category)
-    pending = count_pending_r2_sources(client, cfg, force=body.force)
+    pending = count_pending_r2_sources(
+        client, cfg, force=body.force, source_folder=source_folder
+    )
     if pending == 0:
-        raise HTTPException(status_code=409, detail="No pending pre-processed images on R2")
+        raise HTTPException(
+            status_code=409,
+            detail=f"No pending pre-processed images in pre-processed/{source_folder}/",
+        )
 
-    batch = pending if body.process_all else min(body.limit or 1, pending)
+    if not body.process_all:
+        requested = body.limit or 1
+        if requested > pending:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Requested {requested} images but only {pending} pending "
+                    f"in pre-processed/{source_folder}/"
+                ),
+            )
+        batch = requested
+    else:
+        batch = pending
+
     assigned_gcp: set[str] = set()
     jobs: list[dict[str, Any]] = []
 
@@ -1300,6 +1359,7 @@ def start_extend(
                     settings,
                     execution_id=execution_id,
                     category=category,
+                    source_folder=source_folder,
                     max_images=1,
                     force=body.force,
                     exclude_gcp_ids=assigned_gcp,
@@ -1310,6 +1370,7 @@ def start_extend(
             "jobs": jobs,
             "batch_size": len(jobs),
             "category": category,
+            "source_folder": source_folder,
             "pending": pending,
             "host": "cloud_run",
         }
@@ -1322,6 +1383,7 @@ def start_extend(
         settings,
         execution_id=execution_id,
         category=category,
+        source_folder=source_folder,
         max_images=max_images,
         force=body.force,
         exclude_gcp_ids=assigned_gcp,
@@ -1331,6 +1393,7 @@ def start_extend(
         "parallel": False,
         "pending": pending,
         "batch_size": batch,
+        "source_folder": source_folder,
         "host": "cloud_run",
     }
 
@@ -1338,15 +1401,25 @@ def start_extend(
 @app.get("/v1/extend/pending")
 def extend_pending(
     category: str | None = None,
+    source_folder: str | None = None,
     force: bool = False,
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
     cat = category or settings.default_category
-    client, _ = _r2()
+    client, bucket = _r2()
+    folder: str | None = None
+    if source_folder is not None and str(source_folder).strip():
+        try:
+            folder = normalize_source_folder(source_folder)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _assert_pre_processed_folder_exists(client, bucket, folder)
     cfg = r2_config_from_env(category=cat)
-    pending = count_pending_r2_sources(client, cfg, force=force)
-    return {"category": cat, "pending": pending}
+    pending = count_pending_r2_sources(
+        client, cfg, force=force, source_folder=folder
+    )
+    return {"category": cat, "source_folder": folder, "pending": pending}
 
 
 @app.get("/v1/extend/runs")
@@ -1457,6 +1530,14 @@ def list_background_folders(_auth: None = Depends(require_api_auth)) -> dict[str
     """Subfolders under ``post-processed/`` — selectable background pools for assembly."""
     client, bucket = _r2()
     folders = r2_catalog.list_background_folders(client, bucket)
+    return {"folders": folders, "count": len(folders)}
+
+
+@app.get("/v1/pre-processed-folders")
+def list_pre_processed_folders(_auth: None = Depends(require_api_auth)) -> dict[str, Any]:
+    """Subfolders under ``pre-processed/`` — selectable source pools for extend."""
+    client, bucket = _r2()
+    folders = r2_catalog.list_pre_processed_folders(client, bucket)
     return {"folders": folders, "count": len(folders)}
 
 
@@ -3434,17 +3515,19 @@ _DASHBOARD_HTML = (
 
       <div class="card">
         <h2>Extend backgrounds</h2>
-        <p class="card-desc"><strong id="extendPending">…</strong> images waiting in <code>pre-processed/</code>.</p>
+        <p class="card-desc"><strong id="extendPending">…</strong> images waiting in <code id="extendPendingPath">pre-processed/</code>.</p>
         <div class="form-stack">
           <div>
+            <label for="extendSourceFolder">Pre-processed folder</label>
+            <select id="extendSourceFolder" required><option value="">Loading…</option></select>
+          </div>
+          <div>
             <label for="extendLimit">Batch size</label>
-            <select id="extendLimit">
-              <option value="1">1 image</option>
-              <option value="3">3 images</option>
-              <option value="5">5 images</option>
-              <option value="10">10 images</option>
-              <option value="all">All pending</option>
-            </select>
+            <input id="extendLimit" type="number" min="1" step="1" value="1"/>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="extendProcessAll"/>
+            <label for="extendProcessAll">Process all pending in folder</label>
           </div>
         </div>
         <div class="card-actions">
@@ -4013,12 +4096,68 @@ async function populateBackgroundFolderSelect(selectId, selected) {
   }
 }
 
+async function populatePreProcessedFolderSelect(selectId, selected) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const keep = selected || el.value;
+  try {
+    const d = await api('/v1/pre-processed-folders');
+    const folders = d.folders || [];
+    el.innerHTML = folders.length
+      ? '<option value="">Select folder…</option>'
+      : '<option value="">No folders on R2</option>';
+    for (const f of folders) {
+      el.innerHTML += '<option value="' + esc(f) + '">' + esc(f) + '</option>';
+    }
+    const def = '__DEFAULT_CATEGORY__';
+    if (keep && folders.includes(keep)) el.value = keep;
+    else if (folders.includes(def)) el.value = def;
+    else if (folders.length === 1) el.value = folders[0];
+  } catch (e) {
+    console.warn('pre-processed-folders', selectId, e);
+    el.innerHTML = '<option value="">Failed to load folders</option>';
+  }
+}
+
+async function refreshExtendPending() {
+  const folder = document.getElementById('extendSourceFolder')?.value?.trim() || '';
+  const pathEl = document.getElementById('extendPendingPath');
+  const pendingEl = document.getElementById('extendPending');
+  if (pathEl) {
+    pathEl.textContent = folder ? ('pre-processed/' + folder + '/') : 'pre-processed/';
+  }
+  if (!folder) {
+    if (pendingEl) pendingEl.textContent = '—';
+    return;
+  }
+  try {
+    const d = await api(
+      '/v1/extend/pending?category=' + encodeURIComponent(cat())
+      + '&source_folder=' + encodeURIComponent(folder)
+    );
+    if (pendingEl) pendingEl.textContent = d.pending;
+    setStat('statExtendPending', d.pending);
+  } catch (e) {
+    console.warn('extend pending', e);
+    if (pendingEl) pendingEl.textContent = '?';
+  }
+}
+
+function syncExtendLimitEnabled() {
+  const all = document.getElementById('extendProcessAll')?.checked;
+  const lim = document.getElementById('extendLimit');
+  if (lim) lim.disabled = !!all;
+}
+
 async function loadBackgroundFolders() {
   await Promise.all([
     populateBackgroundFolderSelect('runImagesFolder'),
     populateBackgroundFolderSelect('scheduleImagesFolder'),
     populateBackgroundFolderSelect('assetImagesFolder'),
+    populatePreProcessedFolderSelect('extendSourceFolder'),
   ]);
+  syncExtendLimitEnabled();
+  await refreshExtendPending();
 }
 
 function assetPoolUsesBackgroundFolder(pool) {
@@ -4164,7 +4303,7 @@ function updateStatsStrip() {
   for (const [, tr] of ui.extend) if (tr.classList.contains('is-running')) running++;
   setStat('statRunning', running);
 }
-function applyInventory(d) {
+async function applyInventory(d) {
   const inv = d.inventory || {};
   document.getElementById('inventory').textContent = JSON.stringify(inv, null, 2);
   setStat(
@@ -4173,7 +4312,10 @@ function applyInventory(d) {
   );
   setStat('statMusic', inv.music_mp3s ?? inv.music ?? inv['music']);
   setStat('statVideos', inv.music_videos ?? inv['music-video']);
-  if (typeof d.extend_pending === 'number') {
+  const folder = document.getElementById('extendSourceFolder')?.value?.trim();
+  if (folder) {
+    await refreshExtendPending();
+  } else if (typeof d.extend_pending === 'number') {
     setStat('statExtendPending', d.extend_pending);
     document.getElementById('extendPending').textContent = d.extend_pending;
   }
@@ -4181,7 +4323,7 @@ function applyInventory(d) {
 
 async function refreshStats() {
   const d = await api('/v1/dashboard/stats?category=' + encodeURIComponent(cat()));
-  applyInventory(d);
+  await applyInventory(d);
   ui.lastStatsAt = Date.now();
   return d;
 }
@@ -5845,7 +5987,7 @@ async function pollSnapshot({ includeStats, refresh }) {
     if (d.has_running) {
       await Promise.all([refreshRunningAssemblyProgress(), refreshRunningExtendProgress()]);
     }
-    if (includeStats) applyInventory(d);
+    if (includeStats) await applyInventory(d);
     document.getElementById('obsRunning').style.display = d.has_running ? 'inline' : 'none';
     return !!d.has_running;
   } finally {
@@ -5958,7 +6100,6 @@ document.getElementById('runBtn').onclick = async () => {
   } catch (e) { showResultBlock('runResult', String(e)); }
   setBtnLoading(btn, false);
 };
-
 function localDatetimeToRfc3339(value) {
   if (!value) return null;
   const d = new Date(value);
@@ -6011,20 +6152,42 @@ document.querySelectorAll('.run-timing-seg button').forEach((btn) => {
   });
 });
 syncRunYoutubeOptions();
+document.getElementById('extendSourceFolder')?.addEventListener('change', () => {
+  refreshExtendPending();
+});
+document.getElementById('extendProcessAll')?.addEventListener('change', syncExtendLimitEnabled);
 document.getElementById('extendBtn').onclick = async () => {
   const btn = document.getElementById('extendBtn');
+  const sourceFolder = document.getElementById('extendSourceFolder').value.trim();
+  if (!sourceFolder) { alert('Select a pre-processed folder'); return; }
+  const processAll = document.getElementById('extendProcessAll').checked;
+  let limit = null;
+  if (!processAll) {
+    limit = parseInt(document.getElementById('extendLimit').value, 10);
+    if (!Number.isFinite(limit) || limit < 1) {
+      alert('Batch size must be a number of 1 or greater');
+      return;
+    }
+    const pendingText = document.getElementById('extendPending').textContent;
+    const pending = parseInt(pendingText, 10);
+    if (Number.isFinite(pending) && limit > pending) {
+      alert('Requested ' + limit + ' images but only ' + pending + ' pending in pre-processed/' + sourceFolder + '/');
+      return;
+    }
+  }
   setBtnLoading(btn, true, 'Starting…');
   try {
-    const lim = document.getElementById('extendLimit').value;
     const r = await api('/v1/extend/jobs', { method: 'POST', body: JSON.stringify({
       category: cat(),
-      process_all: lim === 'all',
-      limit: lim === 'all' ? null : parseInt(lim, 10),
+      source_folder: sourceFolder,
+      process_all: processAll,
+      limit: processAll ? null : limit,
     })});
     showResultBlock('extendResult', JSON.stringify(r, null, 2));
     ui.tabsLoaded.assets = false;
     ui.lastStatsAt = 0;
     await pollSnapshot({ includeStats: true });
+    await refreshExtendPending();
     schedulePoll(3000);
     showMainSection('jobs');
     document.querySelector('.job-tab[data-job="extend"]')?.click();

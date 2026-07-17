@@ -252,6 +252,7 @@ def start_extend_job(
     *,
     execution_id: str,
     category: str,
+    source_folder: str | None = None,
     max_images: int | None = None,
     force: bool = False,
     exclude_gcp_ids: set[str] | None = None,
@@ -261,6 +262,8 @@ def start_extend_job(
         run_v2.EnvVar(name="EXTEND_EXECUTION_ID", value=execution_id),
         run_v2.EnvVar(name="ASSEMBLY_CATEGORY", value=category),
     ]
+    if source_folder:
+        env.append(run_v2.EnvVar(name="EXTEND_SOURCE_FOLDER", value=source_folder))
     if max_images is not None:
         env.append(run_v2.EnvVar(name="EXTEND_MAX_IMAGES", value=str(max_images)))
     if force:
