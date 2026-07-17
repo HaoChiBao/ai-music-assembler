@@ -4806,9 +4806,9 @@ function postAssetUploadBatch(fd, onProgress) {
   });
 }
 
-function buildAssetUploadFormData(batch, imagesFolder, overwrite) {
+function buildAssetUploadFormData(batch, pool, imagesFolder, overwrite) {
   const fd = new FormData();
-  fd.append('pool', ui.assetPool);
+  fd.append('pool', pool);
   fd.append('category', cat());
   if (imagesFolder) fd.append('images_folder', imagesFolder);
   if (overwrite) fd.append('overwrite', 'true');
@@ -4825,10 +4825,10 @@ function mergeUploadResults(a, b) {
   };
 }
 
-async function uploadAssetBatchWithRetry(batch, imagesFolder, overwrite, onProgress) {
+async function uploadAssetBatchWithRetry(batch, pool, imagesFolder, overwrite, onProgress) {
   try {
     return await postAssetUploadBatch(
-      buildAssetUploadFormData(batch, imagesFolder, overwrite),
+      buildAssetUploadFormData(batch, pool, imagesFolder, overwrite),
       onProgress
     );
   } catch (e) {
@@ -4838,11 +4838,11 @@ async function uploadAssetBatchWithRetry(batch, imagesFolder, overwrite, onProgr
       const second = batch.slice(mid);
       let firstResult = { count: 0, errors: [], uploaded: [], images_folder: null };
       try {
-        firstResult = await uploadAssetBatchWithRetry(first, imagesFolder, overwrite, function (loaded, total) {
+        firstResult = await uploadAssetBatchWithRetry(first, pool, imagesFolder, overwrite, function (loaded, total) {
           const ratio = total > 0 ? loaded / total : 0;
           onProgress(ratio * estimateAssetUploadWireBytes(first), estimateAssetUploadWireBytes(batch));
         });
-        const secondResult = await uploadAssetBatchWithRetry(second, imagesFolder, overwrite, function (loaded, total) {
+        const secondResult = await uploadAssetBatchWithRetry(second, pool, imagesFolder, overwrite, function (loaded, total) {
           const ratio = total > 0 ? loaded / total : 0;
           const firstDone = estimateAssetUploadWireBytes(first);
           onProgress(firstDone + ratio * estimateAssetUploadWireBytes(second), estimateAssetUploadWireBytes(batch));
@@ -4873,7 +4873,8 @@ async function uploadAssetFiles() {
     }
     return;
   }
-  if (!assetPoolAllowsUpload(ui.assetPool)) {
+  const uploadPool = ui.assetPool;
+  if (!assetPoolAllowsUpload(uploadPool)) {
     if (statusEl) {
       statusEl.className = 'asset-upload-status err';
       statusEl.textContent = 'Upload is only available for pre-processed and post-processed pools.';
@@ -4882,7 +4883,7 @@ async function uploadAssetFiles() {
   }
 
   let imagesFolder = null;
-  if (ui.assetPool === 'post-processed') {
+  if (uploadPool === 'post-processed') {
     imagesFolder = uploadTargetImagesFolder();
     if (!imagesFolder) {
       if (statusEl) {
@@ -4934,6 +4935,7 @@ async function uploadAssetFiles() {
       const t0 = performance.now();
       const d = await uploadAssetBatchWithRetry(
         batch,
+        uploadPool,
         imagesFolder,
         overwrite,
         function (loaded, total) {
