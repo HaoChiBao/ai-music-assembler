@@ -516,17 +516,21 @@ def evaluate_resources(
         inv_cache[category] = category_inventory(client, bucket, category)
     inv = inv_cache[category]
 
-    if category not in ext_cache:
+    if images_folder not in ext_cache:
         cfg = r2_config_from_env(category=category)
-        ext_cache[category] = count_pending_r2_sources(client, cfg)
-    extend_pending = ext_cache[category]
+        ext_cache[images_folder] = count_pending_r2_sources(
+            client,
+            cfg,
+            source_folder=images_folder,
+        )
+    extend_pending = ext_cache[images_folder]
 
     backgrounds = int(inv.get("backgrounds_available") or 0)
     if images_folder != category:
         if images_folder not in inv_cache:
             inv_cache[images_folder] = category_inventory(client, bucket, images_folder)
         inv_folder = inv_cache[images_folder]
-        backgrounds = int(inv_folder.get("backgrounds_available") or backgrounds)
+        backgrounds = int(inv_folder.get("backgrounds_available") or 0)
     music_tracks = int(inv.get("music_mp3s") or 0)
     blockers: list[str] = []
     if music_tracks <= 0:
@@ -790,7 +794,16 @@ def run_due_schedules(
                         continue
                     ext_id = new_execution_id()
                     try:
-                        start_extend_fn(client, bucket, settings, execution_id=ext_id, category=resources["category"], max_images=3, force=False)
+                        start_extend_fn(
+                            client,
+                            bucket,
+                            settings,
+                            execution_id=ext_id,
+                            category=resources["category"],
+                            source_folder=resources["images_folder"],
+                            max_images=3,
+                            force=False,
+                        )
                         write_ledger(
                             client,
                             bucket,
