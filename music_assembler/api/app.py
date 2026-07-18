@@ -1436,18 +1436,19 @@ def list_extend_runs(
 def extend_progress(
     execution_id: str,
     _auth: None = Depends(require_api_auth),
-) -> dict[str, Any]:
+    settings: ApiSettings = Depends(_settings),
+) -> JSONResponse:
     client, bucket = _r2()
-    progress = read_progress_json(client, bucket, execution_id)
-    if progress is None:
+    meta = job_runs.load_r2_job_run(client, bucket, execution_id)
+    if meta is None or meta.get("progress") is None:
         raise HTTPException(status_code=404, detail="Extend run not found")
-    return {
-        "execution_id": execution_id,
-        "pct": progress.get("pct", 0),
-        "stage": progress.get("stage", ""),
-        "status": progress.get("status", "unknown"),
-        "updated_at": progress.get("updated_at"),
-    }
+    rows = job_status.reconcile_extend_runs(
+        settings, client, bucket, [meta], patch_r2=False, reconcile_gcp=False
+    )
+    return JSONResponse(
+        content=rows[0],
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/v1/jobs/{execution_id}/cancel")
@@ -3256,6 +3257,24 @@ _DASHBOARD_HTML = (
       box-shadow: 0 1px 0 var(--color-stone-mist);
     }
     .job-table-wrap td.job-progress { min-width: 12rem; max-width: 28rem; vertical-align: top; }
+    .job-table-wrap td.job-timing {
+      min-width: 11rem;
+      max-width: 16rem;
+      vertical-align: top;
+      white-space: normal;
+      line-height: 1.35;
+    }
+    .job-timing-line { display: block; }
+    .job-timing-label {
+      color: var(--color-graphite-veil);
+      font-size: 11px;
+      margin-right: 4px;
+    }
+    .job-timing-elapsed {
+      font-weight: 600;
+      color: var(--color-midnight-ink);
+      margin-top: 2px;
+    }
     .json-block {
       display: none;
       margin-top: 12px;
@@ -3381,7 +3400,7 @@ _DASHBOARD_HTML = (
           <button type="button" class="danger" id="cancelSelectedAssembly" disabled>Cancel selected</button>
         </div>
         <div class="job-table-wrap" id="assemblyTableWrap">
-          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllAssembly" title="Select all visible running jobs" aria-label="Select all visible running assembly jobs"></th><th>Execution</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
+          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllAssembly" title="Select all visible running jobs" aria-label="Select all visible running assembly jobs"></th><th>Execution</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
         </div>
       </div>
 
@@ -3392,7 +3411,7 @@ _DASHBOARD_HTML = (
           <button type="button" class="danger" id="cancelSelectedExtend" disabled>Cancel selected</button>
         </div>
         <div class="job-table-wrap" id="extendTableWrap">
-          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllExtend" title="Select all visible running jobs" aria-label="Select all visible running extend jobs"></th><th>Run</th><th>Status</th><th>Progress</th><th>Started</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
+          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllExtend" title="Select all visible running jobs" aria-label="Select all visible running extend jobs"></th><th>Run</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
         </div>
       </div>
     </div>
@@ -4057,6 +4076,33 @@ function fmtTime(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
 }
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(Number(sec))) return '';
+  let s = Math.max(0, Math.round(Number(sec)));
+  const h = Math.floor(s / 3600);
+  s %= 3600;
+  const m = Math.floor(s / 60);
+  s %= 60;
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}
+function jobTimingHtml(row) {
+  const started = fmtTime(row.started_at || row.created_at);
+  const finished = fmtTime(row.finished_at);
+  const elapsed = fmtDuration(row.elapsed_sec);
+  const running = isCancellableStatus(row.status || '');
+  const tookLabel = running ? 'Elapsed' : 'Took';
+  let html = '';
+  html += '<span class="job-timing-line"><span class="job-timing-label">Start</span>' + esc(started || '—') + '</span>';
+  html += '<span class="job-timing-line"><span class="job-timing-label">Finish</span>' + esc(finished || '—') + '</span>';
+  if (elapsed) {
+    html += '<span class="job-timing-line job-timing-elapsed"><span class="job-timing-label">' + tookLabel + '</span>' + esc(elapsed) + '</span>';
+  } else {
+    html += '<span class="job-timing-line muted"><span class="job-timing-label">' + tookLabel + '</span>—</span>';
+  }
+  return html;
+}
 function fmtBytes(n) {
   if (n == null) return '';
   if (n < 1024) return n + ' B';
@@ -4492,7 +4538,7 @@ function upsertJobRow(tableId, map, row) {
       '<td class="job-status status-' + esc(row.status) + '">' + esc(row.status) + '</td>' +
       '<td class="job-progress"><div class="bar"><span class="bar-fill"></span></div>' +
       '<span class="job-pct"></span><span class="job-stage"></span>' + updated + '</td>' +
-      '<td class="job-started muted"></td>' +
+      '<td class="job-timing muted"></td>' +
       jobActionsHtml(row);
     map.set(row.execution_id, tr);
     document.getElementById(tableId).prepend(tr);
@@ -4512,7 +4558,8 @@ function upsertJobRow(tableId, map, row) {
   tr.querySelector('.bar-fill').style.width = Math.min(100, Math.max(0, pct)) + '%';
   tr.querySelector('.job-pct').textContent = pct.toFixed(0) + '% ';
   tr.querySelector('.job-stage').textContent = row.stage || (running ? 'Working…' : '');
-  tr.querySelector('.job-started').textContent = fmtTime(row.created_at);
+  const timingCell = tr.querySelector('.job-timing');
+  if (timingCell) timingCell.innerHTML = jobTimingHtml(row);
   const src = row.status_source && row.status_source !== 'r2' ? ' (' + row.status_source + ')' : '';
   const stCell = tr.querySelector('.job-status');
   if (stCell && src) stCell.title = 'Status from ' + row.status_source;
@@ -5944,6 +5991,9 @@ async function refreshRunningExtendProgress() {
         stage: p.stage,
         updated_at: p.updated_at,
         created_at: p.created_at,
+        started_at: p.started_at,
+        finished_at: p.finished_at,
+        elapsed_sec: p.elapsed_sec,
         status_source: 'r2',
       });
     } catch (e) { console.warn('extend progress poll', id, e); }
@@ -5967,6 +6017,9 @@ async function refreshRunningAssemblyProgress() {
         stage: p.stage,
         updated_at: p.updated_at,
         created_at: p.created_at,
+        started_at: p.started_at,
+        finished_at: p.finished_at,
+        elapsed_sec: p.elapsed_sec,
         status_source: p.status_source,
       });
     } catch (e) { console.warn('progress poll', id, e); }

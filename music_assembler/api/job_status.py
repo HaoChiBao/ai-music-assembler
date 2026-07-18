@@ -89,6 +89,51 @@ def _estimate_running_pct(gcp_row: dict[str, Any]) -> tuple[float, str]:
     return pct, "Encoding on Cloud Run…"
 
 
+def compute_run_timing(
+    *,
+    created_at: str | None,
+    updated_at: str | None,
+    status: str,
+    gcp_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wall-clock start/finish/elapsed for dashboard assembly (and extend) rows.
+
+    Prefers Cloud Run execution timestamps when available, otherwise falls back to
+    R2 ``meta.created_at`` / ``progress.updated_at``. Running jobs report elapsed
+    so far (finish is null).
+    """
+    started_at: str | None = None
+    finished_at: str | None = None
+    if gcp_row:
+        started_at = gcp_row.get("start_time") or gcp_row.get("create_time")
+        finished_at = gcp_row.get("completion_time")
+    if not started_at:
+        started_at = created_at
+    terminal = status in _TERMINAL_R2
+    if not finished_at and terminal:
+        finished_at = updated_at
+    if not terminal:
+        finished_at = None
+
+    elapsed_sec: float | None = None
+    start_dt = _parse_ts(started_at)
+    if start_dt is not None:
+        if finished_at:
+            end_dt = _parse_ts(finished_at)
+        elif status in ("running", "cancelling"):
+            end_dt = datetime.now(timezone.utc)
+        else:
+            end_dt = None
+        if end_dt is not None:
+            elapsed_sec = max(0.0, (end_dt - start_dt).total_seconds())
+
+    return {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_sec": elapsed_sec,
+    }
+
+
 def runs_need_gcp_reconcile(runs: list[dict[str, Any]]) -> bool:
     """True when any run may still be active on Cloud Run (not terminal on R2)."""
     for run in runs:
@@ -104,17 +149,42 @@ def runs_need_gcp_reconcile(runs: list[dict[str, Any]]) -> bool:
 def _normalize_from_run(run: dict[str, Any]) -> dict[str, Any]:
     prog = run.get("progress") or {}
     status = prog.get("status") or "running"
-    return {
+    updated_at = prog.get("updated_at")
+    created_at = run.get("created_at")
+    row = {
         "execution_id": run.get("execution_id", ""),
         "gcp_execution_id": run.get("gcp_execution_id"),
         "category": run.get("category"),
         "status": status,
         "pct": float(prog.get("pct") or 0),
         "stage": prog.get("stage") or "",
-        "updated_at": prog.get("updated_at"),
-        "created_at": run.get("created_at"),
+        "updated_at": updated_at,
+        "created_at": created_at,
         "status_source": "r2" if prog else "default",
     }
+    row.update(
+        compute_run_timing(
+            created_at=created_at,
+            updated_at=updated_at,
+            status=status,
+        )
+    )
+    return row
+
+
+def _apply_timing(
+    row: dict[str, Any],
+    run: dict[str, Any],
+    gcp_row: dict[str, Any] | None,
+) -> None:
+    row.update(
+        compute_run_timing(
+            created_at=run.get("created_at"),
+            updated_at=row.get("updated_at"),
+            status=str(row.get("status") or ""),
+            gcp_row=gcp_row,
+        )
+    )
 
 
 def reconcile_assembly_runs(
@@ -243,6 +313,7 @@ def reconcile_assembly_runs(
             row["status_source"] = "none"
             row["stage"] = row["stage"] or "No progress on R2"
 
+        _apply_timing(row, run, gcp_row)
         out.append(row)
     return out
 
@@ -351,6 +422,7 @@ def reconcile_extend_runs(
         elif row["status"] == "cancelling":
             row["stage"] = row["stage"] or "Cancelling…"
 
+        _apply_timing(row, run, gcp_row)
         out.append(row)
     return out
 

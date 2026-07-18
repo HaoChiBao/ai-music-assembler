@@ -22,9 +22,53 @@ def test_dashboard_javascript_syntax():
     assert "inv.backgrounds_ready" in js
     assert "inv.music_mp3s" in js
     assert "inv.music_videos" in js
+    assert "function fmtDuration(sec)" in js
+    assert "function jobTimingHtml(row)" in js
+    assert "jobTimingHtml(row)" in js
     tmp = Path("/tmp/dashboard-syntax-test.js")
     tmp.write_text(js, encoding="utf-8")
     subprocess.run(["node", "--check", str(tmp)], check=True)
+
+
+def test_dashboard_timing_helpers():
+    js = _dashboard_script()
+    start = js.index("function fmtDuration(sec)")
+    end = js.index("\nfunction fmtBytes", start)
+    helpers = js[start:end]
+    harness = f"""
+function esc(s) {{ return String(s); }}
+function fmtTime(iso) {{ return iso || ''; }}
+function isCancellableStatus(status) {{
+  return status === 'running' || status === 'cancelling';
+}}
+{helpers}
+const finished = jobTimingHtml({{
+  started_at: '2026-07-18T12:00:00Z',
+  finished_at: '2026-07-18T13:05:00Z',
+  elapsed_sec: 3900,
+  status: 'succeeded',
+}});
+if (!finished.includes('Took') || !finished.includes('1h 5m')) {{
+  throw new Error('finished timing missing Took duration: ' + finished);
+}}
+if (!finished.includes('Start') || !finished.includes('Finish')) {{
+  throw new Error('finished timing missing start/finish labels');
+}}
+const running = jobTimingHtml({{
+  created_at: '2026-07-18T12:00:00Z',
+  elapsed_sec: 125,
+  status: 'running',
+}});
+if (!running.includes('Elapsed') || !running.includes('2m 5s')) {{
+  throw new Error('running timing missing Elapsed: ' + running);
+}}
+if (fmtDuration(45) !== '45s') throw new Error('fmtDuration seconds');
+if (fmtDuration(125) !== '2m 5s') throw new Error('fmtDuration minutes');
+if (fmtDuration(3900) !== '1h 5m') throw new Error('fmtDuration hours');
+"""
+    tmp = Path("/tmp/dashboard-timing-helpers-test.js")
+    tmp.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(tmp)], check=True)
 
 
 def test_batched_asset_upload_snapshots_destination_pool(tmp_path):
