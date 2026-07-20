@@ -59,7 +59,24 @@ def test_dashboard_inventory_aliases():
     assert inv["backgrounds_ready"] == 2
     assert inv["post-processed"] == 2
     assert inv["backgrounds_available"] == 1
+    assert inv["backgrounds_in_flight"] == 0
+    assert inv["backgrounds_used"] == 0
     assert inv["music_mp3s"] == 1
     assert inv["music"] == 1
     assert inv["music_videos"] == 1
     assert inv["music-video"] == 1
+
+
+def test_dashboard_inventory_in_flight_and_used():
+    client = _Client(
+        [
+            "post-processed/korean/ready.png",
+            "post-processed/korean/in-flight/asm_1/claim.png",
+            "post-processed/korean/used/old.png",
+            "post-processed/korean/used/older.jpg",
+        ]
+    )
+    inv = dashboard_inventory(client, "b", "korean")
+    assert inv["backgrounds_available"] == 1
+    assert inv["backgrounds_in_flight"] == 1
+    assert inv["backgrounds_used"] == 2

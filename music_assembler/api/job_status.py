@@ -151,10 +151,30 @@ def _normalize_from_run(run: dict[str, Any]) -> dict[str, Any]:
     status = prog.get("status") or "running"
     updated_at = prog.get("updated_at")
     created_at = run.get("created_at")
+    channel = run.get("channel") or prog.get("channel")
+    if isinstance(channel, str):
+        channel = normalize_channel(channel) or channel.strip() or None
+    else:
+        channel = None
+    video_id = prog.get("video_id")
+    if isinstance(video_id, str):
+        video_id = video_id.strip() or None
+    else:
+        video_id = None
+    claimed = run.get("claimed_background")
+    if isinstance(claimed, str):
+        claimed = claimed.strip() or None
+    else:
+        claimed = None
     row = {
         "execution_id": run.get("execution_id", ""),
         "gcp_execution_id": run.get("gcp_execution_id"),
         "category": run.get("category"),
+        "channel": channel,
+        "video_id": video_id,
+        "claimed_background": claimed,
+        "duration_min": run.get("duration_min"),
+        "images_folder": run.get("images_folder"),
         "status": status,
         "pct": float(prog.get("pct") or 0),
         "stage": prog.get("stage") or "",
@@ -170,6 +190,57 @@ def _normalize_from_run(run: dict[str, Any]) -> dict[str, Any]:
         )
     )
     return row
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float | None:
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    rank = (len(sorted_vals) - 1) * p
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = rank - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+
+
+def summarize_run_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate success/fail and elapsed percentiles for dashboard chips."""
+    succeeded = 0
+    failed = 0
+    cancelled = 0
+    running = 0
+    elapsed_ok: list[float] = []
+    for row in runs:
+        status = row.get("status")
+        if status == "succeeded":
+            succeeded += 1
+            sec = row.get("elapsed_sec")
+            if sec is not None:
+                try:
+                    elapsed_ok.append(float(sec))
+                except (TypeError, ValueError):
+                    pass
+        elif status == "failed":
+            failed += 1
+        elif status == "cancelled":
+            cancelled += 1
+        elif status in ("running", "cancelling", "unknown"):
+            running += 1
+    terminal = succeeded + failed + cancelled
+    elapsed_ok.sort()
+    success_rate = (succeeded / terminal) if terminal else None
+    return {
+        "total": len(runs),
+        "running": running,
+        "succeeded": succeeded,
+        "failed": failed,
+        "cancelled": cancelled,
+        "terminal": terminal,
+        "success_rate": success_rate,
+        "elapsed_p50_sec": _percentile(elapsed_ok, 0.50),
+        "elapsed_p95_sec": _percentile(elapsed_ok, 0.95),
+    }
 
 
 def _apply_timing(

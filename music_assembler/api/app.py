@@ -1283,10 +1283,13 @@ def dashboard_snapshot(
         "assembly_runs": assembly_runs,
         "extend_runs": extend_runs,
         "has_running": has_running,
+        "assembly_metrics": job_status.summarize_run_metrics(assembly_runs),
+        "extend_metrics": job_status.summarize_run_metrics(extend_runs),
     }
     if not light:
         if refresh:
             dashboard_cache.invalidate_prefix(_cache_key("stats", cat))
+            dashboard_cache.invalidate_prefix(_cache_key("health", cat))
         cache_key = _cache_key("stats", cat)
 
         def load_stats() -> dict[str, Any]:
@@ -1305,6 +1308,36 @@ def dashboard_snapshot(
         out["inventory"] = stats["inventory"]
         out["extend_pending"] = stats["extend_pending"]
         out["stats_cache_hit"] = hit
+
+        health_key = _cache_key("health", cat)
+
+        def load_health() -> dict[str, Any]:
+            report = assembly_health.audit_recent_assemblies(
+                settings, client, bucket, asm_raw, repair=False
+            )
+            issues = report.get("issues") or []
+            return {
+                "checked": report.get("checked", 0),
+                "healthy": report.get("healthy", 0),
+                "issue_count": len(issues),
+                "issues": [
+                    {
+                        "execution_id": i.get("execution_id"),
+                        "issue": i.get("issue"),
+                        "channel": i.get("channel"),
+                        "video_id": i.get("video_id"),
+                    }
+                    for i in issues[:8]
+                ],
+                "checked_at": report.get("checked_at"),
+            }
+
+        if refresh:
+            health = load_health()
+            dashboard_cache.set(health_key, health, 90.0)
+        else:
+            health, _ = dashboard_cache.get_or_set(health_key, 90.0, load_health)
+        out["assembly_health"] = health
     return JSONResponse(
         content=out,
         headers={"Cache-Control": "no-store", "X-Job-Poll": "1"},
@@ -1967,6 +2000,17 @@ _DASHBOARD_HTML = (
       font-size: 18px;
       line-height: 1.2;
       font-variant-numeric: tabular-nums;
+    }
+    .stat-chip.stat-warn {
+      border-color: color-mix(in srgb, var(--color-amber-pulse) 55%, var(--color-stone-mist));
+      background: color-mix(in srgb, var(--color-amber-pulse) 12%, var(--color-white));
+    }
+    .stat-chip.stat-ok .stat-value { color: var(--color-deep-forest-teal); }
+    .stat-sub {
+      font-size: 11px;
+      color: var(--color-graphite-veil);
+      font-weight: 500;
+      margin-top: 1px;
     }
     .main-nav {
       display: flex;
@@ -3264,6 +3308,20 @@ _DASHBOARD_HTML = (
       white-space: normal;
       line-height: 1.35;
     }
+    .job-table-wrap td.job-details {
+      min-width: 10rem;
+      max-width: 16rem;
+      vertical-align: top;
+      white-space: normal;
+      line-height: 1.35;
+      font-size: 12px;
+    }
+    .job-details-line { display: block; }
+    .job-details-label {
+      color: var(--color-graphite-veil);
+      font-size: 11px;
+      margin-right: 4px;
+    }
     .job-timing-line { display: block; }
     .job-timing-label {
       color: var(--color-graphite-veil);
@@ -3368,9 +3426,14 @@ _DASHBOARD_HTML = (
   <div class="stats-strip" id="statsStrip" aria-label="Pipeline status">
     <div class="stat-chip"><span class="stat-label">Active jobs</span><span class="stat-value" id="statRunning">0</span></div>
     <div class="stat-chip"><span class="stat-label">Backgrounds ready</span><span class="stat-value" id="statPostProcessed">—</span></div>
+    <div class="stat-chip" title="Backgrounds currently claimed by running assemblies"><span class="stat-label">In flight</span><span class="stat-value" id="statInFlight">—</span></div>
+    <div class="stat-chip" title="Backgrounds already consumed by finished assemblies"><span class="stat-label">Used</span><span class="stat-value" id="statUsed">—</span></div>
     <div class="stat-chip"><span class="stat-label">To extend</span><span class="stat-value" id="statExtendPending">—</span></div>
     <div class="stat-chip"><span class="stat-label">Tracks</span><span class="stat-value" id="statMusic">—</span></div>
     <div class="stat-chip"><span class="stat-label">Videos</span><span class="stat-value" id="statVideos">—</span></div>
+    <div class="stat-chip" id="statSuccessChip" title="Succeeded / terminal assembly jobs in the current list"><span class="stat-label">Asm success</span><span class="stat-value" id="statSuccess">—</span><span class="stat-sub" id="statSuccessSub"></span></div>
+    <div class="stat-chip" title="Median wall-clock time for succeeded assemblies"><span class="stat-label">p50 Took</span><span class="stat-value" id="statP50">—</span><span class="stat-sub" id="statP95Sub"></span></div>
+    <div class="stat-chip" id="statHealthChip" title="Recent assembly health issues (missing output, bad claims)"><span class="stat-label">Health</span><span class="stat-value" id="statHealth">—</span><span class="stat-sub" id="statHealthSub"></span></div>
   </div>
 
   <div id="authError" class="muted"></div>
@@ -3400,7 +3463,7 @@ _DASHBOARD_HTML = (
           <button type="button" class="danger" id="cancelSelectedAssembly" disabled>Cancel selected</button>
         </div>
         <div class="job-table-wrap" id="assemblyTableWrap">
-          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllAssembly" title="Select all visible running jobs" aria-label="Select all visible running assembly jobs"></th><th>Execution</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
+          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllAssembly" title="Select all visible running jobs" aria-label="Select all visible running assembly jobs"></th><th>Execution</th><th>Details</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="jobsBody"></tbody></table>
         </div>
       </div>
 
@@ -3411,7 +3474,7 @@ _DASHBOARD_HTML = (
           <button type="button" class="danger" id="cancelSelectedExtend" disabled>Cancel selected</button>
         </div>
         <div class="job-table-wrap" id="extendTableWrap">
-          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllExtend" title="Select all visible running jobs" aria-label="Select all visible running extend jobs"></th><th>Run</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
+          <table><thead><tr><th class="job-check-th"><input type="checkbox" id="selectAllExtend" title="Select all visible running jobs" aria-label="Select all visible running extend jobs"></th><th>Run</th><th>Details</th><th>Status</th><th>Progress</th><th>Timing</th><th></th></tr></thead><tbody id="extendBody"></tbody></table>
         </div>
       </div>
     </div>
@@ -4103,6 +4166,91 @@ function jobTimingHtml(row) {
   }
   return html;
 }
+function jobDetailsHtml(row) {
+  const lines = [];
+  if (row.channel) {
+    lines.push('<span class="job-details-line"><span class="job-details-label">Channel</span>' + esc(row.channel) + '</span>');
+  }
+  if (row.video_id) {
+    lines.push('<span class="job-details-line"><span class="job-details-label">Video</span><code>' + esc(row.video_id) + '</code></span>');
+  }
+  if (row.claimed_background) {
+    const name = String(row.claimed_background).split('/').pop();
+    lines.push('<span class="job-details-line"><span class="job-details-label">BG</span>' + esc(name) + '</span>');
+  }
+  if (row.duration_min != null && row.duration_min !== '') {
+    lines.push('<span class="job-details-line"><span class="job-details-label">Target</span>' + esc(String(row.duration_min)) + ' min</span>');
+  }
+  if (row.images_folder && row.images_folder !== row.category) {
+    lines.push('<span class="job-details-line"><span class="job-details-label">Pool</span>' + esc(row.images_folder) + '</span>');
+  } else if (!lines.length && row.category) {
+    lines.push('<span class="job-details-line"><span class="job-details-label">Cat</span>' + esc(row.category) + '</span>');
+  }
+  return lines.length ? lines.join('') : '<span class="muted">—</span>';
+}
+function fmtPct(rate) {
+  if (rate == null || !Number.isFinite(Number(rate))) return '—';
+  return Math.round(Number(rate) * 100) + '%';
+}
+function applyRunMetrics(metrics) {
+  const m = metrics || {};
+  const successEl = document.getElementById('statSuccess');
+  const successSub = document.getElementById('statSuccessSub');
+  const chip = document.getElementById('statSuccessChip');
+  if (successEl) {
+    if (m.terminal) {
+      successEl.textContent = fmtPct(m.success_rate);
+      if (successSub) {
+        successSub.textContent = (m.succeeded || 0) + '/' + m.terminal
+          + (m.failed ? ' · ' + m.failed + ' failed' : '');
+      }
+    } else {
+      successEl.textContent = '—';
+      if (successSub) successSub.textContent = m.running ? (m.running + ' running') : 'no finished runs';
+    }
+  }
+  if (chip) {
+    chip.classList.toggle('stat-warn', !!(m.failed && m.failed > 0));
+    chip.classList.toggle('stat-ok', !!(m.terminal && !m.failed && m.succeeded));
+  }
+  setStat('statP50', fmtDuration(m.elapsed_p50_sec) || '—');
+  const p95 = document.getElementById('statP95Sub');
+  if (p95) {
+    const p95txt = fmtDuration(m.elapsed_p95_sec);
+    p95.textContent = p95txt ? ('p95 ' + p95txt) : '';
+  }
+}
+function applyAssemblyHealth(health) {
+  const el = document.getElementById('statHealth');
+  const sub = document.getElementById('statHealthSub');
+  const chip = document.getElementById('statHealthChip');
+  if (!el) return;
+  if (!health) {
+    el.textContent = '—';
+    if (sub) sub.textContent = '';
+    if (chip) {
+      chip.classList.remove('stat-warn', 'stat-ok');
+      chip.title = 'Recent assembly health issues (missing output, bad claims)';
+    }
+    return;
+  }
+  const issues = Number(health.issue_count) || 0;
+  const checked = Number(health.checked) || 0;
+  el.textContent = issues === 0 ? 'OK' : String(issues);
+  if (sub) {
+    sub.textContent = checked
+      ? (issues === 0 ? checked + ' checked' : issues + ' issue' + (issues === 1 ? '' : 's') + ' / ' + checked)
+      : '';
+  }
+  if (chip) {
+    chip.classList.toggle('stat-warn', issues > 0);
+    chip.classList.toggle('stat-ok', issues === 0 && checked > 0);
+    const tip = (health.issues || []).slice(0, 5).map(i => {
+      return (i.execution_id || '?') + ': ' + (i.issue || 'issue');
+    }).join('\n');
+    chip.title = tip || 'Recent assembly health issues (missing output, bad claims)';
+  }
+}
 function fmtBytes(n) {
   if (n == null) return '';
   if (n < 1024) return n + ' B';
@@ -4356,8 +4504,12 @@ async function applyInventory(d) {
     'statPostProcessed',
     inv.backgrounds_ready ?? inv['post-processed'] ?? inv.backgrounds_available
   );
+  setStat('statInFlight', inv.backgrounds_in_flight);
+  setStat('statUsed', inv.backgrounds_used);
   setStat('statMusic', inv.music_mp3s ?? inv.music ?? inv['music']);
   setStat('statVideos', inv.music_videos ?? inv['music-video']);
+  if (d.assembly_metrics) applyRunMetrics(d.assembly_metrics);
+  if (d.assembly_health) applyAssemblyHealth(d.assembly_health);
   const folder = document.getElementById('extendSourceFolder')?.value?.trim();
   if (folder) {
     await refreshExtendPending();
@@ -4535,6 +4687,7 @@ function upsertJobRow(tableId, map, row) {
     tr.innerHTML =
       jobCheckboxHtml(row) +
       '<td class="job-id"><code>' + esc(row.execution_id) + '</code>' + gcpLine + '</td>' +
+      '<td class="job-details muted"></td>' +
       '<td class="job-status status-' + esc(row.status) + '">' + esc(row.status) + '</td>' +
       '<td class="job-progress"><div class="bar"><span class="bar-fill"></span></div>' +
       '<span class="job-pct"></span><span class="job-stage"></span>' + updated + '</td>' +
@@ -4558,6 +4711,8 @@ function upsertJobRow(tableId, map, row) {
   tr.querySelector('.bar-fill').style.width = Math.min(100, Math.max(0, pct)) + '%';
   tr.querySelector('.job-pct').textContent = pct.toFixed(0) + '% ';
   tr.querySelector('.job-stage').textContent = row.stage || (running ? 'Working…' : '');
+  const detailsCell = tr.querySelector('.job-details');
+  if (detailsCell) detailsCell.innerHTML = jobDetailsHtml(row);
   const timingCell = tr.querySelector('.job-timing');
   if (timingCell) timingCell.innerHTML = jobTimingHtml(row);
   const src = row.status_source && row.status_source !== 'r2' ? ' (' + row.status_source + ')' : '';
@@ -5994,6 +6149,12 @@ async function refreshRunningExtendProgress() {
         started_at: p.started_at,
         finished_at: p.finished_at,
         elapsed_sec: p.elapsed_sec,
+        channel: p.channel,
+        video_id: p.video_id,
+        claimed_background: p.claimed_background,
+        duration_min: p.duration_min,
+        images_folder: p.images_folder,
+        category: p.category,
         status_source: 'r2',
       });
     } catch (e) { console.warn('extend progress poll', id, e); }
@@ -6020,6 +6181,12 @@ async function refreshRunningAssemblyProgress() {
         started_at: p.started_at,
         finished_at: p.finished_at,
         elapsed_sec: p.elapsed_sec,
+        channel: p.channel,
+        video_id: p.video_id,
+        claimed_background: p.claimed_background,
+        duration_min: p.duration_min,
+        images_folder: p.images_folder,
+        category: p.category,
         status_source: p.status_source,
       });
     } catch (e) { console.warn('progress poll', id, e); }
@@ -6036,6 +6203,7 @@ async function pollSnapshot({ includeStats, refresh }) {
     const d = await api('/v1/dashboard/snapshot' + q);
     syncJobTable('jobsBody', ui.assembly, d.assembly_runs || []);
     syncJobTable('extendBody', ui.extend, d.extend_runs || []);
+    if (d.assembly_metrics) applyRunMetrics(d.assembly_metrics);
     if (d.has_running) {
       await Promise.all([refreshRunningAssemblyProgress(), refreshRunningExtendProgress()]);
     }
