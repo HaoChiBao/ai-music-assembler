@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from music_assembler.api import job_status
 
 
@@ -88,3 +90,47 @@ def test_reconcile_includes_timing_fields():
     assert out[0]["started_at"] == start.isoformat()
     assert out[0]["finished_at"] == end.isoformat()
     assert out[0]["elapsed_sec"] == 33 * 60
+
+
+def test_reconcile_includes_ops_detail_fields():
+    runs = [
+        {
+            "execution_id": "asm_ops",
+            "channel": "NappaBeats",
+            "claimed_background": "post-processed/korean/bg01.png",
+            "duration_min": 90,
+            "images_folder": "korean",
+            "category": "korean",
+            "progress": {
+                "status": "succeeded",
+                "pct": 100,
+                "video_id": "mv_abc",
+                "channel": "NappaBeats",
+            },
+        }
+    ]
+    out = job_status.reconcile_assembly_runs(None, None, None, runs, reconcile_gcp=False)
+    row = out[0]
+    assert row["channel"] == "nappabeats"
+    assert row["video_id"] == "mv_abc"
+    assert row["claimed_background"] == "post-processed/korean/bg01.png"
+    assert row["duration_min"] == 90
+    assert row["images_folder"] == "korean"
+
+
+def test_summarize_run_metrics_success_and_percentiles():
+    runs = [
+        {"status": "succeeded", "elapsed_sec": 60},
+        {"status": "succeeded", "elapsed_sec": 120},
+        {"status": "succeeded", "elapsed_sec": 180},
+        {"status": "failed", "elapsed_sec": 40},
+        {"status": "running", "elapsed_sec": 10},
+    ]
+    summary = job_status.summarize_run_metrics(runs)
+    assert summary["succeeded"] == 3
+    assert summary["failed"] == 1
+    assert summary["running"] == 1
+    assert summary["terminal"] == 4
+    assert summary["success_rate"] == 0.75
+    assert summary["elapsed_p50_sec"] == 120
+    assert summary["elapsed_p95_sec"] == pytest.approx(174)

@@ -20,11 +20,17 @@ def test_dashboard_javascript_syntax():
     js = _dashboard_script()
     assert "async function init()" in js
     assert "inv.backgrounds_ready" in js
+    assert "inv.backgrounds_in_flight" in js
+    assert "inv.backgrounds_used" in js
     assert "inv.music_mp3s" in js
     assert "inv.music_videos" in js
     assert "function fmtDuration(sec)" in js
     assert "function jobTimingHtml(row)" in js
+    assert "function jobDetailsHtml(row)" in js
+    assert "function applyRunMetrics(metrics)" in js
+    assert "function applyAssemblyHealth(health)" in js
     assert "jobTimingHtml(row)" in js
+    assert "jobDetailsHtml(row)" in js
     tmp = Path("/tmp/dashboard-syntax-test.js")
     tmp.write_text(js, encoding="utf-8")
     subprocess.run(["node", "--check", str(tmp)], check=True)
@@ -65,6 +71,25 @@ if (!running.includes('Elapsed') || !running.includes('2m 5s')) {{
 if (fmtDuration(45) !== '45s') throw new Error('fmtDuration seconds');
 if (fmtDuration(125) !== '2m 5s') throw new Error('fmtDuration minutes');
 if (fmtDuration(3900) !== '1h 5m') throw new Error('fmtDuration hours');
+const details = jobDetailsHtml({{
+  channel: 'nappabeats',
+  video_id: 'mv_test',
+  claimed_background: 'post-processed/korean/bg01.png',
+  duration_min: 90,
+}});
+if (!details.includes('Channel') || !details.includes('nappabeats')) {{
+  throw new Error('details missing channel: ' + details);
+}}
+if (!details.includes('Video') || !details.includes('mv_test')) {{
+  throw new Error('details missing video: ' + details);
+}}
+if (!details.includes('BG') || !details.includes('bg01.png')) {{
+  throw new Error('details missing claimed background: ' + details);
+}}
+if (!details.includes('Target') || !details.includes('90 min')) {{
+  throw new Error('details missing target duration: ' + details);
+}}
+if (fmtPct(0.75) !== '75%') throw new Error('fmtPct');
 """
     tmp = Path("/tmp/dashboard-timing-helpers-test.js")
     tmp.write_text(harness, encoding="utf-8")
