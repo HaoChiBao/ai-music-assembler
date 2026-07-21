@@ -40,6 +40,13 @@ from music_assembler.api.progress_store import read_progress_json, write_meta_js
 from music_assembler.api.progress_store import patch_meta_gcp_execution_id
 from music_assembler.extend_from_r2 import count_pending_r2_sources
 from music_assembler.r2_storage import normalize_source_folder, r2_client, r2_config_from_env
+from music_assembler.video_templates import (
+    DEFAULT_TEMPLATE_ID,
+    UnknownTemplateError,
+    get_template,
+    resolve_template_id,
+    templates_public_list,
+)
 
 app = FastAPI(
     title="Music Assembly API",
@@ -95,8 +102,13 @@ class StartJobRequest(BaseModel):
         description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
+    template_id: str = Field(
+        default=DEFAULT_TEMPLATE_ID,
+        description="Video template id (geometry, defaults, thumbnail strategy).",
+        examples=[DEFAULT_TEMPLATE_ID, "shorts_vertical"],
+    )
     thumbnail_text: str | None = Field(default=None, description="Text burned into the thumbnail.", examples=["PLAYLIST"])
-    duration_min: int | None = Field(default=None, ge=5, le=300, description="Target mix length in minutes.")
+    duration_min: int | None = Field(default=None, ge=1, le=300, description="Target mix length in minutes.")
     variance_min: int | None = Field(default=None, ge=0, le=60, description="Random length variance (+/- minutes).")
     count: int = Field(default=1, ge=1, le=10, description="Parallel assembly jobs to start (one video each).")
     queue_youtube: bool = Field(
@@ -141,6 +153,14 @@ class StartJobRequest(BaseModel):
     @classmethod
     def _validate_images_folder(cls, value: str) -> str:
         return _normalize_images_folder(value)
+
+    @field_validator("template_id")
+    @classmethod
+    def _validate_template_id(cls, value: str) -> str:
+        try:
+            return resolve_template_id(value)
+        except UnknownTemplateError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("upload_privacy")
     @classmethod
@@ -202,7 +222,8 @@ class ChannelScheduleRequest(BaseModel):
         description="R2 subfolder under post-processed/ for background stills (required).",
         examples=["korean"],
     )
-    duration_min: int = Field(default=90, ge=5, le=300)
+    template_id: str = Field(default=DEFAULT_TEMPLATE_ID, examples=[DEFAULT_TEMPLATE_ID, "shorts_vertical"])
+    duration_min: int = Field(default=90, ge=1, le=300)
     variance_min: int = Field(default=15, ge=0, le=60)
     thumbnail_text: str | None = None
     queue_youtube: bool = True
@@ -229,6 +250,14 @@ class ChannelScheduleRequest(BaseModel):
     @classmethod
     def _validate_schedule_images_folder(cls, value: str) -> str:
         return _normalize_images_folder(value)
+
+    @field_validator("template_id")
+    @classmethod
+    def _validate_schedule_template_id(cls, value: str) -> str:
+        try:
+            return resolve_template_id(value)
+        except UnknownTemplateError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("upload_privacy")
     @classmethod
@@ -257,6 +286,7 @@ def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assemb
         timezone=body.timezone.strip(),
         category=body.category,
         images_folder=body.images_folder,
+        template_id=body.template_id,
         duration_min=body.duration_min,
         variance_min=body.variance_min,
         thumbnail_text=body.thumbnail_text,
@@ -529,6 +559,8 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
         "assembly_job": settings.assembly_job_name,
         "extend_job": settings.extend_job_name,
         "default_category": settings.default_category,
+        "default_template_id": DEFAULT_TEMPLATE_ID,
+        "video_templates": templates_public_list(),
         "configured_channels": list(settings.configured_channels),
         "auth": {
             "api": "X-API-Key" if settings.api_key else "none",
@@ -561,6 +593,7 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/background-folders",
             "GET /v1/pre-processed-folders",
             "GET /v1/channels",
+            "GET /v1/video-templates",
             "GET /v1/updates",
             "GET /v1/version",
             "GET /v1/cron/assembly-health",
@@ -602,6 +635,17 @@ def dashboard_summary(
     }
 
 
+@app.get("/v1/video-templates")
+def list_video_templates(_auth: None = Depends(require_api_auth)) -> dict[str, Any]:
+    """List registered assembly video templates for the dashboard picker."""
+    templates = templates_public_list()
+    return {
+        "default_template_id": DEFAULT_TEMPLATE_ID,
+        "templates": templates,
+        "count": len(templates),
+    }
+
+
 @app.post("/v1/assembly/jobs")
 def start_job(
     body: StartJobRequest,
@@ -616,6 +660,12 @@ def start_job(
             status_code=400,
             detail="channel is required (YouTube channel slug for music-video/{channel}/ output)",
         )
+    template = get_template(body.template_id)
+    duration_min = body.duration_min if body.duration_min is not None else template.default_duration_min
+    variance_min = body.variance_min if body.variance_min is not None else template.default_variance_min
+    thumbnail_text = body.thumbnail_text
+    if thumbnail_text is None and template.thumbnail_strategy != "none":
+        thumbnail_text = template.default_thumbnail_text
     client, bucket = _r2()
     _assert_background_folder_exists(client, bucket, body.images_folder)
     _invalidate_category_cache(category)
@@ -651,9 +701,10 @@ def start_job(
             category=category,
             channel=channel,
             images_folder=images_folder,
-            duration_min=body.duration_min,
-            variance_min=body.variance_min,
-            thumbnail_text=body.thumbnail_text,
+            template_id=template.id,
+            duration_min=duration_min,
+            variance_min=variance_min,
+            thumbnail_text=thumbnail_text,
         )
         write_progress_json(
             client,
@@ -671,9 +722,10 @@ def start_job(
                 category=category,
                 channel=channel,
                 images_folder=images_folder,
-                thumbnail_text=body.thumbnail_text,
-                duration_min=body.duration_min,
-                variance_min=body.variance_min,
+                template_id=template.id,
+                thumbnail_text=thumbnail_text,
+                duration_min=duration_min,
+                variance_min=variance_min,
                 queue_youtube=body.queue_youtube,
                 upload_privacy=body.upload_privacy if body.queue_youtube else None,
                 publish_at=publish_at if body.queue_youtube else None,
@@ -1685,9 +1737,21 @@ def dashboard_page(
 ) -> str:
     if not has_dashboard_session(request, settings):
         return _LOGIN_HTML
-    return _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category).replace(
-        "__DEFAULT_THUMBNAIL__",
-        (os.environ.get("THUMBNAIL_TEXT") or "PLAYLIST").strip() or "PLAYLIST",
+    import json as _json
+
+    # Embed as a single-quoted JS string for JSON.parse (keeps raw HTML/JS syntactically valid).
+    templates_json = _json.dumps(templates_public_list(), separators=(",", ":"))
+    templates_js = (
+        templates_json.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "")
+    )
+    return (
+        _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category)
+        .replace(
+            "__DEFAULT_THUMBNAIL__",
+            (os.environ.get("THUMBNAIL_TEXT") or "PLAYLIST").strip() or "PLAYLIST",
+        )
+        .replace("__DEFAULT_TEMPLATE_ID__", DEFAULT_TEMPLATE_ID)
+        .replace("__VIDEO_TEMPLATES_JSON__", templates_js)
     )
 
 
@@ -2172,6 +2236,63 @@ _DASHBOARD_HTML = (
     .run-timing-seg button.active {
       background: var(--color-midnight-ink);
       color: var(--color-white);
+    }
+    .template-picker {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
+      gap: 10px;
+    }
+    .template-option {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin: 0;
+      padding: 12px;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: var(--radius-buttons);
+      background: var(--color-white);
+      text-align: left;
+      cursor: pointer;
+      color: var(--color-midnight-ink);
+      transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+    }
+    .template-option:hover {
+      border-color: color-mix(in srgb, var(--color-midnight-ink) 35%, var(--color-stone-mist));
+      background: color-mix(in srgb, var(--color-cream-paper) 70%, var(--color-white));
+    }
+    .template-option.is-selected {
+      border-color: var(--color-midnight-ink);
+      box-shadow: inset 0 0 0 1px var(--color-midnight-ink);
+      background: color-mix(in srgb, var(--color-pale-lavender-tint) 55%, var(--color-white));
+    }
+    .template-option-preview {
+      width: 100%;
+      max-width: 7.5rem;
+      border: 1px solid var(--color-stone-mist);
+      border-radius: 4px;
+      background:
+        linear-gradient(135deg,
+          color-mix(in srgb, var(--color-deep-forest-teal) 18%, var(--color-cream-paper)),
+          color-mix(in srgb, var(--color-midnight-ink) 8%, var(--color-white)));
+    }
+    .template-option-preview.is-landscape { aspect-ratio: 16 / 9; }
+    .template-option-preview.is-portrait { aspect-ratio: 9 / 16; max-width: 3.25rem; }
+    .template-option-preview.is-square { aspect-ratio: 1 / 1; max-width: 4.5rem; }
+    .template-option-name {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .template-option-meta {
+      font-size: 12px;
+      color: var(--color-graphite-veil);
+      line-height: 1.35;
+    }
+    .template-option-desc {
+      font-size: 12px;
+      color: var(--color-smoke);
+      line-height: 1.4;
+      margin: 0;
     }
     .run-youtube-block {
       border: 1px solid var(--color-stone-mist);
@@ -3484,8 +3605,14 @@ _DASHBOARD_HTML = (
     <div class="create-grid">
       <div class="card">
         <h2>Assemble video</h2>
-        <p class="card-desc">Encode a playlist video on Cloud Run.</p>
+        <p class="card-desc">Choose a video template, then encode on Cloud Run.</p>
         <div class="form-stack">
+          <div>
+            <label id="runTemplateLabel">Video template</label>
+            <div class="template-picker" id="runTemplatePicker" role="radiogroup" aria-labelledby="runTemplateLabel"></div>
+            <input type="hidden" id="runTemplate" value="__DEFAULT_TEMPLATE_ID__"/>
+            <p class="hint" id="runTemplateHint">Template sets aspect ratio, default length, title style, and thumbnail strategy.</p>
+          </div>
           <div>
             <label for="runChannel">YouTube channel</label>
             <select id="runChannel" required><option value="">Select channel…</option></select>
@@ -3563,7 +3690,7 @@ _DASHBOARD_HTML = (
               <div class="form-row-3">
                 <div>
                   <label for="runDuration">Duration (min)</label>
-                  <input id="runDuration" type="number" min="5" max="300" step="1" value="90"/>
+                  <input id="runDuration" type="number" min="1" max="300" step="1" value="90"/>
                 </div>
                 <div>
                   <label for="runVariance">Variance (min)</label>
@@ -3832,6 +3959,11 @@ _DASHBOARD_HTML = (
             <div class="schedule-inline-action">
               <button type="button" class="btn-secondary btn-sm" id="scheduleApplyDefault">Apply defaults to enabled days</button>
             </div>
+            <div>
+              <label id="scheduleTemplateLabel">Video template</label>
+              <div class="template-picker" id="scheduleTemplatePicker" role="radiogroup" aria-labelledby="scheduleTemplateLabel"></div>
+              <input type="hidden" id="scheduleTemplate" value="__DEFAULT_TEMPLATE_ID__"/>
+            </div>
             <div class="form-row-3">
               <div>
                 <label for="scheduleThumb">Thumbnail text</label>
@@ -3839,7 +3971,7 @@ _DASHBOARD_HTML = (
               </div>
               <div>
                 <label for="scheduleDuration">Duration (min)</label>
-                <input id="scheduleDuration" type="number" min="5" max="300" value="90"/>
+                <input id="scheduleDuration" type="number" min="1" max="300" value="90"/>
               </div>
               <div>
                 <label for="scheduleVariance">Variance (min)</label>
@@ -4258,6 +4390,98 @@ function fmtBytes(n) {
   return (n/1048576).toFixed(1) + ' MB';
 }
 function cat() { return '__DEFAULT_CATEGORY__'; }
+const VIDEO_TEMPLATES = JSON.parse('__VIDEO_TEMPLATES_JSON__');
+const DEFAULT_TEMPLATE_ID = '__DEFAULT_TEMPLATE_ID__';
+function findVideoTemplate(id) {
+  const tid = (id || DEFAULT_TEMPLATE_ID).trim();
+  return VIDEO_TEMPLATES.find((t) => t.id === tid) || VIDEO_TEMPLATES[0] || null;
+}
+function selectedTemplateId(inputId) {
+  const el = document.getElementById(inputId);
+  const tid = (el?.value || DEFAULT_TEMPLATE_ID).trim();
+  return findVideoTemplate(tid)?.id || DEFAULT_TEMPLATE_ID;
+}
+function applyTemplateDefaults(template, opts) {
+  if (!template) return;
+  const { thumbId, durationId, varianceId, applyThumb, applyDuration } = opts || {};
+  if (applyThumb !== false && thumbId) {
+    const thumb = document.getElementById(thumbId);
+    if (thumb) thumb.value = template.default_thumbnail_text || '';
+  }
+  if (applyDuration !== false && durationId) {
+    const duration = document.getElementById(durationId);
+    if (duration) duration.value = String(template.default_duration_min ?? 90);
+  }
+  if (applyDuration !== false && varianceId) {
+    const variance = document.getElementById(varianceId);
+    if (variance) variance.value = String(template.default_variance_min ?? 15);
+  }
+}
+function renderTemplatePicker(pickerId, inputId, selectedId, onChange) {
+  const picker = document.getElementById(pickerId);
+  const input = document.getElementById(inputId);
+  if (!picker || !input) return;
+  const current = findVideoTemplate(selectedId || input.value)?.id || DEFAULT_TEMPLATE_ID;
+  input.value = current;
+  picker.innerHTML = '';
+  for (const t of VIDEO_TEMPLATES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'template-option' + (t.id === current ? ' is-selected' : '');
+    btn.setAttribute('role', 'radio');
+    btn.setAttribute('aria-checked', t.id === current ? 'true' : 'false');
+    btn.dataset.templateId = t.id;
+    const orientClass = t.orientation === 'portrait'
+      ? 'is-portrait'
+      : (t.orientation === 'square' ? 'is-square' : 'is-landscape');
+    const durLabel = t.default_variance_min
+      ? (t.default_duration_min + ' ± ' + t.default_variance_min + ' min')
+      : (t.default_duration_min + ' min');
+    btn.innerHTML =
+      '<span class="template-option-preview ' + orientClass + '" aria-hidden="true"></span>'
+      + '<span class="template-option-name">' + esc(t.name) + '</span>'
+      + '<span class="template-option-meta">' + esc(t.aspect_label) + ' · ' + esc(durLabel) + '</span>'
+      + '<p class="template-option-desc">' + esc(t.description) + '</p>';
+    btn.addEventListener('click', () => {
+      if (input.value === t.id) return;
+      input.value = t.id;
+      picker.querySelectorAll('.template-option').forEach((el) => {
+        const on = el.dataset.templateId === t.id;
+        el.classList.toggle('is-selected', on);
+        el.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+      if (typeof onChange === 'function') onChange(t);
+    });
+    picker.appendChild(btn);
+  }
+}
+function initTemplatePickers() {
+  renderTemplatePicker('runTemplatePicker', 'runTemplate', DEFAULT_TEMPLATE_ID, (t) => {
+    applyTemplateDefaults(t, {
+      thumbId: 'runThumb',
+      durationId: 'runDuration',
+      varianceId: 'runVariance',
+    });
+    const hint = document.getElementById('runTemplateHint');
+    if (hint) {
+      hint.textContent = t.video_width + '×' + t.video_height
+        + ' · thumbnail: ' + (t.thumbnail_strategy || 'none').replace(/_/g, ' ');
+    }
+  });
+  applyTemplateDefaults(findVideoTemplate(DEFAULT_TEMPLATE_ID), {
+    thumbId: 'runThumb',
+    durationId: 'runDuration',
+    varianceId: 'runVariance',
+  });
+  renderTemplatePicker('scheduleTemplatePicker', 'scheduleTemplate', DEFAULT_TEMPLATE_ID, (t) => {
+    applyTemplateDefaults(t, {
+      thumbId: 'scheduleThumb',
+      durationId: 'scheduleDuration',
+      varianceId: 'scheduleVariance',
+    });
+    updateScheduleSummary();
+  });
+}
 function runChannel() {
   const custom = document.getElementById('runChannelCustom').value.trim();
   if (custom) return custom;
@@ -5521,8 +5745,9 @@ function readScheduleVideoSettings() {
   if (!Number.isFinite(duration)) duration = 90;
   if (!Number.isFinite(variance)) variance = 15;
   return {
+    template_id: selectedTemplateId('scheduleTemplate'),
     thumbnail_text: thumb || null,
-    duration_min: Math.min(300, Math.max(5, duration)),
+    duration_min: Math.min(300, Math.max(1, duration)),
     variance_min: Math.min(60, Math.max(0, variance)),
   };
 }
@@ -5547,8 +5772,11 @@ function updateScheduleSummary() {
     else if (upload.upload_schedule_publish) youtubeLabel = esc(upload.upload_privacy) + ' · auto-upload at day upload time';
     else youtubeLabel = esc(upload.upload_privacy) + ' · queue only (manual upload)';
   }
+  const tmpl = findVideoTemplate(video.template_id);
+  const tmplLabel = tmpl ? (tmpl.name + ' (' + tmpl.aspect_label + ')') : video.template_id;
   el.innerHTML =
     '<dt>Channel</dt><dd><code>' + esc(channel) + '</code></dd>'
+    + '<dt>Template</dt><dd>' + esc(tmplLabel) + '</dd>'
     + '<dt>Background pool</dt><dd><code>post-processed/' + esc(folder) + '/</code></dd>'
     + '<dt>Music</dt><dd><code>music/' + esc(cat()) + '/</code></dd>'
     + '<dt>Video length</dt><dd>' + esc(String(video.duration_min)) + ' min ± ' + esc(String(video.variance_min)) + ' min</dd>'
@@ -5613,9 +5841,18 @@ function fillScheduleForm(data) {
     document.getElementById('scheduleDefaultUpload'),
     data.default_upload_at || uploadTimeAfterAssemble(data.default_assemble_at || DEFAULT_ASSEMBLE_TIME) || ''
   );
+  const scheduleTemplateId = data.template_id || DEFAULT_TEMPLATE_ID;
+  renderTemplatePicker('scheduleTemplatePicker', 'scheduleTemplate', scheduleTemplateId, (t) => {
+    applyTemplateDefaults(t, {
+      thumbId: 'scheduleThumb',
+      durationId: 'scheduleDuration',
+      varianceId: 'scheduleVariance',
+    });
+    updateScheduleSummary();
+  });
   document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
-  document.getElementById('scheduleDuration').value = data.duration_min ?? 90;
-  document.getElementById('scheduleVariance').value = data.variance_min ?? 15;
+  document.getElementById('scheduleDuration').value = data.duration_min ?? findVideoTemplate(scheduleTemplateId)?.default_duration_min ?? 90;
+  document.getElementById('scheduleVariance').value = data.variance_min ?? findVideoTemplate(scheduleTemplateId)?.default_variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
   document.getElementById('scheduleUploadPrivacy').value = data.upload_privacy || 'private';
   if (data.upload_now) setScheduleUploadMode('immediate');
@@ -5969,15 +6206,17 @@ function isScheduleNotFound(err) {
   return msg.includes('Schedule not found') || /\b404\b/.test(msg);
 }
 function defaultNewSchedule(channel) {
+  const tmpl = findVideoTemplate(DEFAULT_TEMPLATE_ID);
   return {
     channel,
     enabled: true,
     timezone: 'America/New_York',
     default_assemble_at: DEFAULT_ASSEMBLE_TIME,
     default_upload_at: '12:00',
-    duration_min: 90,
-    variance_min: 15,
-    thumbnail_text: '__DEFAULT_THUMBNAIL__',
+    template_id: tmpl?.id || DEFAULT_TEMPLATE_ID,
+    duration_min: tmpl?.default_duration_min ?? 90,
+    variance_min: tmpl?.default_variance_min ?? 15,
+    thumbnail_text: tmpl?.default_thumbnail_text || '__DEFAULT_THUMBNAIL__',
     queue_youtube: true,
     upload_schedule_publish: true,
     upload_now: false,
@@ -6021,6 +6260,7 @@ async function saveSchedule() {
       enabled: document.getElementById('scheduleEnabled').checked,
       timezone: document.getElementById('scheduleTimezone').value.trim() || 'America/New_York',
       images_folder: imagesFolder,
+      template_id: video.template_id,
       duration_min: video.duration_min,
       variance_min: video.variance_min,
       thumbnail_text: video.thumbnail_text,
@@ -6281,17 +6521,20 @@ document.getElementById('runBtn').onclick = async () => {
     }
     if (!publishAt && uploadAt) publishAt = uploadAt;
   }
+  const templateId = selectedTemplateId('runTemplate');
+  const tmpl = findVideoTemplate(templateId);
   let durationMin = parseInt(document.getElementById('runDuration').value, 10);
   let varianceMin = parseInt(document.getElementById('runVariance').value, 10);
-  if (!Number.isFinite(durationMin)) durationMin = 90;
-  if (!Number.isFinite(varianceMin)) varianceMin = 15;
-  durationMin = Math.min(300, Math.max(5, durationMin));
+  if (!Number.isFinite(durationMin)) durationMin = tmpl?.default_duration_min ?? 90;
+  if (!Number.isFinite(varianceMin)) varianceMin = tmpl?.default_variance_min ?? 15;
+  durationMin = Math.min(300, Math.max(1, durationMin));
   varianceMin = Math.min(60, Math.max(0, varianceMin));
   setBtnLoading(btn, true, 'Starting…');
   try {
     const payload = {
       channel: channel,
       images_folder: imagesFolder,
+      template_id: templateId,
       thumbnail_text: document.getElementById('runThumb').value,
       duration_min: durationMin,
       variance_min: varianceMin,
@@ -6504,6 +6747,8 @@ document.getElementById('scheduleDelete').onclick = async () => {
     showScheduleSubtab('overview');
   } catch (e) { alert(String(e)); }
 };
+
+initTemplatePickers();
 
 (async function init() {
   renderObsBar();

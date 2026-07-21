@@ -184,6 +184,7 @@ def start_assembly_job(
     category: str,
     channel: str | None = None,
     images_folder: str | None = None,
+    template_id: str | None = None,
     thumbnail_text: str | None = None,
     duration_min: int | None = None,
     variance_min: int | None = None,
@@ -206,6 +207,8 @@ def start_assembly_job(
         env.append(run_v2.EnvVar(name="ASSEMBLY_IMAGES_FOLDER", value=images_folder.strip()))
     if channel:
         env.append(run_v2.EnvVar(name="ASSEMBLY_CHANNEL", value=channel))
+    if template_id and template_id.strip():
+        env.append(run_v2.EnvVar(name="ASSEMBLY_TEMPLATE_ID", value=template_id.strip()))
     if thumbnail_text:
         env.append(run_v2.EnvVar(name="THUMBNAIL_TEXT", value=thumbnail_text))
     if duration_min is not None:

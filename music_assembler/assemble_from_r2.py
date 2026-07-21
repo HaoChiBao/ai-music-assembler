@@ -6,7 +6,8 @@ Windows and anywhere Python is available.
 Bucket layout: see ``docs/r2-bucket-layout.md``.
 
 Required ``.env`` keys: ``CLOUDFLARE_R2_*`` and ``ASSEMBLY_CATEGORY`` (or folder flags).
-Optional: ``THUMBNAIL_TEXT``, ``ASSEMBLY_DURATION_MIN`` / ``ASSEMBLY_VARIANCE_MIN``,
+Optional: ``ASSEMBLY_TEMPLATE_ID``, ``THUMBNAIL_TEXT``,
+``ASSEMBLY_DURATION_MIN`` / ``ASSEMBLY_VARIANCE_MIN``,
 ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` for YouTube metadata.
 Optional: ``--queue-youtube`` / ``ASSEMBLY_QUEUE_YOUTUBE`` to register on the youtube-uploader
 pending queue after R2 upload (needs ``UPLOADER_API_URL`` + ``UPLOADER_API_KEY``).
@@ -36,9 +37,14 @@ from music_assembler.assemble_options import (
     unique_output_basename,
 )
 from music_assembler.bottom_text_overlay import resolve_font_key
-from music_assembler.config import AssemblerConfig, AssemblerPaths, TextOverlayStyle
+from music_assembler.config import AssemblerConfig, AssemblerPaths
 from music_assembler.ffmpeg_util import FFmpegNotFoundError, find_ffmpeg, find_ffprobe
 from music_assembler.pipeline import assemble
+from music_assembler.video_templates import (
+    DEFAULT_TEMPLATE_ID,
+    list_template_ids,
+    resolve_template,
+)
 from music_assembler.r2_storage import (
     AUDIO_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -79,10 +85,11 @@ DEFAULT_TITLE_FONT_SIZE = 46
 DEFAULT_TITLE_FONT_WEIGHT = 400
 
 
-def _print_preflight(duration) -> None:
+def _print_preflight(duration, template) -> None:
     avg_min = (duration.min_sec + duration.max_sec) / 2 / 60.0
     print(
-        f"==> Expect ffmpeg encode to take a while (~{avg_min:.0f} min target video; "
+        f"==> Template {template.id} ({template.video_width}x{template.video_height}). "
+        f"Expect ffmpeg encode to take a while (~{avg_min:.0f} min target video; "
         "often 20-60+ min on a laptop). Do not interrupt unless stuck.",
         file=sys.stderr,
     )
@@ -127,10 +134,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip thumbnail generation (faster).",
     )
     p.add_argument(
+        "--template",
+        default=None,
+        metavar="ID",
+        help=(
+            "Video template id (dimensions, defaults, thumbnail strategy). "
+            f"Known: {', '.join(list_template_ids())}. "
+            f"Default: {DEFAULT_TEMPLATE_ID} or ASSEMBLY_TEMPLATE_ID."
+        ),
+    )
+    p.add_argument(
         "--title-font-size",
         type=int,
-        default=DEFAULT_TITLE_FONT_SIZE,
-        help=f"Bottom-left song-title font size in px (default: {DEFAULT_TITLE_FONT_SIZE}).",
+        default=None,
+        help=(
+            "Bottom-left song-title font size in px "
+            f"(default: from the selected template, usually {DEFAULT_TITLE_FONT_SIZE})."
+        ),
     )
     p.add_argument(
         "--thumbnail-text",
@@ -337,6 +357,12 @@ def main(argv: list[str] | None = None) -> int:
         print(e, file=sys.stderr)
         return 2
 
+    try:
+        template = resolve_template(args.template)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
     category, music_folder, images_folder, output_folder, channel = resolve_folder_args(args)
     prefixes = resolve_r2_assembly_prefixes(
         category=category,
@@ -353,6 +379,11 @@ def main(argv: list[str] | None = None) -> int:
             duration_sec = env_duration_sec
         if variance_sec is None:
             variance_sec = env_variance_sec
+    # Fall back to template defaults when neither CLI nor env set a target length.
+    if duration_sec is None and args.min_sec is None and args.max_sec is None:
+        duration_sec = float(template.default_duration_min) * 60.0
+        if variance_sec is None:
+            variance_sec = float(template.default_variance_min) * 60.0
     duration = resolve_duration_bounds(
         duration_sec=duration_sec,
         variance_sec=variance_sec,
@@ -502,19 +533,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     project_root = Path.cwd().resolve()
-    font_key = resolve_font_key(project_root, None, weight=DEFAULT_TITLE_FONT_WEIGHT)
+    font_weight = template.title_font_weight or DEFAULT_TITLE_FONT_WEIGHT
+    font_key = resolve_font_key(project_root, None, weight=font_weight)
     basename = unique_output_basename(execution_id)
+    title_font_size = (
+        args.title_font_size if args.title_font_size is not None else template.title_font_size_px
+    )
 
-    thumbnail_text = None if args.no_thumbnail else args.thumbnail_text
-    if thumbnail_text is None and not args.no_thumbnail:
+    skip_thumbnail = args.no_thumbnail or template.thumbnail_strategy == "none"
+    thumbnail_text = None if skip_thumbnail else args.thumbnail_text
+    if thumbnail_text is None and not skip_thumbnail:
         thumbnail_text = os.environ.get("THUMBNAIL_TEXT", "").strip() or None
+    if thumbnail_text is None and not skip_thumbnail:
+        thumbnail_text = template.default_thumbnail_text
     if thumbnail_text:
         thumbnail_text = thumbnail_text.replace("\\n", "\n")
     thumbnail_bottom_text = (
         args.thumbnail_bottom_text.replace("\\n", "\n") if args.thumbnail_bottom_text else None
     )
 
-    _print_preflight(duration)
+    _print_preflight(duration, template)
 
     progress_cb = None
     if execution_id:
@@ -527,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
             category=prefixes.images_folder,
             claimed_background=claimed_background,
             channel=prefixes.channel,
+            template_id=template.id,
         )
 
         def progress_cb(pct: float, msg: str) -> None:
@@ -547,16 +586,14 @@ def main(argv: list[str] | None = None) -> int:
             project_root=project_root,
         ),
         duration=duration,
-        text=TextOverlayStyle(
-            font_key=font_key,
-            font_size_px=args.title_font_size,
-            font_weight=DEFAULT_TITLE_FONT_WEIGHT,
-            fill_color=(255, 255, 255, 235),
-        ),
-        video_width=1920,
-        video_height=1080,
+        text=template.text_overlay_style(font_key=font_key),
+        video_width=template.video_width,
+        video_height=template.video_height,
         seed=None,
     )
+    # Allow CLI --title-font-size to override the template default.
+    if args.title_font_size is not None:
+        assembler_cfg.text.font_size_px = title_font_size
 
     print(f"==> Assemble one video in {work_dir}")
     try:

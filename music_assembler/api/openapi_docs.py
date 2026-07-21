@@ -262,6 +262,7 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "category": "korean",
             "channel": "lofi-beats",
             "images_folder": "korean",
+            "template_id": "playlist_landscape",
             "thumbnail_text": "OMYO",
             "duration_min": 90,
             "variance_min": 15,
