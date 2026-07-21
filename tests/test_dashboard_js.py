@@ -4,16 +4,33 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 
-def _dashboard_script() -> str:
+def _dashboard_html_runtime() -> str:
+    """Evaluate ``_DASHBOARD_HTML`` as Python does (catches ``\\n`` escape bugs)."""
     text = Path("music_assembler/api/app.py").read_text(encoding="utf-8")
-    start = text.index("_DASHBOARD_HTML = (")
-    end = text.index("install_openapi_docs(app)", start)
-    chunk = text[start:end]
-    pos = list(re.finditer(r"<script>\n", chunk))[-1].end()
-    return chunk[pos : chunk.find("\n</script>", pos)]
+    fonts_start = text.index("_DASHBOARD_DESIGN_FONTS = ")
+    login_start = text.index("\n_LOGIN_HTML")
+    html_start = text.index("_DASHBOARD_HTML = (")
+    html_end = text.index("\ninstall_openapi_docs(app)", html_start)
+    code = (
+        text[fonts_start:login_start]
+        + "\n"
+        + text[html_start:html_end]
+        + "\nhtml = _DASHBOARD_HTML\n"
+    )
+    ns: dict = {}
+    exec(code, ns)
+    return ns["html"]
+
+
+def _dashboard_script() -> str:
+    html = _dashboard_html_runtime()
+    scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
+    assert scripts, "dashboard HTML missing <script> block"
+    return scripts[-1]
 
 
 def test_dashboard_javascript_syntax():
@@ -36,9 +53,13 @@ def test_dashboard_javascript_syntax():
     assert "template_id: templateId" in js or "template_id: video.template_id" in js
     # Placeholders must remain valid JS syntax before server-side substitution.
     assert "JSON.parse('__VIDEO_TEMPLATES_JSON__')" in js
-    tmp = Path("/tmp/dashboard-syntax-test.js")
-    tmp.write_text(js, encoding="utf-8")
-    subprocess.run(["node", "--check", str(tmp)], check=True)
+    # Runtime string must keep JS newline escapes (not expand them to real newlines).
+    assert ").join('\\n');" in js or ').join("\\n");' in js
+    assert ").join('\n');" not in js
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dashboard-syntax-test.js"
+        path.write_text(js, encoding="utf-8")
+        subprocess.run(["node", "--check", str(path)], check=True)
 
 
 def test_dashboard_timing_helpers():
@@ -96,9 +117,10 @@ if (!details.includes('Target') || !details.includes('90 min')) {{
 }}
 if (fmtPct(0.75) !== '75%') throw new Error('fmtPct');
 """
-    tmp = Path("/tmp/dashboard-timing-helpers-test.js")
-    tmp.write_text(harness, encoding="utf-8")
-    subprocess.run(["node", str(tmp)], check=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dashboard-timing-helpers-test.js"
+        path.write_text(harness, encoding="utf-8")
+        subprocess.run(["node", str(path)], check=True)
 
 
 def test_batched_asset_upload_snapshots_destination_pool(tmp_path):
@@ -142,4 +164,3 @@ def test_schedule_subtab_switch_preserves_unsaved_editor_state():
 
     assert "loadScheduleOverview()" in js[start:end]
     assert "loadScheduleEditor(" not in js[start:end]
-

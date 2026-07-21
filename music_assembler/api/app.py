@@ -4379,7 +4379,7 @@ function applyAssemblyHealth(health) {
     chip.classList.toggle('stat-ok', issues === 0 && checked > 0);
     const tip = (health.issues || []).slice(0, 5).map(i => {
       return (i.execution_id || '?') + ': ' + (i.issue || 'issue');
-    }).join('\n');
+    }).join('\\n');
     chip.title = tip || 'Recent assembly health issues (missing output, bad claims)';
   }
 }
