@@ -144,6 +144,29 @@ def test_channel_schedule_from_dict_upload_now_disables_schedule_publish():
     assert sched.upload_schedule_publish is False
 
 
+def test_channel_schedule_roundtrip_template_id():
+    sched = ChannelSchedule.from_dict(
+        {
+            "channel": "ch",
+            "template_id": "shorts_vertical",
+            "images_folder": "korean",
+            "days": [{"enabled": True, "assemble_at": "11:00"}] + [{} for _ in range(6)],
+        }
+    )
+    assert sched.template_id == "shorts_vertical"
+    assert sched.to_dict()["template_id"] == "shorts_vertical"
+
+
+def test_channel_schedule_defaults_template_id():
+    sched = ChannelSchedule.from_dict(
+        {
+            "channel": "ch",
+            "days": [{} for _ in range(7)],
+        }
+    )
+    assert sched.template_id == "playlist_landscape"
+
+
 def test_effective_schedule_at_keeps_future():
     from music_assembler.api.assembly_schedule import effective_schedule_at
 

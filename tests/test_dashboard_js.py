@@ -31,6 +31,11 @@ def test_dashboard_javascript_syntax():
     assert "function applyAssemblyHealth(health)" in js
     assert "jobTimingHtml(row)" in js
     assert "jobDetailsHtml(row)" in js
+    assert "function initTemplatePickers()" in js
+    assert "function renderTemplatePicker(" in js
+    assert "template_id: templateId" in js or "template_id: video.template_id" in js
+    # Placeholders must remain valid JS syntax before server-side substitution.
+    assert "JSON.parse('__VIDEO_TEMPLATES_JSON__')" in js
     tmp = Path("/tmp/dashboard-syntax-test.js")
     tmp.write_text(js, encoding="utf-8")
     subprocess.run(["node", "--check", str(tmp)], check=True)

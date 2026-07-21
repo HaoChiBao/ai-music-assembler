@@ -66,6 +66,7 @@ class ChannelSchedule:
     timezone: str = "America/New_York"
     category: str | None = None
     images_folder: str | None = None
+    template_id: str = "playlist_landscape"
     duration_min: int = 90
     variance_min: int = 15
     thumbnail_text: str | None = None
@@ -89,6 +90,7 @@ class ChannelSchedule:
             "timezone": self.timezone,
             "category": self.category,
             "images_folder": self.images_folder,
+            "template_id": self.template_id,
             "duration_min": self.duration_min,
             "variance_min": self.variance_min,
             "thumbnail_text": self.thumbnail_text,
@@ -121,12 +123,19 @@ class ChannelSchedule:
         # Immediate dispatch and timed publishAt are mutually exclusive.
         if upload_now:
             upload_schedule_publish = False
+        from music_assembler.video_templates import DEFAULT_TEMPLATE_ID, resolve_template_id
+
+        try:
+            template_id = resolve_template_id(data.get("template_id"))
+        except ValueError:
+            template_id = DEFAULT_TEMPLATE_ID
         sched = cls(
             channel=channel,
             enabled=bool(data.get("enabled", True)),
             timezone=str(data.get("timezone") or "America/New_York").strip(),
             category=(str(data["category"]).strip() if data.get("category") else None),
             images_folder=(str(data["images_folder"]).strip() if data.get("images_folder") else None),
+            template_id=template_id,
             duration_min=int(data.get("duration_min") or 90),
             variance_min=int(data["variance_min"]) if data.get("variance_min") is not None else 15,
             thumbnail_text=(str(data["thumbnail_text"]).strip() if data.get("thumbnail_text") else None),
@@ -639,6 +648,7 @@ def schedules_overview(
                     DaySlot(enabled=True, assemble_at=sched.default_assemble_at),
                     sched,
                 ),
+                "template_id": sched.template_id,
                 "duration_min": sched.duration_min,
                 "queue_youtube": sched.queue_youtube,
                 "upload_schedule_publish": sched.upload_schedule_publish,
@@ -708,6 +718,7 @@ def start_scheduled_assembly(
         category=category,
         channel=schedule.channel,
         images_folder=images_folder,
+        template_id=schedule.template_id,
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
         thumbnail_text=schedule.thumbnail_text,
@@ -732,6 +743,7 @@ def start_scheduled_assembly(
         category=category,
         channel=schedule.channel,
         images_folder=images_folder,
+        template_id=schedule.template_id,
         thumbnail_text=schedule.thumbnail_text,
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
