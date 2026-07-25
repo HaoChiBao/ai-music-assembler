@@ -126,6 +126,8 @@ if (fmtPct(0.75) !== '75%') throw new Error('fmtPct');
 def test_batched_asset_upload_snapshots_destination_pool(tmp_path):
     js = _dashboard_script()
     assert "const uploadPool = ui.assetPool;" in js
+    assert "const imagesFolder = uploadTargetImagesFolder(uploadPool);" in js
+    assert "folderWrap.hidden = !assetPoolAllowsUpload(ui.assetPool)" in js
     assert re.search(
         r"uploadAssetBatchWithRetry\(\s*batch,\s*uploadPool,\s*imagesFolder,",
         js,
@@ -150,6 +152,16 @@ const data = buildAssetUploadFormData(
 const pool = data.values.find(([key]) => key === 'pool');
 if (!pool || pool[1] !== 'post-processed') {{
   throw new Error('upload pool was not preserved');
+}}
+const preData = buildAssetUploadFormData(
+  [{{name: 'vertical.jpg'}}],
+  'pre-processed',
+  'shorts',
+  false
+);
+const preFolder = preData.values.find(([key]) => key === 'images_folder');
+if (!preFolder || preFolder[1] !== 'shorts') {{
+  throw new Error('custom pre-processed folder was not preserved');
 }}
 """
     tmp = tmp_path / "dashboard-upload-pool-test.js"

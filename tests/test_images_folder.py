@@ -29,9 +29,10 @@ def test_schedule_rejects_path_traversal():
         ChannelScheduleRequest(images_folder="../evil")
 
 
-def test_asset_folder_uses_images_folder_for_post_processed():
+def test_asset_folder_uses_explicit_folder_for_every_pool():
     assert _asset_folder("korean", "post-processed", "japanese") == "japanese"
-    assert _asset_folder("korean", "pre-processed", "japanese") == "korean"
+    assert _asset_folder("korean", "pre-processed", "japanese") == "japanese"
+    assert _asset_folder("korean", "pre-processed") == "korean"
 
 
 def test_asset_object_key_post_processed_with_images_folder():
