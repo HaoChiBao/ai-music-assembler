@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock, patch
 
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
@@ -11,8 +11,10 @@ from music_assembler.api.assembly_schedule import (
     apply_default_times,
     due_slots,
     ensure_schedule_upload_times,
+    evaluate_resources,
     ledger_is_terminal,
     preview_schedule,
+    run_due_schedules,
     slot_key,
     upload_time_after_assemble,
     upsert_schedule,
@@ -79,6 +81,103 @@ def test_ledger_is_terminal():
     assert ledger_is_terminal({"status": "succeeded"})
     assert not ledger_is_terminal({"status": "skipped"})
     assert not ledger_is_terminal(None)
+
+
+def test_evaluate_resources_scopes_backgrounds_and_pending_to_images_folder():
+    schedule = ChannelSchedule(
+        channel="ch",
+        category="korean",
+        images_folder="lofi",
+        min_backgrounds=3,
+        auto_extend=True,
+    )
+    settings = MagicMock(default_category="default")
+    cfg = object()
+
+    def inventory(_client, _bucket, folder):
+        if folder == "korean":
+            return {"backgrounds_available": 10, "music_mp3s": 2}
+        return {"backgrounds_available": 0}
+
+    with (
+        patch(
+            "music_assembler.api.assembly_schedule.category_inventory",
+            side_effect=inventory,
+        ),
+        patch(
+            "music_assembler.api.assembly_schedule.r2_config_from_env",
+            return_value=cfg,
+        ),
+        patch(
+            "music_assembler.api.assembly_schedule.count_pending_r2_sources",
+            return_value=4,
+        ) as count_pending,
+    ):
+        resources = evaluate_resources(MagicMock(), "bucket", schedule, settings)
+
+    assert resources["backgrounds_available"] == 0
+    assert resources["extend_pending"] == 4
+    assert resources["ready"] is False
+    assert "low_backgrounds" in resources["blockers"]
+    count_pending.assert_called_once_with(
+        ANY,
+        cfg,
+        source_folder="lofi",
+    )
+
+
+def test_run_due_schedules_passes_images_folder_to_auto_extend():
+    schedule = ChannelSchedule(
+        channel="ch",
+        category="korean",
+        images_folder="lofi",
+        auto_extend=True,
+    )
+    slot = {"slot_key": "ch:2026-07-19:0:11:00"}
+    resources = {
+        "ready": False,
+        "category": "korean",
+        "images_folder": "lofi",
+        "extend_pending": 4,
+        "blockers": ["low_backgrounds", "extend_recommended"],
+    }
+    start_extend = MagicMock(return_value={"gcp_execution_id": "gcp-1"})
+
+    with (
+        patch(
+            "music_assembler.api.assembly_schedule.list_schedules",
+            return_value=[schedule],
+        ),
+        patch(
+            "music_assembler.api.assembly_schedule.due_slots",
+            return_value=[slot],
+        ),
+        patch(
+            "music_assembler.api.assembly_schedule.read_ledger",
+            return_value=None,
+        ),
+        patch(
+            "music_assembler.api.assembly_schedule.evaluate_resources",
+            return_value=resources,
+        ),
+    ):
+        result = run_due_schedules(
+            MagicMock(),
+            "bucket",
+            MagicMock(),
+            new_execution_id=lambda: "ext-1",
+            start_extend_fn=start_extend,
+        )
+
+    assert result["results"][0]["action"] == "deferred_extend"
+    start_extend.assert_called_once()
+    assert start_extend.call_args.kwargs == {
+        "execution_id": "ext-1",
+        "category": "korean",
+        "source_folder": "lofi",
+        "max_images": 3,
+        "force": False,
+    }
 
 
 def test_ensure_schedule_upload_times_fills_missing():

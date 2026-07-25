@@ -851,6 +851,7 @@ def _start_extend_for_schedule(
     *,
     execution_id: str,
     category: str,
+    source_folder: str,
     max_images: int,
     force: bool,
 ) -> dict[str, Any]:
@@ -861,6 +862,7 @@ def _start_extend_for_schedule(
         category=category,
         job_type="extend",
         limit=max_images,
+        source_folder=source_folder,
     )
     write_progress_json(
         client,
@@ -870,12 +872,17 @@ def _start_extend_for_schedule(
         stage="Scheduled auto-extend…",
         category=category,
         status="running",
-        extra={"job_type": "extend", "source": "schedule"},
+        extra={
+            "job_type": "extend",
+            "source": "schedule",
+            "source_folder": source_folder,
+        },
     )
     return gcp_jobs.start_extend_job(
         settings,
         execution_id=execution_id,
         category=category,
+        source_folder=source_folder,
         max_images=max_images,
         force=force,
     )
@@ -1035,13 +1042,24 @@ def cron_run_schedules(
     """Evaluate per-channel schedules and start assembly jobs (Cloud Scheduler every 15m)."""
     client, bucket = _r2()
 
-    def _extend(client, bucket, settings, *, execution_id, category, max_images, force):
+    def _extend(
+        client,
+        bucket,
+        settings,
+        *,
+        execution_id,
+        category,
+        source_folder,
+        max_images,
+        force,
+    ):
         return _start_extend_for_schedule(
             client,
             bucket,
             settings,
             execution_id=execution_id,
             category=category,
+            source_folder=source_folder,
             max_images=max_images,
             force=force,
         )
