@@ -61,7 +61,7 @@ app = FastAPI(
 def _normalize_images_folder(value: str) -> str:
     folder = value.strip().strip("/")
     if not folder or ".." in folder or "/" in folder or "\\" in folder:
-        raise ValueError("images_folder must be a single folder name under post-processed/")
+        raise ValueError("images_folder must be a single asset folder name")
     return folder
 
 
@@ -1113,6 +1113,7 @@ def media_asset(
     if pool in ("post-processed", "post-used"):
         if not images_folder or not str(images_folder).strip():
             raise HTTPException(status_code=400, detail="images_folder is required for this pool")
+    if images_folder and str(images_folder).strip():
         try:
             folder = _normalize_images_folder(images_folder)
         except ValueError as exc:
@@ -1188,7 +1189,7 @@ def list_assets(
     pool: str = Query(pattern="^(pre-processed|pre-used|post-processed|post-used)$"),
     images_folder: str | None = Query(
         default=None,
-        description="Background pool under post-processed/ (required for post-processed and post-used pools).",
+        description="Asset folder override (required for post-processed and post-used pools).",
     ),
     limit: int = Query(default=200, ge=1, le=1000),
     _auth: None = Depends(require_api_auth),
@@ -1203,6 +1204,7 @@ def list_assets(
                 status_code=400,
                 detail="images_folder is required for post-processed and post-used asset pools",
             )
+    if images_folder and str(images_folder).strip():
         try:
             folder = _normalize_images_folder(images_folder)
         except ValueError as exc:
@@ -1248,6 +1250,7 @@ async def upload_assets(
                 status_code=400,
                 detail="images_folder is required when uploading to post-processed",
             )
+    if images_folder and str(images_folder).strip():
         try:
             folder = _normalize_images_folder(images_folder)
         except ValueError as exc:
@@ -4591,10 +4594,11 @@ function selectedAssetImagesFolder() {
   return el ? el.value.trim() : '';
 }
 
-function uploadTargetImagesFolder() {
+function uploadTargetImagesFolder(pool) {
   const manual = document.getElementById('assetUploadFolder')?.value.trim();
   if (manual) return manual;
-  return selectedAssetImagesFolder();
+  if (pool === 'post-processed') return selectedAssetImagesFolder();
+  return cat();
 }
 
 function syncAssetFolderVisibility() {
@@ -4603,13 +4607,14 @@ function syncAssetFolderVisibility() {
   const uploadWrap = document.getElementById('assetUploadWrap');
   if (uploadWrap) uploadWrap.hidden = !assetPoolAllowsUpload(ui.assetPool);
   const folderWrap = document.getElementById('assetUploadFolderWrap');
-  if (folderWrap) folderWrap.hidden = ui.assetPool !== 'post-processed';
+  if (folderWrap) folderWrap.hidden = !assetPoolAllowsUpload(ui.assetPool);
   const hint = document.getElementById('assetUploadHint');
   if (hint) {
     if (ui.assetPool === 'post-processed') {
       hint.innerHTML = 'Uploads to <code>post-processed/{folder}/</code>. Pick a folder above or type a new one.';
     } else if (ui.assetPool === 'pre-processed') {
-      hint.innerHTML = 'Uploads to <code>pre-processed/' + esc(cat()) + '/</code> for extend.';
+      hint.innerHTML = 'Uploads to <code>pre-processed/{folder}/</code> for extend. Defaults to <code>'
+        + esc(cat()) + '</code>.';
     }
   }
 }
@@ -5308,16 +5313,13 @@ async function uploadAssetFiles() {
     return;
   }
 
-  let imagesFolder = null;
-  if (uploadPool === 'post-processed') {
-    imagesFolder = uploadTargetImagesFolder();
-    if (!imagesFolder) {
-      if (statusEl) {
-        statusEl.className = 'asset-upload-status err';
-        statusEl.textContent = 'Select or type a background folder for post-processed uploads.';
-      }
-      return;
+  const imagesFolder = uploadTargetImagesFolder(uploadPool);
+  if (!imagesFolder) {
+    if (statusEl) {
+      statusEl.className = 'asset-upload-status err';
+      statusEl.textContent = 'Select or type an asset folder for uploads.';
     }
+    return;
   }
   const overwrite = !!document.getElementById('assetUploadOverwrite')?.checked;
   const { batches, skipped } = packAssetUploadBatches(Array.from(input.files));
@@ -5406,6 +5408,9 @@ async function uploadAssetFiles() {
       await populateBackgroundFolderSelect('assetImagesFolder', lastFolder);
       const folderInput = document.getElementById('assetUploadFolder');
       if (folderInput) folderInput.value = lastFolder;
+    } else if (ui.assetPool === 'pre-processed' && lastFolder) {
+      await populatePreProcessedFolderSelect('extendSourceFolder', lastFolder);
+      await refreshExtendPending();
     }
     await refreshStats();
     await loadAssetList();

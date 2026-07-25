@@ -61,6 +61,30 @@ def test_resolve_upload_key_unique():
     assert key2 == "pre-processed/korean/a_2.jpg"
 
 
+def test_resolve_upload_key_uses_custom_pre_processed_folder():
+    class FakeError(Exception):
+        def __init__(self):
+            self.response = {"Error": {"Code": "404"}}
+
+    class Client:
+        exceptions = type("exceptions", (), {"ClientError": FakeError})()
+
+        def head_object(self, *, Bucket, Key):  # noqa: N803
+            raise self.exceptions.ClientError()
+
+    key = asset_upload.resolve_upload_key(
+        Client(),
+        "bucket",
+        category="korean",
+        pool="pre-processed",
+        filename="vertical.jpg",
+        images_folder="shorts",
+        overwrite=False,
+    )
+
+    assert key == "pre-processed/shorts/vertical.jpg"
+
+
 def test_upload_asset_files_mock():
     uploaded_keys: list[str] = []
 

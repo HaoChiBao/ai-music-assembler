@@ -473,8 +473,8 @@ def find_video_key(
 
 
 def _asset_folder(category: str, pool: str, images_folder: str | None = None) -> str:
-    """Folder segment for asset pools — ``images_folder`` for post-processed backgrounds."""
-    if pool in ("post-processed", "post-used") and images_folder and str(images_folder).strip():
+    """Folder segment for an asset pool, falling back to the configured category."""
+    if images_folder and str(images_folder).strip():
         return str(images_folder).strip().strip("/")
     return category
 

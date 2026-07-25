@@ -580,8 +580,9 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "tags": ["Catalog"],
         "summary": "Upload images to R2",
         "description": (
-            "Multipart upload of one or more images to ``pre-processed/{category}/`` or "
-            "``post-processed/{images_folder}/`` on Cloudflare R2. Supports jpg, png, webp "
+            "Multipart upload of one or more images to ``pre-processed/{images_folder}/`` or "
+            "``post-processed/{images_folder}/`` on Cloudflare R2. Pre-processed uploads default "
+            "to ``category`` when ``images_folder`` is omitted. Supports jpg, png, webp "
             "(max 50 files and ~28 MiB estimated request size per batch to stay under Cloud Run's "
             "32 MiB HTTP/1 limit; 20 MB per file). The dashboard auto-batches larger selections and "
             "retries with smaller chunks if a batch still hits HTTP 413. "
