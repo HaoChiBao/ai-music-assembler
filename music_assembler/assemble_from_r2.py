@@ -22,7 +22,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -39,6 +39,10 @@ from music_assembler.assemble_options import (
 from music_assembler.bottom_text_overlay import resolve_font_key
 from music_assembler.config import AssemblerConfig, AssemblerPaths
 from music_assembler.ffmpeg_util import FFmpegNotFoundError, find_ffmpeg, find_ffprobe
+from music_assembler.job_progress import (
+    read_cancellation_json,
+    write_progress_json,
+)
 from music_assembler.pipeline import assemble
 from music_assembler.video_templates import (
     DEFAULT_TEMPLATE_ID,
@@ -222,6 +226,7 @@ def _maybe_queue_youtube_upload(
     basename: str,
     result: dict,
     no_upload: bool,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
     """Register the finished run with youtube-uploader; returns API response or None."""
     if not enabled:
@@ -307,6 +312,12 @@ def _maybe_queue_youtube_upload(
     made_for_kids = made_for_kids_raw in ("1", "true", "yes", "on") if made_for_kids_raw else None
     if upload_now:
         print("    mode: upload_now (dispatch immediately after register)")
+    if should_cancel is not None and should_cancel():
+        print(
+            "warning: YouTube queue register skipped because cancellation was requested",
+            file=sys.stderr,
+        )
+        return None
     try:
         response = register_youtube_upload(
             api_url=api_url,
@@ -396,12 +407,25 @@ def main(argv: list[str] | None = None) -> int:
 
     execution_id = os.environ.get("ASSEMBLY_EXECUTION_ID", "").strip()
     progress_write = None
-    if execution_id:
-        from music_assembler.job_progress import write_progress_json
+    cancellation_seen = False
+    last_progress_pct = 0.0
 
+    def cancellation_recorded() -> bool:
+        nonlocal cancellation_seen
+        if cancellation_seen:
+            return True
+        if not execution_id:
+            return False
+        marker = read_cancellation_json(client, cfg_r2.bucket, execution_id)
+        cancellation_seen = bool(marker and marker.get("cancel_requested"))
+        return cancellation_seen
+
+    if execution_id:
         print(f"==> Job progress tracking: {execution_id}", flush=True)
 
         def progress_write(pct: float, stage: str, *, status: str = "running") -> None:
+            nonlocal last_progress_pct
+            last_progress_pct = pct
             write_progress_json(
                 client,
                 cfg_r2.bucket,
@@ -459,8 +483,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"error: {msg}", file=sys.stderr)
             try:
-                from music_assembler.job_progress import write_progress_json
-
                 write_progress_json(
                     client,
                     cfg_r2.bucket,
@@ -613,8 +635,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (RuntimeError, OSError, ValueError) as e:
         if execution_id:
-            from music_assembler.job_progress import write_progress_json
-
             if claimed_background:
                 release_background_claim(
                     client,
@@ -737,13 +757,28 @@ def main(argv: list[str] | None = None) -> int:
         basename=basename,
         result=result,
         no_upload=args.no_upload,
+        should_cancel=cancellation_recorded,
     )
     if queue_result and progress_write:
         progress_write(99, f"YouTube queue: {queue_result.get('job_id', basename)}")
 
     if execution_id:
-        from music_assembler.job_progress import write_progress_json
-
+        if cancellation_recorded():
+            print("==> Cancellation recorded; leaving job status cancelled")
+            write_progress_json(
+                client,
+                cfg_r2.bucket,
+                execution_id,
+                pct=last_progress_pct,
+                stage="Cancelled",
+                category=prefixes.images_folder,
+                status="cancelled",
+            )
+            if is_temp and not args.keep_work_dir:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            elif args.keep_work_dir or not is_temp:
+                print(f"    work dir kept at: {work_dir}")
+            return 0
         write_progress_json(
             client,
             cfg_r2.bucket,

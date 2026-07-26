@@ -18,6 +18,38 @@ def meta_key(execution_id: str) -> str:
     return f"{PROGRESS_PREFIX}{execution_id}/meta.json"
 
 
+def cancellation_key(execution_id: str) -> str:
+    return f"{PROGRESS_PREFIX}{execution_id}/cancel.json"
+
+
+def write_cancellation_json(client, bucket: str, execution_id: str) -> None:
+    """Persist a durable cancellation signal separate from mutable progress."""
+    payload = {
+        "execution_id": execution_id,
+        "cancel_requested": True,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    client.put_object(
+        Bucket=bucket,
+        Key=cancellation_key(execution_id),
+        Body=json.dumps(payload).encode("utf-8"),
+        ContentType="application/json",
+        CacheControl="no-cache",
+    )
+
+
+def read_cancellation_json(client, bucket: str, execution_id: str) -> dict[str, Any] | None:
+    key = cancellation_key(execution_id)
+    try:
+        resp = client.get_object(Bucket=bucket, Key=key)
+        return json.loads(resp["Body"].read().decode("utf-8"))
+    except client.exceptions.ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
 def write_progress_json(
     client,
     bucket: str,

@@ -6,7 +6,13 @@ from typing import Any
 
 from music_assembler.api.config import ApiSettings
 from music_assembler.api import gcp_jobs
-from music_assembler.job_progress import read_meta_json, read_progress_json, write_progress_json
+from music_assembler.job_progress import (
+    read_cancellation_json,
+    read_meta_json,
+    read_progress_json,
+    write_cancellation_json,
+    write_progress_json,
+)
 
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -70,6 +76,7 @@ def cancel_job(
 
     job_type = _job_type(execution_id, meta)
     category = meta.get("category") or settings.default_category
+    write_cancellation_json(client, bucket, execution_id)
     write_progress_json(
         client,
         bucket,
@@ -126,8 +133,8 @@ def make_extend_cancel_checker(client, bucket: str, execution_id: str):
         nonlocal flagged
         if flagged:
             return True
-        prog = read_progress_json(client, bucket, execution_id)
-        if prog and prog.get("status") in ("cancelling", "cancelled"):
+        marker = read_cancellation_json(client, bucket, execution_id)
+        if marker and marker.get("cancel_requested"):
             flagged = True
             return True
         return False
