@@ -472,6 +472,42 @@ def due_slots(
     ]
 
 
+def deferred_retry_slots(
+    schedule: ChannelSchedule,
+    *,
+    now_utc: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return today's and yesterday's elapsed slots for deferred follow-up."""
+    if not schedule.enabled:
+        return []
+    tz = ZoneInfo(schedule.timezone)
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    slots: list[dict[str, Any]] = []
+    for offset in (0, 1):
+        local_date = now_local.date() - timedelta(days=offset)
+        day_index = (local_date.weekday() + 1) % 7
+        day = schedule.days[day_index]
+        if not day.enabled:
+            continue
+        assemble_at = day.assemble_at or schedule.default_assemble_at
+        target = datetime.combine(local_date, _parse_local_time(assemble_at), tzinfo=tz)
+        if target > now_local:
+            continue
+        slots.append(
+            {
+                "slot_key": slot_key(schedule.channel, local_date, day_index, assemble_at),
+                "channel": schedule.channel,
+                "local_date": local_date.isoformat(),
+                "day_index": day_index,
+                "day_name": DAY_NAMES[day_index],
+                "assemble_at": assemble_at,
+                "upload_at": resolved_upload_at(day, schedule),
+                "timezone": schedule.timezone,
+            }
+        )
+    return slots
+
+
 def read_ledger(client, bucket: str, key: str) -> dict[str, Any] | None:
     try:
         resp = client.get_object(Bucket=bucket, Key=_ledger_key(key))
@@ -786,10 +822,64 @@ def run_due_schedules(
     new_execution_id,
     start_extend_fn,
 ) -> dict[str, Any]:
-    """Evaluate all schedules; start assembly or record skip/defer."""
+    """Evaluate schedules, including follow-up after an auto-extend deferral."""
     results: list[dict[str, Any]] = []
     for schedule in list_schedules(client, bucket, persist_backfill=True):
+        processed_slots: set[str] = set()
+        for slot in deferred_retry_slots(schedule, now_utc=now_utc):
+            entry = read_ledger(client, bucket, slot["slot_key"])
+            if not entry or entry.get("status") != "deferred":
+                continue
+            processed_slots.add(slot["slot_key"])
+            resources = evaluate_resources(client, bucket, schedule, settings)
+            if not resources["ready"]:
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "waiting_for_extend",
+                        "extend_execution_id": entry.get("extend_execution_id"),
+                        "resources": resources,
+                    }
+                )
+                continue
+            if dry_run:
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "would_start_after_extend",
+                        "resources": resources,
+                    }
+                )
+                continue
+            try:
+                started = start_scheduled_assembly(
+                    client, bucket, settings, schedule, slot, new_execution_id=new_execution_id
+                )
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "started_after_extend",
+                        **started,
+                    }
+                )
+            except Exception as exc:
+                write_ledger(
+                    client,
+                    bucket,
+                    slot["slot_key"],
+                    {"status": "failed", "reason": str(exc), "channel": schedule.channel},
+                )
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "failed",
+                        "reason": str(exc),
+                    }
+                )
+
         for slot in due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes):
+            if slot["slot_key"] in processed_slots:
+                continue
             entry = read_ledger(client, bucket, slot["slot_key"])
             if ledger_is_terminal(entry):
                 results.append({"slot_key": slot["slot_key"], "action": "skipped", "reason": "already_started"})

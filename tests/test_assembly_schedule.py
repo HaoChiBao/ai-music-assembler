@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from music_assembler.api import assembly_schedule as schedule_module
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -229,3 +230,102 @@ def test_upsert_schedule_roundtrip():
     assert loaded is not None
     assert loaded.channel == "nappabeats"
     assert loaded.variance_min == 0
+
+
+def _thursday_schedule() -> ChannelSchedule:
+    return ChannelSchedule(
+        channel="ch",
+        timezone="UTC",
+        days=[DaySlot() for _ in range(4)]
+        + [DaySlot(enabled=True, assemble_at="09:00")]
+        + [DaySlot() for _ in range(2)],
+    )
+
+
+def test_run_due_schedules_starts_deferred_slot_after_extend_outside_window(monkeypatch):
+    sched = _thursday_schedule()
+    monkeypatch.setattr(schedule_module, "list_schedules", lambda *args, **kwargs: [sched])
+    monkeypatch.setattr(
+        schedule_module,
+        "read_ledger",
+        lambda *args, **kwargs: {
+            "status": "deferred",
+            "extend_execution_id": "ext_1",
+        },
+    )
+    monkeypatch.setattr(
+        schedule_module,
+        "evaluate_resources",
+        lambda *args, **kwargs: {"ready": True},
+    )
+    start_assembly = MagicMock(
+        return_value={
+            "execution_id": "asm_1",
+            "gcp_execution_id": "gcp_1",
+            "slot_key": "ch:2026-07-30:4:09:00",
+        }
+    )
+    monkeypatch.setattr(schedule_module, "start_scheduled_assembly", start_assembly)
+    start_extend = MagicMock()
+
+    result = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 30, 10, 0, tzinfo=timezone.utc),
+        new_execution_id=lambda: "asm_1",
+        start_extend_fn=start_extend,
+    )
+
+    assert result["results"] == [
+        {
+            "slot_key": "ch:2026-07-30:4:09:00",
+            "action": "started_after_extend",
+            "execution_id": "asm_1",
+            "gcp_execution_id": "gcp_1",
+        }
+    ]
+    start_assembly.assert_called_once()
+    start_extend.assert_not_called()
+
+
+def test_run_due_schedules_does_not_duplicate_running_deferred_extend(monkeypatch):
+    sched = _thursday_schedule()
+    monkeypatch.setattr(schedule_module, "list_schedules", lambda *args, **kwargs: [sched])
+    monkeypatch.setattr(
+        schedule_module,
+        "read_ledger",
+        lambda *args, **kwargs: {
+            "status": "deferred",
+            "extend_execution_id": "ext_1",
+        },
+    )
+    resources = {"ready": False, "blockers": ["low_backgrounds"]}
+    monkeypatch.setattr(
+        schedule_module,
+        "evaluate_resources",
+        lambda *args, **kwargs: resources,
+    )
+    start_assembly = MagicMock()
+    monkeypatch.setattr(schedule_module, "start_scheduled_assembly", start_assembly)
+    start_extend = MagicMock()
+
+    result = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 30, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "unused",
+        start_extend_fn=start_extend,
+    )
+
+    assert result["results"] == [
+        {
+            "slot_key": "ch:2026-07-30:4:09:00",
+            "action": "waiting_for_extend",
+            "extend_execution_id": "ext_1",
+            "resources": resources,
+        }
+    ]
+    start_assembly.assert_not_called()
+    start_extend.assert_not_called()
