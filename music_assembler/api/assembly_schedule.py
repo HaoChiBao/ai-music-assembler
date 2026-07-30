@@ -511,7 +511,11 @@ def deferred_retry_slots(
 def read_ledger(client, bucket: str, key: str) -> dict[str, Any] | None:
     try:
         resp = client.get_object(Bucket=bucket, Key=_ledger_key(key))
-        return json.loads(resp["Body"].read().decode("utf-8"))
+        entry = json.loads(resp["Body"].read().decode("utf-8"))
+        etag = resp.get("ETag")
+        if etag:
+            entry["_etag"] = etag
+        return entry
     except client.exceptions.ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound"):
@@ -529,10 +533,46 @@ def write_ledger(client, bucket: str, key: str, payload: dict[str, Any]) -> None
     )
 
 
+def claim_deferred_slot(
+    client,
+    bucket: str,
+    key: str,
+    entry: dict[str, Any],
+    *,
+    channel: str,
+) -> bool:
+    """Atomically replace the deferred ledger entry with a starting claim."""
+    etag = entry.get("_etag")
+    if not etag:
+        return False
+    body = {
+        "status": "starting",
+        "reason": "auto_extend_ready",
+        "extend_execution_id": entry.get("extend_execution_id"),
+        "channel": channel,
+        "slot_key": key,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=_ledger_key(key),
+            Body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+            IfMatch=etag,
+        )
+        return True
+    except client.exceptions.ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in ("409", "412", "ConditionalRequestConflict", "PreconditionFailed"):
+            return False
+        raise
+
+
 def ledger_is_terminal(entry: dict[str, Any] | None) -> bool:
     if not entry:
         return False
-    return entry.get("status") in ("started", "succeeded", "running", "deferred")
+    return entry.get("status") in ("starting", "started", "succeeded", "running", "deferred")
 
 
 def _images_folder(schedule: ChannelSchedule, settings: ApiSettings) -> str:
@@ -848,6 +888,21 @@ def run_due_schedules(
                         "slot_key": slot["slot_key"],
                         "action": "would_start_after_extend",
                         "resources": resources,
+                    }
+                )
+                continue
+            if not claim_deferred_slot(
+                client,
+                bucket,
+                slot["slot_key"],
+                entry,
+                channel=schedule.channel,
+            ):
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "skipped",
+                        "reason": "already_claimed",
                     }
                 )
                 continue

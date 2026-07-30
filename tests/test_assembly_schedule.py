@@ -76,6 +76,7 @@ def test_due_slots_skips_disabled_day():
 
 
 def test_ledger_is_terminal():
+    assert ledger_is_terminal({"status": "starting"})
     assert ledger_is_terminal({"status": "started"})
     assert ledger_is_terminal({"status": "succeeded"})
     assert not ledger_is_terminal({"status": "skipped"})
@@ -242,6 +243,54 @@ def _thursday_schedule() -> ChannelSchedule:
     )
 
 
+def test_claim_deferred_slot_rejects_a_stale_etag():
+    client = MagicMock()
+
+    class ClientError(Exception):
+        pass
+
+    client.exceptions.ClientError = ClientError
+    calls = 0
+
+    def put_object(**kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["IfMatch"] == '"etag-1"'
+        if calls == 2:
+            exc = ClientError()
+            exc.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise exc
+
+    client.put_object.side_effect = put_object
+    entry = {
+        "status": "deferred",
+        "extend_execution_id": "ext_1",
+        "_etag": '"etag-1"',
+    }
+
+    assert schedule_module.claim_deferred_slot(
+        client, "bucket", "ch:2026-07-30:4:09:00", entry, channel="ch"
+    )
+    assert not schedule_module.claim_deferred_slot(
+        client, "bucket", "ch:2026-07-30:4:09:00", entry, channel="ch"
+    )
+
+
+def test_read_ledger_preserves_etag_for_conditional_claim():
+    client = MagicMock()
+    client.get_object.return_value = {
+        "Body": MagicMock(read=lambda: b'{"status":"deferred"}'),
+        "ETag": '"etag-1"',
+    }
+
+    assert schedule_module.read_ledger(
+        client, "bucket", "ch:2026-07-30:4:09:00"
+    ) == {
+        "status": "deferred",
+        "_etag": '"etag-1"',
+    }
+
+
 def test_run_due_schedules_starts_deferred_slot_after_extend_outside_window(monkeypatch):
     sched = _thursday_schedule()
     monkeypatch.setattr(schedule_module, "list_schedules", lambda *args, **kwargs: [sched])
@@ -258,6 +307,7 @@ def test_run_due_schedules_starts_deferred_slot_after_extend_outside_window(monk
         "evaluate_resources",
         lambda *args, **kwargs: {"ready": True},
     )
+    monkeypatch.setattr(schedule_module, "claim_deferred_slot", lambda *args, **kwargs: True)
     start_assembly = MagicMock(
         return_value={
             "execution_id": "asm_1",
