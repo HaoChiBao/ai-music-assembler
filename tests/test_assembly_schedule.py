@@ -229,3 +229,51 @@ def test_upsert_schedule_roundtrip():
     assert loaded is not None
     assert loaded.channel == "nappabeats"
     assert loaded.variance_min == 0
+
+
+def test_auto_extend_uses_schedule_template_aspect_ratio(monkeypatch):
+    from music_assembler.api import assembly_schedule
+
+    schedule = ChannelSchedule(
+        channel="shorts",
+        template_id="shorts_vertical",
+        auto_extend=True,
+    )
+    slot = {
+        "slot_key": "shorts:2026-07-05:0:09:00",
+        "channel": "shorts",
+        "day_name": "Sunday",
+        "assemble_at": "09:00",
+    }
+    monkeypatch.setattr(assembly_schedule, "list_schedules", lambda *args, **kwargs: [schedule])
+    monkeypatch.setattr(assembly_schedule, "due_slots", lambda *args, **kwargs: [slot])
+    monkeypatch.setattr(assembly_schedule, "read_ledger", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        assembly_schedule,
+        "evaluate_resources",
+        lambda *args, **kwargs: {
+            "ready": False,
+            "extend_pending": 1,
+            "blockers": ["low_backgrounds", "extend_recommended"],
+            "category": "korean",
+        },
+    )
+    monkeypatch.setattr(assembly_schedule, "write_ledger", lambda *args, **kwargs: None)
+
+    extend_args = {}
+
+    def start_extend(*args, **kwargs):
+        extend_args.update(kwargs)
+        return {"gcp_execution_id": "extend-1"}
+
+    result = assembly_schedule.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "ext_1",
+        start_extend_fn=start_extend,
+    )
+
+    assert result["results"][0]["action"] == "deferred_extend"
+    assert extend_args["aspect_ratio"] == "9:16"

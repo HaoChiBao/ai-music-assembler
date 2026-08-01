@@ -853,6 +853,7 @@ def _start_extend_for_schedule(
     category: str,
     max_images: int,
     force: bool,
+    aspect_ratio: str,
 ) -> dict[str, Any]:
     write_meta_json(
         client,
@@ -878,6 +879,7 @@ def _start_extend_for_schedule(
         category=category,
         max_images=max_images,
         force=force,
+        aspect_ratio=aspect_ratio,
     )
 
 
@@ -1035,7 +1037,17 @@ def cron_run_schedules(
     """Evaluate per-channel schedules and start assembly jobs (Cloud Scheduler every 15m)."""
     client, bucket = _r2()
 
-    def _extend(client, bucket, settings, *, execution_id, category, max_images, force):
+    def _extend(
+        client,
+        bucket,
+        settings,
+        *,
+        execution_id,
+        category,
+        max_images,
+        force,
+        aspect_ratio,
+    ):
         return _start_extend_for_schedule(
             client,
             bucket,
@@ -1044,6 +1056,7 @@ def cron_run_schedules(
             category=category,
             max_images=max_images,
             force=force,
+            aspect_ratio=aspect_ratio,
         )
 
     return assembly_schedule.run_due_schedules(
