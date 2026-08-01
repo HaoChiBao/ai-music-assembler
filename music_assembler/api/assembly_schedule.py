@@ -15,6 +15,7 @@ from music_assembler.api.progress_store import patch_meta_gcp_execution_id, writ
 from music_assembler.api.r2_catalog import category_inventory
 from music_assembler.extend_from_r2 import count_pending_r2_sources
 from music_assembler.r2_storage import r2_config_from_env
+from music_assembler.video_templates import get_template
 
 SCHEDULES_KEY = "schedules/schedules.json"
 SCHEDULE_RUNS_PREFIX = "schedules/runs/"
@@ -802,7 +803,16 @@ def run_due_schedules(
                         continue
                     ext_id = new_execution_id()
                     try:
-                        start_extend_fn(client, bucket, settings, execution_id=ext_id, category=resources["category"], max_images=3, force=False)
+                        start_extend_fn(
+                            client,
+                            bucket,
+                            settings,
+                            execution_id=ext_id,
+                            category=resources["category"],
+                            max_images=3,
+                            force=False,
+                            aspect_ratio=get_template(schedule.template_id).gemini_aspect_ratio,
+                        )
                         write_ledger(
                             client,
                             bucket,
