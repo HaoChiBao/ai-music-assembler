@@ -4494,9 +4494,12 @@ function videoChannelFilter() {
 async function populateBackgroundFolderSelect(selectId, selected) {
   const el = document.getElementById(selectId);
   if (!el) return;
+  const loadSeq = (el._backgroundFolderLoadSeq || 0) + 1;
+  el._backgroundFolderLoadSeq = loadSeq;
   const keep = selected || el.value;
   try {
     const d = await api('/v1/background-folders');
+    if (loadSeq !== el._backgroundFolderLoadSeq) return false;
     const folders = d.folders || [];
     el.innerHTML = folders.length
       ? '<option value="">Select folder…</option>'
@@ -4509,9 +4512,11 @@ async function populateBackgroundFolderSelect(selectId, selected) {
     else if (folders.includes(def)) el.value = def;
     else if (folders.length === 1) el.value = folders[0];
   } catch (e) {
+    if (loadSeq !== el._backgroundFolderLoadSeq) return false;
     console.warn('background-folders', selectId, e);
     el.innerHTML = '<option value="__DEFAULT_CATEGORY__">__DEFAULT_CATEGORY__</option>';
   }
+  return true;
 }
 
 async function populatePreProcessedFolderSelect(selectId, selected) {
@@ -5828,11 +5833,14 @@ function syncScheduleEnabledState() {
   const on = document.getElementById('scheduleEnabled')?.checked !== false;
   if (editor) editor.classList.toggle('is-schedule-disabled', !on);
 }
+let scheduleFormFillSeq = 0;
 function fillScheduleForm(data) {
+  const fillSeq = ++scheduleFormFillSeq;
   document.getElementById('scheduleEnabled').checked = data.enabled !== false;
   document.getElementById('scheduleTimezone').value = data.timezone || 'America/New_York';
   const folder = data.images_folder || '';
-  populateBackgroundFolderSelect('scheduleImagesFolder', folder).then(() => {
+  populateBackgroundFolderSelect('scheduleImagesFolder', folder).then((applied) => {
+    if (!applied || fillSeq !== scheduleFormFillSeq) return;
     if (folder) document.getElementById('scheduleImagesFolder').value = folder;
     updateScheduleSummary();
   });
@@ -6135,7 +6143,9 @@ async function loadScheduleOverview(refresh) {
     runsEl.innerHTML = '<p class="muted">—</p>';
   }
 }
+let scheduleEditorLoadSeq = 0;
 async function loadScheduleEditor(channel) {
+  const loadSeq = ++scheduleEditorLoadSeq;
   const empty = document.getElementById('scheduleEmpty');
   const editor = document.getElementById('scheduleEditor');
   const banner = document.getElementById('scheduleNewBanner');
@@ -6162,6 +6172,7 @@ async function loadScheduleEditor(channel) {
   try {
     data = await api('/v1/schedules/' + encodeURIComponent(channel));
   } catch (e) {
+    if (loadSeq !== scheduleEditorLoadSeq) return;
     if (isScheduleNotFound(e)) {
       isNew = true;
       data = defaultNewSchedule(channel);
@@ -6175,6 +6186,7 @@ async function loadScheduleEditor(channel) {
       return;
     }
   }
+  if (loadSeq !== scheduleEditorLoadSeq) return;
   if (banner) {
     banner.hidden = !isNew;
     const label = document.getElementById('scheduleNewChannelLabel');

@@ -164,3 +164,87 @@ def test_schedule_subtab_switch_preserves_unsaved_editor_state():
 
     assert "loadScheduleOverview()" in js[start:end]
     assert "loadScheduleEditor(" not in js[start:end]
+
+
+def test_schedule_editor_ignores_stale_channel_response(tmp_path):
+    js = _dashboard_script()
+    start = js.index("let scheduleEditorLoadSeq = 0;")
+    end = js.index("\nfunction isScheduleNotFound", start)
+    load_editor = js[start:end]
+    harness = """
+const elements = {
+  scheduleEmpty: { hidden: false, querySelector: () => ({ textContent: '' }) },
+  scheduleEditor: { hidden: true },
+  scheduleNewBanner: { hidden: true },
+  scheduleEditorHint: { textContent: '' },
+  scheduleEditorTitle: { textContent: '' },
+  scheduleNewChannelLabel: { textContent: '' },
+  scheduleSave: { textContent: '' },
+  scheduleDelete: { hidden: false },
+};
+const document = { getElementById: (id) => elements[id] || null };
+const pending = {};
+function api(url) {
+  const channel = decodeURIComponent(url.split('/').pop());
+  return new Promise((resolve) => { pending[channel] = resolve; });
+}
+const filled = [];
+function fillScheduleForm(data) { filled.push(data.channel); }
+function updateScheduleSummary() {}
+function loadScheduleEditorDiagnostics() {}
+function isScheduleNotFound() { return false; }
+function defaultNewSchedule(channel) { return { channel }; }
+""" + load_editor + """
+(async () => {
+  const first = loadScheduleEditor('channel-a');
+  const second = loadScheduleEditor('channel-b');
+  pending['channel-b']({ channel: 'channel-b' });
+  await second;
+  pending['channel-a']({ channel: 'channel-a' });
+  await first;
+  if (filled.length !== 1 || filled[0] !== 'channel-b') {
+    throw new Error('stale schedule response hydrated the editor: ' + JSON.stringify(filled));
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    tmp = tmp_path / "dashboard-schedule-editor-race-test.js"
+    tmp.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(tmp)], check=True)
+
+
+def test_background_folder_select_ignores_stale_response(tmp_path):
+    js = _dashboard_script()
+    start = js.index("async function populateBackgroundFolderSelect")
+    end = js.index("\nasync function populatePreProcessedFolderSelect", start)
+    populate = js[start:end]
+    assert "fillSeq !== scheduleFormFillSeq" in js
+    harness = """
+const select = { value: '', innerHTML: '' };
+const document = { getElementById: () => select };
+const requests = [];
+function api() {
+  return new Promise((resolve) => { requests.push(resolve); });
+}
+function esc(value) { return String(value); }
+""" + populate + """
+(async () => {
+  const first = populateBackgroundFolderSelect('scheduleImagesFolder', 'folder-a');
+  const second = populateBackgroundFolderSelect('scheduleImagesFolder', 'folder-b');
+  requests[1]({ folders: ['folder-a', 'folder-b'] });
+  await second;
+  requests[0]({ folders: ['folder-a', 'folder-b'] });
+  await first;
+  if (select.value !== 'folder-b') {
+    throw new Error('stale folder response replaced current selection: ' + select.value);
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    tmp = tmp_path / "dashboard-folder-select-race-test.js"
+    tmp.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(tmp)], check=True)
