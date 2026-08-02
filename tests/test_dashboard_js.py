@@ -171,6 +171,13 @@ def test_schedule_editor_ignores_stale_channel_response(tmp_path):
     start = js.index("let scheduleEditorLoadSeq = 0;")
     end = js.index("\nfunction isScheduleNotFound", start)
     load_editor = js[start:end]
+    save_start = js.index("async function saveSchedule()")
+    save_end = js.index("\nfunction showMainSection", save_start)
+    assert re.search(
+        r"if \(document\.getElementById\('scheduleChannel'\)\.value\.trim\(\) === channel\)"
+        r"\s*\{\s*await loadScheduleEditor\(channel\);",
+        js[save_start:save_end],
+    )
     harness = """
 const elements = {
   scheduleEmpty: { hidden: false, querySelector: () => ({ textContent: '' }) },

@@ -6291,7 +6291,9 @@ async function saveSchedule() {
       apply_default_to_enabled_days: false,
     };
     await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'PUT', body: JSON.stringify(body) });
-    await loadScheduleEditor(channel);
+    if (document.getElementById('scheduleChannel').value.trim() === channel) {
+      await loadScheduleEditor(channel);
+    }
     await loadScheduleOverview();
   } catch (e) {
     alert('Save failed: ' + e);
