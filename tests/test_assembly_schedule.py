@@ -92,6 +92,7 @@ def test_invalid_timezone_does_not_abort_other_schedules(monkeypatch):
         "evaluate_resources",
         lambda *args, **kwargs: {"ready": True},
     )
+    monkeypatch.setattr(assembly_schedule, "read_ledger", lambda *args, **kwargs: None)
 
     result = assembly_schedule.run_due_schedules(
         object(),
