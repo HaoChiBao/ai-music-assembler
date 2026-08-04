@@ -251,6 +251,11 @@ class ChannelScheduleRequest(BaseModel):
     def _validate_schedule_images_folder(cls, value: str) -> str:
         return _normalize_images_folder(value)
 
+    @field_validator("timezone")
+    @classmethod
+    def _validate_schedule_timezone(cls, value: str) -> str:
+        return assembly_schedule.normalize_timezone(value)
+
     @field_validator("template_id")
     @classmethod
     def _validate_schedule_template_id(cls, value: str) -> str:

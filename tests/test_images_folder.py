@@ -29,6 +29,17 @@ def test_schedule_rejects_path_traversal():
         ChannelScheduleRequest(images_folder="../evil")
 
 
+def test_schedule_rejects_invalid_timezone():
+    with pytest.raises(ValidationError, match="invalid timezone"):
+        ChannelScheduleRequest(images_folder="korean", timezone="Not/A_Real_Zone")
+
+
+def test_schedule_trims_valid_timezone():
+    request = ChannelScheduleRequest(images_folder="korean", timezone=" UTC ")
+
+    assert request.timezone == "UTC"
+
+
 def test_asset_folder_uses_images_folder_for_post_processed():
     assert _asset_folder("korean", "post-processed", "japanese") == "japanese"
     assert _asset_folder("korean", "pre-processed", "japanese") == "korean"

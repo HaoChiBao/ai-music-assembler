@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from music_assembler.api import assembly_schedule
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -72,6 +73,44 @@ def test_due_slots_skips_disabled_day():
     )
     now = datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc)
     assert due_slots(sched, now_utc=now) == []
+
+
+def test_invalid_timezone_does_not_abort_other_schedules(monkeypatch):
+    invalid = ChannelSchedule(
+        channel="a-invalid",
+        timezone="Not/A_Real_Zone",
+        days=[DaySlot(enabled=True, assemble_at="09:00")] + [DaySlot() for _ in range(6)],
+    )
+    valid = ChannelSchedule(
+        channel="b-valid",
+        timezone="UTC",
+        days=[DaySlot(enabled=True, assemble_at="09:00")] + [DaySlot() for _ in range(6)],
+    )
+    monkeypatch.setattr(assembly_schedule, "list_schedules", lambda *args, **kwargs: [invalid, valid])
+    monkeypatch.setattr(
+        assembly_schedule,
+        "evaluate_resources",
+        lambda *args, **kwargs: {"ready": True},
+    )
+
+    result = assembly_schedule.run_due_schedules(
+        object(),
+        "bucket",
+        object(),
+        now_utc=datetime(2026, 8, 2, 9, 5, tzinfo=timezone.utc),
+        dry_run=True,
+        new_execution_id=lambda: "unused",
+        start_extend_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result["results"][0] == {
+        "channel": "a-invalid",
+        "action": "skipped",
+        "reason": "invalid_timezone",
+        "detail": "invalid timezone 'Not/A_Real_Zone'",
+    }
+    assert result["results"][1]["action"] == "would_start"
+    assert result["results"][1]["slot"]["channel"] == "b-valid"
 
 
 def test_ledger_is_terminal():
