@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from music_assembler.api import gcp_jobs
 from music_assembler.api.config import ApiSettings
@@ -27,6 +27,22 @@ DEFAULT_ASSEMBLE_AT = "11:00"
 DEFAULT_LATE_UPLOAD_GRACE_MINUTES = 5
 VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
 SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+
+class InvalidTimezoneError(ValueError):
+    """Raised when a schedule contains an unknown IANA timezone."""
+
+
+def normalize_timezone(value: str) -> str:
+    """Return a trimmed, valid IANA timezone name."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise InvalidTimezoneError("timezone is required")
+    try:
+        ZoneInfo(raw)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise InvalidTimezoneError(f"invalid timezone {raw!r}") from exc
+    return raw
 
 
 @dataclass
@@ -274,7 +290,7 @@ def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str 
     if not upload_at:
         return None
     local_date = date.fromisoformat(str(slot["local_date"]))
-    tz = ZoneInfo(schedule.timezone)
+    tz = ZoneInfo(normalize_timezone(schedule.timezone))
     dt = datetime.combine(local_date, _parse_local_time(str(upload_at)), tzinfo=tz)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -446,7 +462,7 @@ def due_slots(
 ) -> list[dict[str, Any]]:
     if not schedule.enabled:
         return []
-    tz = ZoneInfo(schedule.timezone)
+    tz = ZoneInfo(normalize_timezone(schedule.timezone))
     now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
     dow = now_local.weekday()
     # Python weekday: Mon=0; our days[0]=Sunday
@@ -558,7 +574,7 @@ def evaluate_resources(
 
 
 def preview_schedule(schedule: ChannelSchedule, *, now_utc: datetime | None = None, limit: int = 8) -> list[dict[str, Any]]:
-    tz = ZoneInfo(schedule.timezone)
+    tz = ZoneInfo(normalize_timezone(schedule.timezone))
     now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
     upcoming: list[dict[str, Any]] = []
     for offset in range(14):
@@ -614,7 +630,12 @@ def schedules_overview(
     extend_pending_cache: dict[str, int] = {}
 
     for sched in schedules:
-        upcoming = preview_schedule(sched, now_utc=now_utc, limit=6)
+        schedule_error: str | None = None
+        try:
+            upcoming = preview_schedule(sched, now_utc=now_utc, limit=6)
+        except InvalidTimezoneError as exc:
+            upcoming = []
+            schedule_error = str(exc)
         resources = evaluate_resources(
             client,
             bucket,
@@ -657,6 +678,7 @@ def schedules_overview(
                 "resources_ready": resources.get("ready"),
                 "backgrounds_available": resources.get("backgrounds_available"),
                 "blockers": resources.get("blockers") or [],
+                "schedule_error": schedule_error,
                 "next_slot": next_slot,
                 "upcoming": channel_upcoming,
             }
@@ -789,7 +811,19 @@ def run_due_schedules(
     """Evaluate all schedules; start assembly or record skip/defer."""
     results: list[dict[str, Any]] = []
     for schedule in list_schedules(client, bucket, persist_backfill=True):
-        for slot in due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes):
+        try:
+            slots = due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes)
+        except InvalidTimezoneError as exc:
+            results.append(
+                {
+                    "channel": schedule.channel,
+                    "action": "skipped",
+                    "reason": "invalid_timezone",
+                    "detail": str(exc),
+                }
+            )
+            continue
+        for slot in slots:
             entry = read_ledger(client, bucket, slot["slot_key"])
             if ledger_is_terminal(entry):
                 results.append({"slot_key": slot["slot_key"], "action": "skipped", "reason": "already_started"})
