@@ -556,13 +556,14 @@ def main(argv: list[str] | None = None) -> int:
 
     progress_cb = None
     if execution_id:
-        from music_assembler.job_progress import write_meta_json
+        from music_assembler.job_progress import patch_meta_json
 
-        write_meta_json(
+        patch_meta_json(
             client,
             cfg_r2.bucket,
             execution_id,
-            category=prefixes.images_folder,
+            category=category or prefixes.music_folder,
+            images_folder=prefixes.images_folder,
             claimed_background=claimed_background,
             channel=prefixes.channel,
             template_id=template.id,
