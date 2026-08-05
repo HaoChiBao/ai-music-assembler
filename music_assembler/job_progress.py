@@ -98,6 +98,28 @@ def patch_meta_gcp_execution_id(
     )
 
 
+def patch_meta_json(
+    client,
+    bucket: str,
+    execution_id: str,
+    **updates: Any,
+) -> None:
+    """Merge worker-discovered fields into existing job metadata."""
+    meta = read_meta_json(client, bucket, execution_id) or {
+        "execution_id": execution_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta.update(updates)
+    meta["execution_id"] = execution_id
+    meta.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    client.put_object(
+        Bucket=bucket,
+        Key=meta_key(execution_id),
+        Body=json.dumps(meta).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
 def write_meta_json(
     client,
     bucket: str,
