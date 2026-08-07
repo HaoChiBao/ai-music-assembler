@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
+
 import pytest
 
 from music_assembler.api import asset_upload
@@ -91,6 +94,55 @@ def test_upload_asset_files_mock():
     assert result["count"] == 2
     assert len(uploaded_keys) == 2
     assert uploaded_keys[0].startswith("pre-processed/korean/")
+
+
+def test_concurrent_same_filename_uploads_keep_their_own_bytes():
+    start_reading = threading.Barrier(2)
+    finish_reading = threading.Barrier(2)
+    uploads: dict[str, tuple[str, bytes]] = {}
+
+    class FakeError(Exception):
+        def __init__(self, code: str):
+            self.response = {"Error": {"Code": code}}
+
+    class Client:
+        exceptions = type("exceptions", (), {"ClientError": FakeError})()
+
+        def head_object(self, *, Bucket, Key):  # noqa: N803
+            raise Client.exceptions.ClientError("404")
+
+        def upload_file(self, path, bucket, key, ExtraArgs=None):  # noqa: N803
+            start_reading.wait()
+            uploads[key] = (path, Path(path).read_bytes())
+            finish_reading.wait()
+
+    client = Client()
+    expected = {
+        "pre-processed/korean/shared.png": b"korean-image",
+        "pre-processed/japanese/shared.png": b"japanese-image",
+    }
+
+    def upload(category: str, data: bytes):
+        asset_upload.upload_asset_files(
+            client,
+            "bucket",
+            category=category,
+            pool="pre-processed",
+            images_folder=None,
+            files=[("shared.png", data)],
+        )
+
+    threads = [
+        threading.Thread(target=upload, args=("korean", expected["pre-processed/korean/shared.png"])),
+        threading.Thread(target=upload, args=("japanese", expected["pre-processed/japanese/shared.png"])),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert {key: data for key, (_, data) in uploads.items()} == expected
+    assert len({path for path, _ in uploads.values()}) == 2
 
 
 def test_upload_rejects_used_pool():
