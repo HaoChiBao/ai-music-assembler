@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -109,9 +110,15 @@ def upload_asset_files(
                 overwrite=overwrite,
             )
             name = key.rsplit("/", 1)[-1]
-            local_path = Path(f"/tmp/r2-upload-{name}")
-            local_path.write_bytes(data)
+            local_file = tempfile.NamedTemporaryFile(
+                prefix="r2-upload-",
+                suffix=Path(name).suffix,
+                delete=False,
+            )
+            local_path = Path(local_file.name)
             try:
+                with local_file:
+                    local_file.write(data)
                 client.upload_file(
                     str(local_path),
                     bucket,
