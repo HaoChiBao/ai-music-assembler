@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ from music_assembler.api.assembly_schedule import (
     apply_default_times,
     due_slots,
     ensure_schedule_upload_times,
+    get_schedule,
     ledger_is_terminal,
     preview_schedule,
     slot_key,
@@ -91,6 +93,31 @@ def test_ensure_schedule_upload_times_fills_missing():
     assert ensure_schedule_upload_times(sched) is True
     assert sched.default_upload_at == "12:00"
     assert sched.days[0].upload_at == "12:00"
+
+
+def test_get_schedule_backfills_legacy_upload_times_without_writing():
+    client = MagicMock()
+    document = {
+        "version": 1,
+        "schedules": [
+            {
+                "channel": "nappabeats",
+                "default_assemble_at": "11:00",
+                "days": [{"enabled": True, "assemble_at": "11:00"}],
+            }
+        ],
+    }
+    client.get_object.return_value = {
+        "Body": MagicMock(read=lambda: json.dumps(document).encode("utf-8"))
+    }
+
+    loaded = get_schedule(client, "bucket", "nappabeats")
+
+    assert loaded is not None
+    assert loaded.default_upload_at == "12:00"
+    assert loaded.days[0].upload_at == "12:00"
+    # Read paths must not rewrite a stale document over a concurrent schedule save.
+    client.put_object.assert_not_called()
 
 
 def test_slot_publish_at_utc_uses_resolved_upload_at():
@@ -223,7 +250,6 @@ def test_upsert_schedule_roundtrip():
         days=[DaySlot(enabled=True) for _ in range(7)],
     )
     upsert_schedule(client, bucket, sched)
-    from music_assembler.api.assembly_schedule import get_schedule
 
     loaded = get_schedule(client, bucket, "nappabeats")
     assert loaded is not None

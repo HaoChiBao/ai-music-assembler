@@ -347,32 +347,20 @@ def save_schedules_document(client, bucket: str, doc: dict[str, Any]) -> None:
     )
 
 
-def list_schedules(client, bucket: str, *, persist_backfill: bool = False) -> list[ChannelSchedule]:
+def list_schedules(client, bucket: str) -> list[ChannelSchedule]:
     doc = load_schedules_document(client, bucket)
     rows = []
-    mutated = False
     for item in doc.get("schedules") or []:
         if isinstance(item, dict) and item.get("channel"):
             sched = ChannelSchedule.from_dict(item)
-            # from_dict already ensures times in memory; detect missing fields in stored JSON.
-            if ensure_schedule_upload_times(sched):
-                mutated = True
-            if not item.get("default_upload_at") or any(
-                isinstance(d, dict) and d.get("enabled") and not d.get("upload_at")
-                for d in (item.get("days") or [])
-            ):
-                mutated = True
             rows.append(sched)
     rows.sort(key=lambda s: s.channel.lower())
-    if persist_backfill and mutated:
-        doc["schedules"] = [s.to_dict() for s in rows]
-        save_schedules_document(client, bucket, doc)
     return rows
 
 
 def get_schedule(client, bucket: str, channel: str) -> ChannelSchedule | None:
     channel = channel.strip()
-    for sched in list_schedules(client, bucket, persist_backfill=True):
+    for sched in list_schedules(client, bucket):
         if sched.channel == channel:
             return sched
     return None
@@ -607,7 +595,7 @@ def schedules_overview(
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Aggregate all channel schedules, upcoming slots, and recent cron ledger entries."""
-    schedules = list_schedules(client, bucket, persist_backfill=True)
+    schedules = list_schedules(client, bucket)
     channels: list[dict[str, Any]] = []
     all_upcoming: list[dict[str, Any]] = []
     inventory_cache: dict[str, dict[str, int]] = {}
@@ -788,7 +776,7 @@ def run_due_schedules(
 ) -> dict[str, Any]:
     """Evaluate all schedules; start assembly or record skip/defer."""
     results: list[dict[str, Any]] = []
-    for schedule in list_schedules(client, bucket, persist_backfill=True):
+    for schedule in list_schedules(client, bucket):
         for slot in due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes):
             entry = read_ledger(client, bucket, slot["slot_key"])
             if ledger_is_terminal(entry):
