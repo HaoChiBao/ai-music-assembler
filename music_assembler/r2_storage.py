@@ -276,25 +276,36 @@ def pre_processed_in_flight_key(
     return f"{_normalize_prefix(pre_processed_prefix)}in-flight/{execution_id}/{filename}"
 
 
+def list_in_flight_pre_processed_claims(
+    client, bucket: str, pre_processed_prefix: str
+) -> dict[str, list[tuple[str, str]]]:
+    """Map pre-processed filename to its in-flight execution claims."""
+    prefix = f"{_normalize_prefix(pre_processed_prefix)}in-flight/"
+    out: dict[str, list[tuple[str, str]]] = {}
+    for key in list_object_keys(client, bucket, prefix):
+        rel = key[len(prefix) :]
+        parts = rel.split("/", 1)
+        if len(parts) != 2:
+            continue
+        execution_id, filename = parts
+        if _is_image_key(filename):
+            out.setdefault(filename, []).append((execution_id, key))
+    for claims in out.values():
+        claims.sort(key=lambda row: row[0])
+    return out
+
+
 def list_in_flight_pre_processed_names(
     client, bucket: str, pre_processed_prefix: str
 ) -> set[str]:
     """Filenames reserved under ``pre-processed/{category}/in-flight/*/``."""
-    prefix = f"{_normalize_prefix(pre_processed_prefix)}in-flight/"
-    names: set[str] = set()
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith("/"):
-                continue
-            rel = key[len(prefix) :]
-            if "/" not in rel:
-                continue
-            filename = rel.split("/", 1)[1]
-            if _is_image_key(filename):
-                names.add(filename)
-    return names
+    return set(
+        list_in_flight_pre_processed_claims(client, bucket, pre_processed_prefix)
+    )
+
+
+def _pre_processed_claim_winner(claims: list[tuple[str, str]]) -> str:
+    return min(execution_id for execution_id, _ in claims)
 
 
 def _post_processed_png_stems(client, bucket: str, images_prefix: str) -> set[str]:
@@ -361,27 +372,46 @@ def claim_pre_processed_on_r2(
     Returns the claimed filename, or ``None`` when nothing is available.
   Safe for parallel workers: races retry the next candidate.
     """
-    available = list_claimable_pre_processed_keys(
-        client,
-        bucket,
-        pre_processed_prefix=pre_processed_prefix,
-        images_prefix=images_prefix,
-        force=force,
-    )
-    if not available:
-        return None
-    random.shuffle(available)
-    for src_key in available:
-        filename = src_key.rsplit("/", 1)[-1]
-        dest_key = pre_processed_in_flight_key(pre_processed_prefix, execution_id, filename)
-        if not object_exists(client, bucket, src_key):
-            continue
-        try:
-            copy_then_delete_object(client, bucket, src_key, dest_key)
-        except client.exceptions.ClientError:
-            continue
-        if object_exists(client, bucket, dest_key):
-            return filename
+    for _ in range(24):
+        available = list_claimable_pre_processed_keys(
+            client,
+            bucket,
+            pre_processed_prefix=pre_processed_prefix,
+            images_prefix=images_prefix,
+            force=force,
+        )
+        if not available:
+            return None
+        random.shuffle(available)
+        lost_race = False
+        for src_key in available:
+            filename = src_key.rsplit("/", 1)[-1]
+            dest_key = pre_processed_in_flight_key(
+                pre_processed_prefix, execution_id, filename
+            )
+            if not object_exists(client, bucket, src_key):
+                continue
+            try:
+                copy_then_delete_object(client, bucket, src_key, dest_key)
+            except client.exceptions.ClientError:
+                continue
+            if not object_exists(client, bucket, dest_key):
+                continue
+            claims = list_in_flight_pre_processed_claims(
+                client, bucket, pre_processed_prefix
+            ).get(filename, [])
+            if len(claims) <= 1:
+                return filename
+            if _pre_processed_claim_winner(claims) == execution_id:
+                return filename
+            try:
+                client.delete_object(Bucket=bucket, Key=dest_key)
+            except client.exceptions.ClientError:
+                pass
+            lost_race = True
+            break
+        if not lost_race:
+            return None
     return None
 
 
