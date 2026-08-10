@@ -7,6 +7,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from starlette.requests import Request
+
+from music_assembler.api.app import dashboard_page
+from music_assembler.api.config import ApiSettings
+
 
 def _dashboard_html_runtime() -> str:
     """Evaluate ``_DASHBOARD_HTML`` as Python does (catches ``\\n`` escape bugs)."""
@@ -26,11 +31,14 @@ def _dashboard_html_runtime() -> str:
     return ns["html"]
 
 
-def _dashboard_script() -> str:
-    html = _dashboard_html_runtime()
+def _script_from_html(html: str) -> str:
     scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
     assert scripts, "dashboard HTML missing <script> block"
     return scripts[-1]
+
+
+def _dashboard_script() -> str:
+    return _script_from_html(_dashboard_html_runtime())
 
 
 def test_dashboard_javascript_syntax():
@@ -58,6 +66,39 @@ def test_dashboard_javascript_syntax():
     assert ").join('\n');" not in js
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "dashboard-syntax-test.js"
+        path.write_text(js, encoding="utf-8")
+        subprocess.run(["node", "--check", str(path)], check=True)
+
+
+def test_dashboard_runtime_values_are_safe_in_html_and_javascript(monkeypatch):
+    thumbnail = """John's </script><script>alert("thumbnail")</script>"""
+    category = """mix'</script><script>alert("category")</script>"""
+    monkeypatch.setenv("THUMBNAIL_TEXT", thumbnail)
+    settings = ApiSettings(
+        api_key=None,
+        dashboard_password=None,
+        gcp_project="project",
+        gcp_region="region",
+        assembly_job_name="assemble",
+        extend_job_name="extend",
+        extend_use_gcp=True,
+        default_category=category,
+        configured_channels=(),
+        uploader_api_url=None,
+        uploader_api_key=None,
+    )
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+
+    html = dashboard_page(request, settings)
+    js = _script_from_html(html)
+
+    assert 'value="John&#x27;s &lt;/script&gt;&lt;script&gt;alert(&quot;thumbnail&quot;)' in html
+    assert '<script>alert("thumbnail")</script>' not in html
+    assert '<script>alert("category")</script>' not in html
+    assert "__DEFAULT_THUMBNAIL_" not in html
+    assert "__DEFAULT_CATEGORY_JSON__" not in html
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dashboard-runtime-values.js"
         path.write_text(js, encoding="utf-8")
         subprocess.run(["node", "--check", str(path)], check=True)
 

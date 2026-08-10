@@ -1738,17 +1738,34 @@ def dashboard_page(
     if not has_dashboard_session(request, settings):
         return _LOGIN_HTML
     import json as _json
+    from html import escape as _html_escape
 
     # Embed as a single-quoted JS string for JSON.parse (keeps raw HTML/JS syntactically valid).
     templates_json = _json.dumps(templates_public_list(), separators=(",", ":"))
     templates_js = (
         templates_json.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "")
     )
+    default_thumbnail = (
+        (os.environ.get("THUMBNAIL_TEXT") or "PLAYLIST").strip() or "PLAYLIST"
+    )
+
+    def _js_literal(value: str) -> str:
+        return (
+            _json.dumps(value)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+
     return (
-        _DASHBOARD_HTML.replace("__DEFAULT_CATEGORY__", settings.default_category)
+        _DASHBOARD_HTML.replace(
+            "'__DEFAULT_CATEGORY_JSON__'", _js_literal(settings.default_category)
+        )
         .replace(
-            "__DEFAULT_THUMBNAIL__",
-            (os.environ.get("THUMBNAIL_TEXT") or "PLAYLIST").strip() or "PLAYLIST",
+            "__DEFAULT_THUMBNAIL_HTML__", _html_escape(default_thumbnail, quote=True)
+        )
+        .replace(
+            "'__DEFAULT_THUMBNAIL_JSON__'", _js_literal(default_thumbnail)
         )
         .replace("__DEFAULT_TEMPLATE_ID__", DEFAULT_TEMPLATE_ID)
         .replace("__VIDEO_TEMPLATES_JSON__", templates_js)
@@ -3967,7 +3984,7 @@ _DASHBOARD_HTML = (
             <div class="form-row-3">
               <div>
                 <label for="scheduleThumb">Thumbnail text</label>
-                <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL__"/>
+                <input id="scheduleThumb" value="__DEFAULT_THUMBNAIL_HTML__"/>
               </div>
               <div>
                 <label for="scheduleDuration">Duration (min)</label>
@@ -4389,7 +4406,7 @@ function fmtBytes(n) {
   if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
   return (n/1048576).toFixed(1) + ' MB';
 }
-function cat() { return '__DEFAULT_CATEGORY__'; }
+function cat() { return '__DEFAULT_CATEGORY_JSON__'; }
 const VIDEO_TEMPLATES = JSON.parse('__VIDEO_TEMPLATES_JSON__');
 const DEFAULT_TEMPLATE_ID = '__DEFAULT_TEMPLATE_ID__';
 function findVideoTemplate(id) {
@@ -4504,13 +4521,13 @@ async function populateBackgroundFolderSelect(selectId, selected) {
     for (const f of folders) {
       el.innerHTML += '<option value="' + esc(f) + '">' + esc(f) + '</option>';
     }
-    const def = '__DEFAULT_CATEGORY__';
+    const def = '__DEFAULT_CATEGORY_JSON__';
     if (keep && folders.includes(keep)) el.value = keep;
     else if (folders.includes(def)) el.value = def;
     else if (folders.length === 1) el.value = folders[0];
   } catch (e) {
     console.warn('background-folders', selectId, e);
-    el.innerHTML = '<option value="__DEFAULT_CATEGORY__">__DEFAULT_CATEGORY__</option>';
+    el.innerHTML = '<option value="' + esc(cat()) + '">' + esc(cat()) + '</option>';
   }
 }
 
@@ -4527,7 +4544,7 @@ async function populatePreProcessedFolderSelect(selectId, selected) {
     for (const f of folders) {
       el.innerHTML += '<option value="' + esc(f) + '">' + esc(f) + '</option>';
     }
-    const def = '__DEFAULT_CATEGORY__';
+    const def = '__DEFAULT_CATEGORY_JSON__';
     if (keep && folders.includes(keep)) el.value = keep;
     else if (folders.includes(def)) el.value = def;
     else if (folders.length === 1) el.value = folders[0];
@@ -5850,7 +5867,7 @@ function fillScheduleForm(data) {
     });
     updateScheduleSummary();
   });
-  document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
+  document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL_JSON__';
   document.getElementById('scheduleDuration').value = data.duration_min ?? findVideoTemplate(scheduleTemplateId)?.default_duration_min ?? 90;
   document.getElementById('scheduleVariance').value = data.variance_min ?? findVideoTemplate(scheduleTemplateId)?.default_variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
@@ -6216,7 +6233,7 @@ function defaultNewSchedule(channel) {
     template_id: tmpl?.id || DEFAULT_TEMPLATE_ID,
     duration_min: tmpl?.default_duration_min ?? 90,
     variance_min: tmpl?.default_variance_min ?? 15,
-    thumbnail_text: tmpl?.default_thumbnail_text || '__DEFAULT_THUMBNAIL__',
+    thumbnail_text: tmpl?.default_thumbnail_text || '__DEFAULT_THUMBNAIL_JSON__',
     queue_youtube: true,
     upload_schedule_publish: true,
     upload_now: false,
