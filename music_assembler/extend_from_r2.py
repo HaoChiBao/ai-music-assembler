@@ -472,11 +472,31 @@ def extend_one_claimed_on_r2(
     )
     input_dir = work_dir / "pre-processed"
     output_dir = work_dir / "post-processed"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
     local_src = input_dir / filename
     local_out = output_dir / f"{Path(filename).stem}.png"
-    client.download_file(cfg.bucket, in_flight_key, str(local_src))
+
+    def _failure_with_release(error: str) -> tuple[bool, str]:
+        try:
+            released = release_pre_processed_claim(
+                client,
+                cfg.bucket,
+                pre_processed_prefix=resolved.pre_processed_prefix,
+                execution_id=execution_id,
+                filename=filename,
+            )
+        except Exception as release_exc:
+            return False, f"{error}; claim release failed: {release_exc}"
+        if not released:
+            return False, f"{error}; claim release did not complete"
+        return False, error
+
+    try:
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        client.download_file(cfg.bucket, in_flight_key, str(local_src))
+    except Exception as exc:
+        return _failure_with_release(f"input preparation failed: {exc}")
+
     try:
         extend_one_with_retry(
             retries=gemini_settings["retries"],
@@ -491,24 +511,27 @@ def extend_one_claimed_on_r2(
             output_width=gemini_settings["out_w"],
         )
     except Exception as exc:
-        release_pre_processed_claim(
+        return _failure_with_release(str(exc))
+
+    try:
+        upload_file(client, cfg.bucket, f"{resolved.images_prefix}{local_out.name}", local_out)
+    except Exception as exc:
+        return _failure_with_release(f"upload failed: {exc}")
+
+    try:
+        retired = retire_claimed_pre_processed_on_r2(
             client,
             cfg.bucket,
             pre_processed_prefix=resolved.pre_processed_prefix,
+            used_pre_processed_prefix=resolved.used_pre_processed_prefix,
             execution_id=execution_id,
             filename=filename,
         )
-        return False, str(exc)
+    except Exception as exc:
+        return _failure_with_release(f"retire failed: {exc}")
+    if not retired:
+        return _failure_with_release("retire failed: operation did not complete")
 
-    upload_file(client, cfg.bucket, f"{resolved.images_prefix}{local_out.name}", local_out)
-    retire_claimed_pre_processed_on_r2(
-        client,
-        cfg.bucket,
-        pre_processed_prefix=resolved.pre_processed_prefix,
-        used_pre_processed_prefix=resolved.used_pre_processed_prefix,
-        execution_id=execution_id,
-        filename=filename,
-    )
     return True, None
 
 
@@ -619,6 +642,9 @@ def run_extend_cloud_worker(
             failed += 1
             failures.append({"filename": filename, "error": err or "unknown"})
             _log(f"error: {filename}: {err}", err=True)
+            # A released claim can be selected again immediately; stop rather than
+            # retrying the same failed item indefinitely in this worker invocation.
+            break
 
     if is_temp:
         shutil.rmtree(work_dir, ignore_errors=True)
