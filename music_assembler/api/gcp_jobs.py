@@ -110,7 +110,7 @@ def _pick_new_execution(
     started_after: datetime,
     exclude: set[str],
 ) -> dict[str, Any] | None:
-    """Find the GCP execution created for this ``run_job`` call (parallel-safe)."""
+    """Find a recent execution when exact operation metadata is unavailable."""
     cutoff = started_after - timedelta(seconds=10)
     try:
         pages = executions_client.list_executions(parent=parent)
@@ -126,6 +126,36 @@ def _pick_new_execution(
         if created is not None and created >= cutoff:
             return row
     return None
+
+
+def _operation_execution(operation: Any, *, job_resource: str) -> Any | None:
+    """Return exact execution metadata without waiting for the job to finish."""
+
+    expected_prefix = f"{job_resource}/executions/"
+
+    def valid_execution() -> Any | None:
+        try:
+            execution = operation.metadata
+        except Exception:
+            return None
+        name = getattr(execution, "name", None)
+        if isinstance(name, str) and name.startswith(expected_prefix):
+            return execution
+        return None
+
+    execution = valid_execution()
+    if execution is not None:
+        return execution
+
+    refresh_once = getattr(operation, "done", None)
+    if callable(refresh_once):
+        try:
+            # ``done()`` performs one status RPC; it does not await completion.
+            refresh_once()
+        except Exception:
+            return None
+
+    return valid_execution()
 
 
 def _run_cloud_job(
@@ -150,24 +180,31 @@ def _run_cloud_job(
         ),
     )
     try:
-        jobs_client.run_job(request=request)
+        operation = jobs_client.run_job(request=request)
     except Exception as exc:
         raise RuntimeError(f"RunJob failed: {exc}") from exc
-    picked: dict[str, Any] | None = None
-    for _ in range(12):
-        try:
-            picked = _pick_new_execution(
-                executions_client,
-                parent=job_resource,
-                job_name=job_name,
-                started_after=started_after,
-                exclude=exclude,
-            )
-        except RuntimeError:
-            break
-        if picked is not None:
-            break
-        time.sleep(0.4)
+
+    exact_execution = _operation_execution(operation, job_resource=job_resource)
+    picked = (
+        execution_to_dict(exact_execution, job_name=job_name)
+        if exact_execution is not None
+        else None
+    )
+    if picked is None:
+        for _ in range(12):
+            try:
+                picked = _pick_new_execution(
+                    executions_client,
+                    parent=job_resource,
+                    job_name=job_name,
+                    started_after=started_after,
+                    exclude=exclude,
+                )
+            except RuntimeError:
+                break
+            if picked is not None:
+                break
+            time.sleep(0.4)
     if picked is None:
         return {"execution_id": execution_id, "status": "starting", "name": None}
     data = dict(picked)
