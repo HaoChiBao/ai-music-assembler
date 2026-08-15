@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from music_assembler.api.assembly_health import verify_assembly_run_output
 from music_assembler.assemble_options import unique_output_basename
+from music_assembler.assemble_from_r2 import _upload_outputs_with_claim_recovery
 from music_assembler.r2_storage import (
     _background_claim_winner,
     claim_background_on_r2,
@@ -26,6 +28,60 @@ class TestUniqueOutputBasename(unittest.TestCase):
         self.assertIn("e278a4ed", a)
         self.assertIn("abcdef12", b)
         self.assertNotEqual(a, b)
+
+
+class TestOutputUploadClaimRecovery(unittest.TestCase):
+    @patch("music_assembler.assemble_from_r2.release_background_claim", return_value=True)
+    @patch(
+        "music_assembler.assemble_from_r2.sync_dir_to_prefix",
+        side_effect=OSError("R2 upload unavailable"),
+    )
+    def test_failed_upload_restores_claim_before_error(
+        self,
+        sync_mock: MagicMock,
+        release_mock: MagicMock,
+    ) -> None:
+        client = MagicMock()
+
+        with self.assertRaisesRegex(OSError, "R2 upload unavailable"):
+            _upload_outputs_with_claim_recovery(
+                client,
+                BUCKET,
+                output_dir=Path("/tmp/output"),
+                output_prefix="music-video/channel/",
+                images_prefix=IMAGES,
+                execution_id="asm_failed",
+                claimed_background=FILE,
+            )
+
+        sync_mock.assert_called_once()
+        release_mock.assert_called_once_with(
+            client,
+            BUCKET,
+            images_prefix=IMAGES,
+            execution_id="asm_failed",
+            filename=FILE,
+        )
+
+    @patch("music_assembler.assemble_from_r2.release_background_claim")
+    @patch("music_assembler.assemble_from_r2.sync_dir_to_prefix", return_value=4)
+    def test_successful_upload_keeps_claim_for_retirement(
+        self,
+        _sync_mock: MagicMock,
+        release_mock: MagicMock,
+    ) -> None:
+        uploaded = _upload_outputs_with_claim_recovery(
+            MagicMock(),
+            BUCKET,
+            output_dir=Path("/tmp/output"),
+            output_prefix="music-video/channel/",
+            images_prefix=IMAGES,
+            execution_id="asm_ok",
+            claimed_background=FILE,
+        )
+
+        self.assertEqual(uploaded, 4)
+        release_mock.assert_not_called()
 
 
 class TestBackgroundClaimRace(unittest.TestCase):

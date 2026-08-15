@@ -346,6 +346,43 @@ def _resolve_work_dir(arg: Path | None) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="r2-assemble-")).resolve(), True
 
 
+def _upload_outputs_with_claim_recovery(
+    client,
+    bucket: str,
+    *,
+    output_dir: Path,
+    output_prefix: str,
+    images_prefix: str,
+    execution_id: str,
+    claimed_background: str | None,
+) -> int:
+    """Persist outputs before consuming a claim, restoring it if upload fails."""
+    try:
+        return sync_dir_to_prefix(client, bucket, output_dir, output_prefix)
+    except Exception:
+        if execution_id and claimed_background:
+            try:
+                released = release_background_claim(
+                    client,
+                    bucket,
+                    images_prefix=images_prefix,
+                    execution_id=execution_id,
+                    filename=claimed_background,
+                )
+                if not released:
+                    print(
+                        f"warning: could not restore background claim {claimed_background}",
+                        file=sys.stderr,
+                    )
+            except Exception as release_error:
+                print(
+                    f"warning: could not restore background claim {claimed_background}: "
+                    f"{release_error}",
+                    file=sys.stderr,
+                )
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(find_dotenv(usecwd=True))
     args = build_parser().parse_args(argv)
@@ -656,8 +693,47 @@ def main(argv: list[str] | None = None) -> int:
     dur = result["final_audio_duration_sec"]
     print(f"  audio duration: {dur / 60:.1f} min ({dur:.0f} s)")
 
-    # Retire background on R2 after successful encode (dashboard jobs use in-flight claim).
-    if execution_id and claimed_background:
+    # Persist the encoded output before consuming its source background. If upload
+    # fails, dashboard claims are returned to the pool for a later retry.
+    if not args.no_upload:
+        print(f"==> Sync outputs to s3://{cfg_r2.bucket}/{prefixes.output_prefix}")
+        if progress_write:
+            progress_write(95, "Uploading outputs to R2…")
+        try:
+            uploaded = _upload_outputs_with_claim_recovery(
+                client,
+                cfg_r2.bucket,
+                output_dir=output_dir,
+                output_prefix=prefixes.output_prefix,
+                images_prefix=prefixes.images_prefix,
+                execution_id=execution_id,
+                claimed_background=claimed_background,
+            )
+        except Exception as e:
+            if execution_id:
+                try:
+                    from music_assembler.job_progress import write_progress_json
+
+                    write_progress_json(
+                        client,
+                        cfg_r2.bucket,
+                        execution_id,
+                        pct=0,
+                        stage=f"Output upload failed: {e}",
+                        category=prefixes.images_folder,
+                        status="failed",
+                    )
+                except Exception as progress_error:
+                    print(
+                        f"warning: could not record output upload failure: {progress_error}",
+                        file=sys.stderr,
+                    )
+            print(f"error: output upload failed: {e}", file=sys.stderr)
+            return 1
+        print(f"    uploaded {uploaded} object(s)")
+
+    # Retire background only after outputs are safely persisted.
+    if not args.no_upload and execution_id and claimed_background:
         name = claimed_background
         used_image = result.get("used_image")
         print(
@@ -720,13 +796,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    retired {name} → used/ (verify: {check})")
             else:
                 print(f"warning: could not retire {name} on R2", file=sys.stderr)
-
-    if not args.no_upload:
-        print(f"==> Sync outputs to s3://{cfg_r2.bucket}/{prefixes.output_prefix}")
-        if progress_write:
-            progress_write(96, "Uploading outputs to R2…")
-        uploaded = sync_dir_to_prefix(client, cfg_r2.bucket, output_dir, prefixes.output_prefix)
-        print(f"    uploaded {uploaded} object(s)")
 
     queue_youtube = resolve_queue_youtube(args.queue_youtube) if resolve_queue_youtube else False
     queue_result = _maybe_queue_youtube_upload(
