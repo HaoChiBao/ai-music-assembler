@@ -8,7 +8,10 @@ from unittest.mock import MagicMock, patch
 
 from music_assembler.api.assembly_health import verify_assembly_run_output
 from music_assembler.assemble_options import unique_output_basename
-from music_assembler.assemble_from_r2 import _upload_outputs_with_claim_recovery
+from music_assembler.assemble_from_r2 import (
+    _upload_outputs_with_claim_recovery,
+    _write_progress_safely,
+)
 from music_assembler.r2_storage import (
     _background_claim_winner,
     claim_background_on_r2,
@@ -31,6 +34,23 @@ class TestUniqueOutputBasename(unittest.TestCase):
 
 
 class TestOutputUploadClaimRecovery(unittest.TestCase):
+    @patch(
+        "music_assembler.job_progress.write_progress_json",
+        side_effect=RuntimeError("R2 progress unavailable"),
+    )
+    def test_progress_failure_does_not_abort_worker(self, progress_mock: MagicMock) -> None:
+        reported = _write_progress_safely(
+            MagicMock(),
+            BUCKET,
+            "asm_running",
+            pct=42,
+            stage="Encoding",
+            category="korean",
+        )
+
+        self.assertFalse(reported)
+        progress_mock.assert_called_once()
+
     @patch("music_assembler.assemble_from_r2.release_background_claim", return_value=True)
     @patch(
         "music_assembler.assemble_from_r2.sync_dir_to_prefix",

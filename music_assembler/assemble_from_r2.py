@@ -346,6 +346,35 @@ def _resolve_work_dir(arg: Path | None) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="r2-assemble-")).resolve(), True
 
 
+def _write_progress_safely(
+    client,
+    bucket: str,
+    execution_id: str,
+    *,
+    pct: float,
+    stage: str,
+    category: str,
+    status: str = "running",
+) -> bool:
+    """Report progress without allowing telemetry failures to abort the worker."""
+    try:
+        from music_assembler.job_progress import write_progress_json
+
+        write_progress_json(
+            client,
+            bucket,
+            execution_id,
+            pct=pct,
+            stage=stage,
+            category=category,
+            status=status,
+        )
+    except Exception as exc:
+        print(f"warning: could not report job progress: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def _upload_outputs_with_claim_recovery(
     client,
     bucket: str,
@@ -434,12 +463,10 @@ def main(argv: list[str] | None = None) -> int:
     execution_id = os.environ.get("ASSEMBLY_EXECUTION_ID", "").strip()
     progress_write = None
     if execution_id:
-        from music_assembler.job_progress import write_progress_json
-
         print(f"==> Job progress tracking: {execution_id}", flush=True)
 
         def progress_write(pct: float, stage: str, *, status: str = "running") -> None:
-            write_progress_json(
+            _write_progress_safely(
                 client,
                 cfg_r2.bucket,
                 execution_id,
