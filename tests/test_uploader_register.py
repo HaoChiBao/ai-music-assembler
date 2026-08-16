@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from music_assembler import assemble_from_r2
 from music_assembler.api import uploader_client
 
 
@@ -156,3 +157,55 @@ def test_register_youtube_upload_requires_title():
             title="",
             video_uri="s3://b/k.mp4",
         )
+
+
+def _worker_queue_kwargs(tmp_path):
+    title = tmp_path / "title.txt"
+    title.write_text("Late Night Mix", encoding="utf-8")
+    return {
+        "enabled": True,
+        "bucket": "music-assembly-data",
+        "output_prefix": "music-video/nappabeats/",
+        "channel": "nappabeats",
+        "basename": "mv_test",
+        "result": {
+            "youtube_metadata": None,
+            "title_txt": title,
+            "description_txt": None,
+            "thumbnail_png": None,
+        },
+        "no_upload": False,
+    }
+
+
+def test_worker_fails_requested_queue_when_credentials_are_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        assemble_from_r2,
+        "uploader_credentials_from_env",
+        lambda: (None, None),
+    )
+
+    with pytest.raises(
+        assemble_from_r2.YouTubeQueueError,
+        match="UPLOADER_API_URL and UPLOADER_API_KEY",
+    ):
+        assemble_from_r2._maybe_queue_youtube_upload(**_worker_queue_kwargs(tmp_path))
+
+
+def test_worker_fails_requested_queue_when_registration_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        assemble_from_r2,
+        "uploader_credentials_from_env",
+        lambda: ("https://uploader.example", "secret"),
+    )
+
+    def fail_registration(**_kwargs):
+        raise OSError("uploader unavailable")
+
+    monkeypatch.setattr(assemble_from_r2, "register_youtube_upload", fail_registration)
+
+    with pytest.raises(
+        assemble_from_r2.YouTubeQueueError,
+        match="uploader unavailable",
+    ):
+        assemble_from_r2._maybe_queue_youtube_upload(**_worker_queue_kwargs(tmp_path))

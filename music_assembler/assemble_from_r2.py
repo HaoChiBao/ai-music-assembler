@@ -85,6 +85,10 @@ DEFAULT_TITLE_FONT_SIZE = 46
 DEFAULT_TITLE_FONT_WEIGHT = 400
 
 
+class YouTubeQueueError(RuntimeError):
+    """Raised when a requested uploader handoff cannot be completed."""
+
+
 def _print_preflight(duration, template) -> None:
     avg_min = (duration.min_sec + duration.max_sec) / 2 / 60.0
     print(
@@ -223,45 +227,34 @@ def _maybe_queue_youtube_upload(
     result: dict,
     no_upload: bool,
 ) -> dict[str, Any] | None:
-    """Register the finished run with youtube-uploader; returns API response or None."""
+    """Register the finished run with youtube-uploader.
+
+    Returns ``None`` only when queueing was explicitly disabled. A requested
+    handoff must fail the assembly job rather than silently leaving the video
+    outside the upload pipeline.
+    """
     if not enabled:
         return None
     if register_youtube_upload is None:
-        print(
-            "warning: --queue-youtube requested but uploader client is unavailable",
-            file=sys.stderr,
-        )
-        return None
+        raise YouTubeQueueError("YouTube queue failed: uploader client is unavailable")
     if no_upload:
-        print(
-            "warning: --queue-youtube skipped because --no-upload was set (video not on R2)",
-            file=sys.stderr,
+        raise YouTubeQueueError(
+            "YouTube queue failed: --no-upload was set, so the video is not on R2"
         )
-        return None
     if not channel:
-        print(
-            "warning: --queue-youtube skipped because no YouTube channel was set",
-            file=sys.stderr,
-        )
-        return None
+        raise YouTubeQueueError("YouTube queue failed: no YouTube channel was set")
 
     api_url, api_key = uploader_credentials_from_env()
     if not api_url or not api_key:
-        print(
-            "warning: --queue-youtube skipped — set UPLOADER_API_URL and UPLOADER_API_KEY",
-            file=sys.stderr,
+        raise YouTubeQueueError(
+            "YouTube queue failed: set UPLOADER_API_URL and UPLOADER_API_KEY"
         )
-        return None
 
     meta = result.get("youtube_metadata")
     title = meta.title if meta else _read_text_file(result.get("title_txt"))
     description = meta.description if meta else _read_text_file(result.get("description_txt"))
     if not title:
-        print(
-            "warning: --queue-youtube skipped — no title (use metadata generation, not --no-metadata)",
-            file=sys.stderr,
-        )
-        return None
+        raise YouTubeQueueError("YouTube queue failed: no title was generated")
 
     video_key = f"{output_prefix}{basename}/{basename}_video.mp4"
     video_uri = r2_object_uri(bucket, video_key)
@@ -327,8 +320,7 @@ def _maybe_queue_youtube_upload(
             no_schedule=upload_now,
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"warning: YouTube queue register failed: {exc}", file=sys.stderr)
-        return None
+        raise YouTubeQueueError(f"YouTube queue registration failed: {exc}") from exc
 
     job_id = response.get("job_id") or basename
     status = response.get("status") or "pending"
@@ -729,15 +721,37 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    uploaded {uploaded} object(s)")
 
     queue_youtube = resolve_queue_youtube(args.queue_youtube) if resolve_queue_youtube else False
-    queue_result = _maybe_queue_youtube_upload(
-        enabled=queue_youtube,
-        bucket=cfg_r2.bucket,
-        output_prefix=prefixes.output_prefix,
-        channel=prefixes.channel,
-        basename=basename,
-        result=result,
-        no_upload=args.no_upload,
-    )
+    try:
+        queue_result = _maybe_queue_youtube_upload(
+            enabled=queue_youtube,
+            bucket=cfg_r2.bucket,
+            output_prefix=prefixes.output_prefix,
+            channel=prefixes.channel,
+            basename=basename,
+            result=result,
+            no_upload=args.no_upload,
+        )
+    except YouTubeQueueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if execution_id:
+            from music_assembler.job_progress import write_progress_json
+
+            write_progress_json(
+                client,
+                cfg_r2.bucket,
+                execution_id,
+                pct=99,
+                stage=str(exc),
+                category=prefixes.images_folder,
+                status="failed",
+                extra={
+                    "output_folder": str(result["output_dir"]),
+                    "video_id": basename,
+                    "channel": prefixes.channel,
+                    "youtube_queue_status": "failed",
+                },
+            )
+        return 1
     if queue_result and progress_write:
         progress_write(99, f"YouTube queue: {queue_result.get('job_id', basename)}")
 
