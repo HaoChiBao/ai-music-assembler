@@ -209,3 +209,29 @@ def test_worker_fails_requested_queue_when_registration_errors(monkeypatch, tmp_
         match="uploader unavailable",
     ):
         assemble_from_r2._maybe_queue_youtube_upload(**_worker_queue_kwargs(tmp_path))
+
+
+def test_worker_records_queue_failure_without_losing_output_location(tmp_path):
+    client = MagicMock()
+    error = assemble_from_r2.YouTubeQueueError(
+        "YouTube queue registration failed: uploader unavailable"
+    )
+
+    assemble_from_r2._mark_youtube_queue_failed(
+        client,
+        "music-assembly-data",
+        "asm_test",
+        category="korean",
+        basename="mv_test",
+        channel="nappabeats",
+        output_dir=tmp_path / "mv_test",
+        error=error,
+    )
+
+    payload = json.loads(client.put_object.call_args.kwargs["Body"])
+    assert payload["status"] == "failed"
+    assert payload["pct"] == 99.0
+    assert payload["video_id"] == "mv_test"
+    assert payload["channel"] == "nappabeats"
+    assert payload["youtube_queue_status"] == "failed"
+    assert payload["stage"] == str(error)

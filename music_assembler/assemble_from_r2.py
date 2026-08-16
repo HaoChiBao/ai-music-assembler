@@ -328,6 +328,37 @@ def _maybe_queue_youtube_upload(
     return response
 
 
+def _mark_youtube_queue_failed(
+    client,
+    bucket: str,
+    execution_id: str,
+    *,
+    category: str,
+    basename: str,
+    channel: str | None,
+    output_dir: Path,
+    error: YouTubeQueueError,
+) -> None:
+    """Persist an actionable terminal state while retaining the rendered output."""
+    from music_assembler.job_progress import write_progress_json
+
+    write_progress_json(
+        client,
+        bucket,
+        execution_id,
+        pct=99,
+        stage=str(error),
+        category=category,
+        status="failed",
+        extra={
+            "output_folder": str(output_dir),
+            "video_id": basename,
+            "channel": channel,
+            "youtube_queue_status": "failed",
+        },
+    )
+
+
 def _resolve_work_dir(arg: Path | None) -> tuple[Path, bool]:
     """Return (path, is_temporary)."""
     if arg is not None:
@@ -734,22 +765,15 @@ def main(argv: list[str] | None = None) -> int:
     except YouTubeQueueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         if execution_id:
-            from music_assembler.job_progress import write_progress_json
-
-            write_progress_json(
+            _mark_youtube_queue_failed(
                 client,
                 cfg_r2.bucket,
                 execution_id,
-                pct=99,
-                stage=str(exc),
                 category=prefixes.images_folder,
-                status="failed",
-                extra={
-                    "output_folder": str(result["output_dir"]),
-                    "video_id": basename,
-                    "channel": prefixes.channel,
-                    "youtube_queue_status": "failed",
-                },
+                basename=basename,
+                channel=prefixes.channel,
+                output_dir=Path(result["output_dir"]),
+                error=exc,
             )
         return 1
     if queue_result and progress_write:
