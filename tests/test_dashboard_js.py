@@ -51,6 +51,8 @@ def test_dashboard_javascript_syntax():
     assert "function initTemplatePickers()" in js
     assert "function renderTemplatePicker(" in js
     assert "template_id: templateId" in js or "template_id: video.template_id" in js
+    assert "renderTemplatePicker('extendTemplatePicker', 'extendTemplate'" in js
+    assert "template_id: selectedTemplateId('extendTemplate')" in js
     # Placeholders must remain valid JS syntax before server-side substitution.
     assert "JSON.parse('__VIDEO_TEMPLATES_JSON__')" in js
     # Runtime string must keep JS newline escapes (not expand them to real newlines).

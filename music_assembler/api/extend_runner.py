@@ -18,6 +18,7 @@ def run_extend_job(
     *,
     category: str,
     source_folder: str | None = None,
+    aspect_ratio: str | None = None,
     max_images: int | None = 1,
     force: bool = False,
 ) -> None:
@@ -57,6 +58,7 @@ def run_extend_job(
             execution_id,
             category=category,
             source_folder=source_folder,
+            aspect_ratio=aspect_ratio,
             max_images=max_images,
             force=force,
             should_cancel=should_cancel,

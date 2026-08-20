@@ -43,9 +43,19 @@ def test_start_extend_requires_source_folder():
 
 
 def test_start_extend_normalizes_source_folder():
-    req = StartExtendRequest(source_folder=" korean ", limit=3)
+    req = StartExtendRequest(
+        source_folder=" korean ",
+        template_id=" shorts_vertical ",
+        limit=3,
+    )
     assert req.source_folder == "korean"
+    assert req.template_id == "shorts_vertical"
     assert req.limit == 3
+
+
+def test_start_extend_rejects_unknown_template():
+    with pytest.raises(ValidationError):
+        StartExtendRequest(source_folder="korean", template_id="not-a-template")
 
 
 def test_start_extend_rejects_limit_below_one():

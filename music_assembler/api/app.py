@@ -178,6 +178,11 @@ class StartExtendRequest(BaseModel):
         description="R2 subfolder under pre-processed/ to extend (required).",
         examples=["korean"],
     )
+    template_id: str = Field(
+        default=DEFAULT_TEMPLATE_ID,
+        description="Video template whose aspect ratio the extended background must match.",
+        examples=[DEFAULT_TEMPLATE_ID, "shorts_vertical"],
+    )
     limit: int | None = Field(
         default=1,
         ge=1,
@@ -196,6 +201,14 @@ class StartExtendRequest(BaseModel):
         try:
             return normalize_source_folder(value)
         except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("template_id")
+    @classmethod
+    def _validate_extend_template_id(cls, value: str) -> str:
+        try:
+            return resolve_template_id(value)
+        except UnknownTemplateError as exc:
             raise ValueError(str(exc)) from exc
 
 
@@ -381,6 +394,8 @@ def _queue_extend_job_local(
     execution_id: str,
     category: str,
     source_folder: str,
+    template_id: str,
+    aspect_ratio: str,
     max_images: int | None,
     force: bool,
 ) -> dict[str, Any]:
@@ -398,6 +413,7 @@ def _queue_extend_job_local(
         limit=max_images,
         process_all=max_images is None,
         source_folder=source_folder,
+        template_id=template_id,
     )
     write_progress_json(
         client,
@@ -407,7 +423,12 @@ def _queue_extend_job_local(
         stage=f"Queued locally — {label}…",
         category=category,
         status="running",
-        extra={"job_type": "extend", "host": "local", "source_folder": source_folder},
+        extra={
+            "job_type": "extend",
+            "host": "local",
+            "source_folder": source_folder,
+            "template_id": template_id,
+        },
     )
     threading.Thread(
         target=run_extend_job,
@@ -415,6 +436,7 @@ def _queue_extend_job_local(
             "execution_id": execution_id,
             "category": category,
             "source_folder": source_folder,
+            "aspect_ratio": aspect_ratio,
             "max_images": max_images,
             "force": force,
         },
@@ -425,6 +447,8 @@ def _queue_extend_job_local(
         "status": "running",
         "category": category,
         "source_folder": source_folder,
+        "template_id": template_id,
+        "aspect_ratio": aspect_ratio,
         "max_images": max_images,
         "host": "local",
     }
@@ -438,6 +462,8 @@ def _queue_extend_job(
     execution_id: str,
     category: str,
     source_folder: str,
+    template_id: str,
+    aspect_ratio: str,
     max_images: int | None,
     force: bool,
     exclude_gcp_ids: set[str],
@@ -449,6 +475,8 @@ def _queue_extend_job(
             execution_id=execution_id,
             category=category,
             source_folder=source_folder,
+            template_id=template_id,
+            aspect_ratio=aspect_ratio,
             max_images=max_images,
             force=force,
         )
@@ -466,6 +494,7 @@ def _queue_extend_job(
         limit=max_images,
         process_all=max_images is None,
         source_folder=source_folder,
+        template_id=template_id,
     )
     write_progress_json(
         client,
@@ -475,7 +504,11 @@ def _queue_extend_job(
         stage=f"Queued on Cloud Run — {label}…",
         category=category,
         status="running",
-        extra={"job_type": "extend", "source_folder": source_folder},
+        extra={
+            "job_type": "extend",
+            "source_folder": source_folder,
+            "template_id": template_id,
+        },
     )
     try:
         result = gcp_jobs.start_extend_job(
@@ -485,6 +518,7 @@ def _queue_extend_job(
             source_folder=source_folder,
             max_images=max_images,
             force=force,
+            aspect_ratio=aspect_ratio,
             exclude_gcp_ids=exclude_gcp_ids,
         )
     except Exception as e:
@@ -521,6 +555,8 @@ def _queue_extend_job(
         "status": "running",
         "category": category,
         "source_folder": source_folder,
+        "template_id": template_id,
+        "aspect_ratio": aspect_ratio,
         "gcp_execution_id": gcp_id,
         "max_images": max_images,
         "host": "cloud_run",
@@ -1402,6 +1438,8 @@ def start_extend(
     _auth: None = Depends(require_api_auth),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
+    template = get_template(body.template_id)
+    aspect_ratio = template.gemini_aspect_ratio
     category = (body.category or settings.default_category).strip()
     source_folder = body.source_folder
     client, bucket = _r2()
@@ -1445,6 +1483,8 @@ def start_extend(
                     execution_id=execution_id,
                     category=category,
                     source_folder=source_folder,
+                    template_id=template.id,
+                    aspect_ratio=aspect_ratio,
                     max_images=1,
                     force=body.force,
                     exclude_gcp_ids=assigned_gcp,
@@ -1456,6 +1496,8 @@ def start_extend(
             "batch_size": len(jobs),
             "category": category,
             "source_folder": source_folder,
+            "template_id": template.id,
+            "aspect_ratio": aspect_ratio,
             "pending": pending,
             "host": "cloud_run",
         }
@@ -1469,6 +1511,8 @@ def start_extend(
         execution_id=execution_id,
         category=category,
         source_folder=source_folder,
+        template_id=template.id,
+        aspect_ratio=aspect_ratio,
         max_images=max_images,
         force=body.force,
         exclude_gcp_ids=assigned_gcp,
@@ -3727,6 +3771,12 @@ _DASHBOARD_HTML = (
         <p class="card-desc"><strong id="extendPending">…</strong> images waiting in <code id="extendPendingPath">pre-processed/</code>.</p>
         <div class="form-stack">
           <div>
+            <label id="extendTemplateLabel">Video template</label>
+            <div class="template-picker" id="extendTemplatePicker" role="radiogroup" aria-labelledby="extendTemplateLabel"></div>
+            <input type="hidden" id="extendTemplate" value="__DEFAULT_TEMPLATE_ID__"/>
+            <p class="hint">Extended backgrounds use the selected template's aspect ratio.</p>
+          </div>
+          <div>
             <label for="extendSourceFolder">Pre-processed folder</label>
             <select id="extendSourceFolder" required><option value="">Loading…</option></select>
           </div>
@@ -4473,6 +4523,7 @@ function initTemplatePickers() {
     durationId: 'runDuration',
     varianceId: 'runVariance',
   });
+  renderTemplatePicker('extendTemplatePicker', 'extendTemplate', DEFAULT_TEMPLATE_ID);
   renderTemplatePicker('scheduleTemplatePicker', 'scheduleTemplate', DEFAULT_TEMPLATE_ID, (t) => {
     applyTemplateDefaults(t, {
       thumbId: 'scheduleThumb',
@@ -6643,6 +6694,7 @@ document.getElementById('extendBtn').onclick = async () => {
     const r = await api('/v1/extend/jobs', { method: 'POST', body: JSON.stringify({
       category: cat(),
       source_folder: sourceFolder,
+      template_id: selectedTemplateId('extendTemplate'),
       process_all: processAll,
       limit: processAll ? null : limit,
     })});
