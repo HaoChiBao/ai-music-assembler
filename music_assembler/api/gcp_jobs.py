@@ -258,6 +258,7 @@ def start_extend_job(
     source_folder: str | None = None,
     max_images: int | None = None,
     force: bool = False,
+    aspect_ratio: str | None = None,
     exclude_gcp_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Start ``music-extend`` with env overrides for this run."""
@@ -271,6 +272,8 @@ def start_extend_job(
         env.append(run_v2.EnvVar(name="EXTEND_MAX_IMAGES", value=str(max_images)))
     if force:
         env.append(run_v2.EnvVar(name="EXTEND_FORCE", value="true"))
+    if aspect_ratio:
+        env.append(run_v2.EnvVar(name="GEMINI_ASPECT_RATIO", value=aspect_ratio))
     return _run_cloud_job(
         settings,
         job_resource=settings.extend_job_resource,
