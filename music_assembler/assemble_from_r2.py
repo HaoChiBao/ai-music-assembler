@@ -16,7 +16,6 @@ pending queue after R2 upload (needs ``UPLOADER_API_URL`` + ``UPLOADER_API_KEY``
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
@@ -84,25 +83,6 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_TITLE_FONT_SIZE = 46
 DEFAULT_TITLE_FONT_WEIGHT = 400
-
-
-def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    try:
-        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as debug_file:
-            debug_file.write(
-                json.dumps(
-                    {
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(datetime.now().timestamp() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
 
 
 def _print_preflight(duration, template) -> None:
@@ -304,24 +284,8 @@ def _maybe_queue_youtube_upload(
     except ImportError:  # pragma: no cover
         effective_schedule_at = None  # type: ignore[assignment,misc]
     if not upload_now and effective_schedule_at is not None:
-        # region agent log
-        _agent_debug_log(
-            "D",
-            "music_assembler/assemble_from_r2.py:_maybe_queue_youtube_upload:before_guard",
-            "Worker received planned schedule",
-            {"publishAt": publish_at, "uploadAt": upload_at, "uploadNow": upload_now},
-        )
-        # endregion
         adjusted_publish = effective_schedule_at(publish_at)
         adjusted_upload = effective_schedule_at(upload_at or publish_at)
-        # region agent log
-        _agent_debug_log(
-            "D",
-            "music_assembler/assemble_from_r2.py:_maybe_queue_youtube_upload:after_guard",
-            "Worker adjusted planned schedule",
-            {"publishAt": adjusted_publish, "uploadAt": adjusted_upload},
-        )
-        # endregion
         if publish_at and adjusted_publish and adjusted_publish != publish_at:
             print(
                 f"    late schedule: publish_at {publish_at} → {adjusted_publish} "

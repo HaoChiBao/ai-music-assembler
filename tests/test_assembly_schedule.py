@@ -114,6 +114,43 @@ def test_slot_publish_at_utc_uses_resolved_upload_at():
     assert slot_publish_at_utc(slot, sched) == "2026-07-14T16:00:00Z"
 
 
+def test_slot_publish_at_utc_rolls_upload_time_past_midnight():
+    from music_assembler.api.assembly_schedule import slot_publish_at_utc
+
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="America/New_York",
+        default_assemble_at="23:45",
+        default_upload_at="00:45",
+    )
+    slot = {
+        "local_date": "2026-07-14",
+        "assemble_at": "23:45",
+        "upload_at": "00:45",
+    }
+    assert slot_publish_at_utc(slot, sched) == "2026-07-15T04:45:00Z"
+
+
+def test_default_midnight_upload_remains_future_for_worker_guard():
+    from music_assembler.api.assembly_schedule import effective_schedule_at, slot_publish_at_utc
+
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="America/New_York",
+        default_assemble_at="23:45",
+        default_upload_at=None,
+        days=[DaySlot(enabled=True, assemble_at="23:45", upload_at=None)]
+        + [DaySlot() for _ in range(6)],
+    )
+    now = datetime(2026, 7, 6, 3, 50, tzinfo=timezone.utc)
+    slot = due_slots(sched, now_utc=now)[0]
+    publish_at = slot_publish_at_utc(slot, sched)
+
+    assert slot["upload_at"] == "00:45"
+    assert publish_at == "2026-07-06T04:45:00Z"
+    assert effective_schedule_at(publish_at, now_utc=now) == publish_at
+
+
 def test_slot_publish_at_utc_none_when_upload_now():
     from music_assembler.api.assembly_schedule import slot_publish_at_utc
 
