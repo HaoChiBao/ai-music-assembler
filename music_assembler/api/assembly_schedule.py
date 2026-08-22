@@ -29,6 +29,25 @@ VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
 SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
 
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as debug_file:
+            debug_file.write(
+                json.dumps(
+                    {
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
 @dataclass
 class DaySlot:
     enabled: bool = False
@@ -247,9 +266,21 @@ def effective_schedule_at(
         now = now.replace(tzinfo=timezone.utc)
     else:
         now = now.astimezone(timezone.utc)
-    if when is None or when <= now:
-        return (now + timedelta(minutes=max(0, int(grace_minutes)))).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+    is_late = when is None or when <= now
+    result = (
+        (now + timedelta(minutes=max(0, int(grace_minutes)))).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if is_late
+        else when.strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    # region agent log
+    _agent_debug_log(
+        "D",
+        "music_assembler/api/assembly_schedule.py:effective_schedule_at",
+        "Evaluated worker late-schedule guard",
+        {"raw": raw, "parsedUtc": when.isoformat() if when else None, "nowUtc": now.isoformat(), "isLate": is_late, "result": result},
+    )
+    # endregion
+    return result
 
 
 def _normalize_upload_privacy(value: Any) -> str:
@@ -261,6 +292,22 @@ def _normalize_upload_privacy(value: Any) -> str:
 
 def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str | None:
     """RFC3339 UTC go-live / upload pickup time from slot upload_at, or None if unscheduled."""
+    # region agent log
+    _agent_debug_log(
+        "A,B,C",
+        "music_assembler/api/assembly_schedule.py:slot_publish_at_utc:entry",
+        "Resolving slot publish timestamp",
+        {
+            "localDate": slot.get("local_date"),
+            "assembleAt": slot.get("assemble_at"),
+            "uploadAt": slot.get("upload_at"),
+            "timezone": schedule.timezone,
+            "queueYoutube": schedule.queue_youtube,
+            "uploadNow": schedule.upload_now,
+            "schedulePublish": schedule.upload_schedule_publish,
+        },
+    )
+    # endregion
     if not schedule.queue_youtube or schedule.upload_now or not schedule.upload_schedule_publish:
         return None
     upload_at = slot.get("upload_at") or resolved_upload_at(
@@ -276,7 +323,21 @@ def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str 
     local_date = date.fromisoformat(str(slot["local_date"]))
     tz = ZoneInfo(schedule.timezone)
     dt = datetime.combine(local_date, _parse_local_time(str(upload_at)), tzinfo=tz)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # region agent log
+    _agent_debug_log(
+        "A,C",
+        "music_assembler/api/assembly_schedule.py:slot_publish_at_utc:result",
+        "Combined local date and upload time",
+        {
+            "assembleAt": slot.get("assemble_at"),
+            "uploadAt": upload_at,
+            "combinedLocal": dt.isoformat(),
+            "resultUtc": result,
+        },
+    )
+    # endregion
+    return result
 
 
 def list_schedule_runs(
@@ -458,6 +519,21 @@ def due_slots(
     if not _slot_matches(now_local, assemble_at, window_minutes):
         return []
     key = slot_key(schedule.channel, now_local.date(), day_index, assemble_at)
+    upload_at = resolved_upload_at(day, schedule)
+    # region agent log
+    _agent_debug_log(
+        "B",
+        "music_assembler/api/assembly_schedule.py:due_slots",
+        "Built due slot date and times",
+        {
+            "nowLocal": now_local.isoformat(),
+            "localDate": now_local.date().isoformat(),
+            "assembleAt": assemble_at,
+            "uploadAt": upload_at,
+            "dayIndex": day_index,
+        },
+    )
+    # endregion
     return [
         {
             "slot_key": key,
@@ -466,7 +542,7 @@ def due_slots(
             "day_index": day_index,
             "day_name": DAY_NAMES[day_index],
             "assemble_at": assemble_at,
-            "upload_at": resolved_upload_at(day, schedule),
+            "upload_at": upload_at,
             "timezone": schedule.timezone,
         }
     ]
