@@ -274,6 +274,9 @@ def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str 
     if not upload_at:
         return None
     local_date = date.fromisoformat(str(slot["local_date"]))
+    assemble_at = str(slot.get("assemble_at") or schedule.default_assemble_at)
+    if _parse_local_time(str(upload_at)) < _parse_local_time(assemble_at):
+        local_date += timedelta(days=1)
     tz = ZoneInfo(schedule.timezone)
     dt = datetime.combine(local_date, _parse_local_time(str(upload_at)), tzinfo=tz)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
