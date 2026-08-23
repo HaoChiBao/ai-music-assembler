@@ -20,7 +20,7 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -284,8 +284,11 @@ def _maybe_queue_youtube_upload(
     except ImportError:  # pragma: no cover
         effective_schedule_at = None  # type: ignore[assignment,misc]
     if not upload_now and effective_schedule_at is not None:
-        adjusted_publish = effective_schedule_at(publish_at)
-        adjusted_upload = effective_schedule_at(upload_at or publish_at)
+        now_utc = datetime.now(timezone.utc)
+        adjusted_publish = effective_schedule_at(publish_at, now_utc=now_utc)
+        adjusted_upload = effective_schedule_at(upload_at or publish_at, now_utc=now_utc)
+        if adjusted_publish and adjusted_upload and adjusted_upload > adjusted_publish:
+            adjusted_publish = adjusted_upload
         if publish_at and adjusted_publish and adjusted_publish != publish_at:
             print(
                 f"    late schedule: publish_at {publish_at} → {adjusted_publish} "
