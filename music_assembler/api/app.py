@@ -1437,19 +1437,41 @@ def start_extend(
     if body.parallel and batch > 1:
         for _ in range(batch):
             execution_id = _new_extend_id()
-            jobs.append(
-                _queue_extend_job(
-                    client,
-                    bucket,
-                    settings,
-                    execution_id=execution_id,
-                    category=category,
-                    source_folder=source_folder,
-                    max_images=1,
-                    force=body.force,
-                    exclude_gcp_ids=assigned_gcp,
+            try:
+                jobs.append(
+                    _queue_extend_job(
+                        client,
+                        bucket,
+                        settings,
+                        execution_id=execution_id,
+                        category=category,
+                        source_folder=source_folder,
+                        max_images=1,
+                        force=body.force,
+                        exclude_gcp_ids=assigned_gcp,
+                    )
                 )
-            )
+            except HTTPException as exc:
+                if not jobs:
+                    raise
+                return JSONResponse(
+                    status_code=207,
+                    content={
+                        "parallel": True,
+                        "partial": True,
+                        "jobs": jobs,
+                        "batch_size": len(jobs),
+                        "requested_batch_size": batch,
+                        "failed_job": {
+                            "execution_id": execution_id,
+                            "detail": exc.detail,
+                        },
+                        "category": category,
+                        "source_folder": source_folder,
+                        "pending": pending,
+                        "host": "cloud_run",
+                    },
+                )
         return {
             "parallel": True,
             "jobs": jobs,
