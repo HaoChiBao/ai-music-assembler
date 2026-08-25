@@ -5856,7 +5856,7 @@ function fillScheduleForm(data) {
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
   document.getElementById('scheduleUploadPrivacy').value = data.upload_privacy || 'private';
   if (data.upload_now) setScheduleUploadMode('immediate');
-  else if (data.upload_schedule_publish === false) setScheduleUploadMode('queue_only');
+  else if (data.queue_youtube !== false && data.upload_schedule_publish === false) setScheduleUploadMode('queue_only');
   else setScheduleUploadMode('scheduled');
   document.getElementById('scheduleUploadTags').value = data.upload_tags || '';
   document.getElementById('scheduleUploadCategory').value = data.upload_category_id || '10';
