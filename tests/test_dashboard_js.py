@@ -33,6 +33,16 @@ def _dashboard_script() -> str:
     return scripts[-1]
 
 
+def _dashboard_function(js: str, name: str) -> str:
+    match = re.search(
+        rf"^function {re.escape(name)}\([^\n]*\) \{{.*?^\}}",
+        js,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"dashboard JavaScript missing function {name}"
+    return match.group(0)
+
+
 def test_dashboard_javascript_syntax():
     js = _dashboard_script()
     assert "async function init()" in js
@@ -164,3 +174,93 @@ def test_schedule_subtab_switch_preserves_unsaved_editor_state():
 
     assert "loadScheduleOverview()" in js[start:end]
     assert "loadScheduleEditor(" not in js[start:end]
+
+
+def test_disabled_youtube_reload_defaults_to_scheduled_upload_mode(tmp_path):
+    js = _dashboard_script()
+    functions = "\n".join(
+        _dashboard_function(js, name)
+        for name in (
+            "scheduleUploadMode",
+            "setScheduleUploadMode",
+            "readScheduleUploadSettings",
+            "fillScheduleForm",
+        )
+    )
+    harness = f"""
+const elements = {{}};
+function element(id) {{
+  return elements[id] ||= {{id, value: '', checked: false}};
+}}
+const radios = [];
+function radio(value, checked = false) {{
+  const item = {{value, _checked: false}};
+  Object.defineProperty(item, 'checked', {{
+    get() {{ return this._checked; }},
+    set(next) {{
+      if (next) radios.forEach((peer) => {{ peer._checked = false; }});
+      this._checked = Boolean(next);
+    }},
+  }});
+  radios.push(item);
+  item.checked = checked;
+}}
+radio('immediate');
+radio('scheduled', true);
+radio('queue_only');
+const document = {{
+  getElementById: element,
+  querySelector(selector) {{
+    if (selector === 'input[name="scheduleUploadMode"]:checked') {{
+      return radios.find((item) => item.checked) || null;
+    }}
+    const match = selector.match(/input\\[name="scheduleUploadMode"\\]\\[value="([^"]+)"\\]/);
+    return match ? radios.find((item) => item.value === match[1]) || null : null;
+  }},
+}};
+function populateBackgroundFolderSelect() {{ return Promise.resolve(); }}
+function updateScheduleSummary() {{}}
+function setHiddenTimeValue(el, value) {{ el.value = value; }}
+function uploadTimeAfterAssemble() {{ return '12:00'; }}
+function findVideoTemplate() {{ return {{default_duration_min: 90, default_variance_min: 15}}; }}
+function renderTemplatePicker() {{}}
+function syncScheduleEnabledState() {{}}
+function syncScheduleYoutubeOptions() {{}}
+function renderScheduleDays() {{}}
+const DEFAULT_ASSEMBLE_TIME = '11:00';
+const DEFAULT_TEMPLATE_ID = 'playlist_landscape';
+{functions}
+const base = {{
+  enabled: true,
+  timezone: 'America/New_York',
+  images_folder: 'debug',
+  upload_privacy: 'private',
+  days: [],
+}};
+fillScheduleForm({{
+  ...base,
+  queue_youtube: false,
+  upload_now: false,
+  upload_schedule_publish: false,
+}});
+if (scheduleUploadMode() !== 'scheduled') {{
+  throw new Error('disabled YouTube tuple did not default to scheduled mode');
+}}
+element('scheduleQueueYoutube').checked = true;
+const reenabled = readScheduleUploadSettings();
+if (!reenabled.queue_youtube || reenabled.upload_now || !reenabled.upload_schedule_publish) {{
+  throw new Error('re-enabled YouTube did not retain scheduled mode: ' + JSON.stringify(reenabled));
+}}
+fillScheduleForm({{
+  ...base,
+  queue_youtube: true,
+  upload_now: false,
+  upload_schedule_publish: false,
+}});
+if (scheduleUploadMode() !== 'queue_only') {{
+  throw new Error('explicit queue-only schedule was not preserved');
+}}
+"""
+    path = tmp_path / "dashboard-schedule-upload-mode-test.js"
+    path.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(path)], check=True)
