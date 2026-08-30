@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from music_assembler.extend_naming import plan_extended_output_names
+
 try:
     import boto3
     from botocore.config import Config
@@ -297,8 +299,8 @@ def list_in_flight_pre_processed_names(
     return names
 
 
-def _post_processed_png_stems(client, bucket: str, images_prefix: str) -> set[str]:
-    stems: set[str] = set()
+def _post_processed_png_names(client, bucket: str, images_prefix: str) -> set[str]:
+    names: set[str] = set()
     for key in list_object_keys(
         client,
         bucket,
@@ -311,8 +313,62 @@ def _post_processed_png_stems(client, bucket: str, images_prefix: str) -> set[st
         rel = key[len(_normalize_prefix(images_prefix)) :]
         if "/" in rel:
             continue
-        stems.add(Path(name).stem)
-    return stems
+        names.add(name)
+    return names
+
+
+def _pre_processed_image_names(
+    keys: list[str], pre_processed_prefix: str
+) -> set[str]:
+    """Source basenames across active, in-flight, and used locations."""
+    prefix = _normalize_prefix(pre_processed_prefix)
+    names: set[str] = set()
+    for key in keys:
+        rel = key[len(prefix) :]
+        parts = rel.split("/")
+        if len(parts) == 1:
+            filename = parts[0]
+        elif len(parts) == 2 and parts[0] == "used":
+            filename = parts[1]
+        elif len(parts) == 3 and parts[0] == "in-flight":
+            filename = parts[2]
+        else:
+            continue
+        if filename and _is_image_key(filename):
+            names.add(filename)
+    return names
+
+
+def pre_processed_output_names(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+) -> dict[str, str]:
+    """Resolve stable output names across active, in-flight, and used sources."""
+    all_keys = list_object_keys(client, bucket, pre_processed_prefix)
+    source_names = _pre_processed_image_names(all_keys, pre_processed_prefix)
+    return plan_extended_output_names(source_names)
+
+
+def pre_processed_output_name(
+    client,
+    bucket: str,
+    *,
+    pre_processed_prefix: str,
+    filename: str,
+) -> str:
+    """Resolve the stable output name for one source, including historical siblings."""
+    output_names = pre_processed_output_names(
+        client,
+        bucket,
+        pre_processed_prefix=pre_processed_prefix,
+    )
+    source_names = set(output_names)
+    source_names.add(filename)
+    if source_names != set(output_names):
+        output_names = plan_extended_output_names(source_names)
+    return output_names[filename]
 
 
 def list_claimable_pre_processed_keys(
@@ -326,14 +382,16 @@ def list_claimable_pre_processed_keys(
     """Keys in the pre-processed pool available to claim (not used, in-flight, or already extended)."""
     pre_processed_prefix = _normalize_prefix(pre_processed_prefix)
     reserved = list_in_flight_pre_processed_names(client, bucket, pre_processed_prefix)
-    existing_stems = set() if force else _post_processed_png_stems(client, bucket, images_prefix)
-    keys: list[str] = []
-    for key in list_object_keys(
+    existing_outputs = set() if force else _post_processed_png_names(client, bucket, images_prefix)
+    all_source_keys = list_object_keys(
         client,
         bucket,
         pre_processed_prefix,
-        exclude_relative_prefixes=("used/", "in-flight/"),
-    ):
+    )
+    source_names = _pre_processed_image_names(all_source_keys, pre_processed_prefix)
+    output_names = plan_extended_output_names(source_names)
+    keys: list[str] = []
+    for key in all_source_keys:
         rel = key[len(pre_processed_prefix) :]
         if "/" in rel or rel.endswith(".gitkeep"):
             continue
@@ -341,7 +399,7 @@ def list_claimable_pre_processed_keys(
             continue
         if rel in reserved:
             continue
-        if not force and Path(rel).stem in existing_stems:
+        if not force and output_names[rel] in existing_outputs:
             continue
         keys.append(key)
     return keys
