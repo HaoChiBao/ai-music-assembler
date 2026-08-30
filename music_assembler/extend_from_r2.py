@@ -49,6 +49,8 @@ from music_assembler.r2_storage import (
     list_claimable_pre_processed_keys,
     move_object,
     pre_processed_in_flight_key,
+    pre_processed_output_name,
+    pre_processed_output_names,
     r2_client,
     r2_config_from_env,
     release_pre_processed_claim,
@@ -282,9 +284,14 @@ def run_extend_from_r2(
     out_w = out_w if out_w > 0 else None
     gemini = genai.Client(api_key=api_key)
 
+    output_names = pre_processed_output_names(
+        client,
+        cfg_r2.bucket,
+        pre_processed_prefix=prefixes.pre_processed_prefix,
+    )
     tasks: list[tuple[str, Path, Path]] = []
     for r2_key, src in local_sources:
-        dest = output_dir / f"{src.stem}.png"
+        dest = output_dir / output_names[src.name]
         tasks.append((r2_key, src, dest))
 
     worker_count = workers if workers is not None else int(os.environ.get("EXTEND_WORKERS", "1"))
@@ -299,6 +306,7 @@ def run_extend_from_r2(
     failures: list[tuple[str, str]] = []
     uploaded_pngs: list[Path] = []
     moved_r2_keys: list[str] = []
+    output_by_r2_key = {r2_key: dest for r2_key, _, dest in tasks}
     completed = 0
     progress_lock = threading.Lock()
 
@@ -352,7 +360,7 @@ def run_extend_from_r2(
                 continue
             if succeeded:
                 ok += 1
-                uploaded_pngs.append(output_dir / f"{Path(r2_key).stem}.png")
+                uploaded_pngs.append(output_by_r2_key[r2_key])
                 moved_r2_keys.append(r2_key)
             else:
                 _log(f"error: {Path(r2_key).name}: {err}", err=True)
@@ -377,7 +385,7 @@ def run_extend_from_r2(
                     continue
                 if succeeded:
                     ok += 1
-                    uploaded_pngs.append(output_dir / f"{Path(r2_key).stem}.png")
+                    uploaded_pngs.append(output_by_r2_key[r2_key])
                     moved_r2_keys.append(r2_key)
                 else:
                     _log(f"error: {Path(r2_key).name}: {err}", err=True)
@@ -475,7 +483,13 @@ def extend_one_claimed_on_r2(
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     local_src = input_dir / filename
-    local_out = output_dir / f"{Path(filename).stem}.png"
+    output_name = pre_processed_output_name(
+        client,
+        cfg.bucket,
+        pre_processed_prefix=resolved.pre_processed_prefix,
+        filename=filename,
+    )
+    local_out = output_dir / output_name
     client.download_file(cfg.bucket, in_flight_key, str(local_src))
     try:
         extend_one_with_retry(

@@ -30,6 +30,7 @@ from dotenv import find_dotenv, load_dotenv
 from PIL import Image as PILImage
 
 from music_assembler import __version__
+from music_assembler.extend_naming import plan_extended_output_names
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".PNG", ".JPG", ".JPEG", ".WEBP"}
 
@@ -332,6 +333,15 @@ def main(argv: list[str] | None = None) -> int:
     prompt = _load_prompt(args.prompt_file)
     input_dir = args.input_dir.resolve()
     images = _discover_images(input_dir)
+    source_names = [src.name for src in images]
+    used_dir = input_dir / "used"
+    if used_dir.is_dir():
+        source_names.extend(
+            path.name
+            for path in used_dir.iterdir()
+            if path.is_file() and path.suffix in IMAGE_EXTS
+        )
+    output_names = plan_extended_output_names(source_names)
     if args.limit is not None:
         images = images[: max(0, args.limit)]
 
@@ -344,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     tasks: list[tuple[Path, Path]] = []
     skipped = 0
     for src in images:
-        dest = out_dir / (src.stem + ".png")
+        dest = out_dir / output_names[src.name]
         if dest.is_file() and not args.force:
             print(f"skip (exists): {dest.name}")
             skipped += 1
