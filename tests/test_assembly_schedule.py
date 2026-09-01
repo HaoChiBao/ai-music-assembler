@@ -20,7 +20,71 @@ from music_assembler.api.assembly_schedule import (
 
 
 def test_slot_key_format():
-    assert slot_key("nappabeats", datetime(2026, 7, 2).date(), 1, "09:00") == "nappabeats:2026-07-02:1:09:00"
+    assert slot_key("nappabeats", datetime(2026, 7, 2).date(), 4, "09:00") == "nappabeats:2026-07-02"
+
+
+def test_slot_key_is_stable_after_same_day_schedule_time_edit():
+    sched = ChannelSchedule(
+        channel="nappabeats",
+        timezone="UTC",
+        days=[DaySlot() for _ in range(4)]
+        + [DaySlot(enabled=True, assemble_at="09:00")]
+        + [DaySlot() for _ in range(2)],
+    )
+    first = due_slots(
+        sched,
+        now_utc=datetime(2026, 7, 2, 9, 5, tzinfo=timezone.utc),
+    )[0]
+    sched.days[4].assemble_at = "11:00"
+    edited = due_slots(
+        sched,
+        now_utc=datetime(2026, 7, 2, 11, 5, tzinfo=timezone.utc),
+    )[0]
+
+    assert first["slot_key"] == edited["slot_key"] == "nappabeats:2026-07-02"
+
+
+def test_cron_skips_edited_same_day_slot_after_original_started(monkeypatch):
+    from music_assembler.api import assembly_schedule as schedule_module
+
+    sched = ChannelSchedule(
+        channel="nappabeats",
+        timezone="UTC",
+        days=[DaySlot() for _ in range(4)]
+        + [DaySlot(enabled=True, assemble_at="09:00")]
+        + [DaySlot() for _ in range(2)],
+    )
+    original = due_slots(
+        sched,
+        now_utc=datetime(2026, 7, 2, 9, 5, tzinfo=timezone.utc),
+    )[0]
+    sched.days[4].assemble_at = "11:00"
+    monkeypatch.setattr(schedule_module, "list_schedules", lambda *args, **kwargs: [sched])
+    monkeypatch.setattr(
+        schedule_module,
+        "read_ledger",
+        lambda client, bucket, key: {"status": "started"} if key == original["slot_key"] else None,
+    )
+    start_assembly = MagicMock()
+    monkeypatch.setattr(schedule_module, "start_scheduled_assembly", start_assembly)
+
+    result = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 2, 11, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "unused",
+        start_extend_fn=MagicMock(),
+    )
+
+    assert result["results"] == [
+        {
+            "slot_key": original["slot_key"],
+            "action": "skipped",
+            "reason": "already_started",
+        }
+    ]
+    start_assembly.assert_not_called()
 
 
 def test_upload_time_after_assemble():

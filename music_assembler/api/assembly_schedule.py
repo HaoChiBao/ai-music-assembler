@@ -322,7 +322,14 @@ def _ledger_key(slot_key: str) -> str:
 
 
 def slot_key(channel: str, local_date: date, dow: int, assemble_at: str) -> str:
-    return f"{channel}:{local_date.isoformat()}:{dow}:{assemble_at}"
+    """Return the stable identity for a channel's single daily slot.
+
+    ``dow`` and ``assemble_at`` describe the slot but must not be part of its
+    identity: changing today's schedule after it has fired must not create a
+    second runnable slot for the same channel and date.
+    """
+    del dow, assemble_at
+    return f"{channel}:{local_date.isoformat()}"
 
 
 def load_schedules_document(client, bucket: str) -> dict[str, Any]:
