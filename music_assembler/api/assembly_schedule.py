@@ -213,14 +213,17 @@ def ensure_schedule_upload_times(schedule: ChannelSchedule) -> bool:
 
 
 def parse_schedule_timestamp(value: str | None) -> datetime | None:
-    """Parse an RFC3339 / ISO timestamp to aware UTC datetime."""
+    """Parse an RFC3339 / ISO timestamp to aware UTC datetime.
+
+    Empty values are unscheduled; malformed non-empty values are errors.
+    """
     raw = (value or "").strip()
     if not raw:
         return None
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"invalid schedule timestamp: {raw!r}") from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)

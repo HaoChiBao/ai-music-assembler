@@ -170,6 +170,15 @@ class StartJobRequest(BaseModel):
             raise ValueError(f"upload_privacy must be one of {assembly_schedule.VALID_UPLOAD_PRIVACY}")
         return raw
 
+    @field_validator("publish_at", "upload_at")
+    @classmethod
+    def _validate_start_schedule_timestamp(cls, value: str | None) -> str | None:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        assembly_schedule.parse_schedule_timestamp(raw)
+        return raw
+
 
 class StartExtendRequest(BaseModel):
     category: str | None = Field(default=None, description="R2 category (defaults to ASSEMBLY_CATEGORY).")

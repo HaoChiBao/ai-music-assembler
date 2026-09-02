@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+import pytest
+
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -174,11 +176,27 @@ def test_effective_schedule_at_keeps_future():
     assert effective_schedule_at("2026-07-14T16:00:00Z", now_utc=now) == "2026-07-14T16:00:00Z"
 
 
+def test_effective_schedule_at_normalizes_valid_future_timezone():
+    from music_assembler.api.assembly_schedule import effective_schedule_at
+
+    now = datetime(2026, 7, 14, 15, 0, tzinfo=timezone.utc)
+    assert effective_schedule_at("2026-07-14T12:00:00-04:00", now_utc=now) == "2026-07-14T16:00:00Z"
+
+
 def test_effective_schedule_at_bumps_past_by_grace():
     from music_assembler.api.assembly_schedule import effective_schedule_at
 
     now = datetime(2026, 7, 14, 16, 10, tzinfo=timezone.utc)
     assert effective_schedule_at("2026-07-14T16:00:00Z", now_utc=now, grace_minutes=5) == "2026-07-14T16:15:00Z"
+
+
+@pytest.mark.parametrize("value", ["2026-07-14T16:00:0OZ", "2026-13-40T16:00:00Z"])
+def test_effective_schedule_at_rejects_malformed_non_empty_timestamp(value):
+    from music_assembler.api.assembly_schedule import effective_schedule_at
+
+    now = datetime(2026, 7, 14, 16, 10, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="invalid schedule timestamp"):
+        effective_schedule_at(value, now_utc=now, grace_minutes=5)
 
 
 def test_preview_schedule_returns_future_slots():
