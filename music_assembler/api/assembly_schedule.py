@@ -21,7 +21,9 @@ SCHEDULE_RUNS_PREFIX = "schedules/runs/"
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
-DEFAULT_WINDOW_MINUTES = 15
+# Cloud Scheduler polls every 15 minutes. Keep a second poll inside the match
+# window so a transient failure on the first attempt can retry the same slot.
+DEFAULT_WINDOW_MINUTES = 30
 DEFAULT_UPLOAD_OFFSET_MINUTES = 60
 DEFAULT_ASSEMBLE_AT = "11:00"
 DEFAULT_LATE_UPLOAD_GRACE_MINUTES = 5
