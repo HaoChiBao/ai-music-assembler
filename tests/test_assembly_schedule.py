@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from music_assembler.api import assembly_schedule as schedule_module
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -72,6 +73,73 @@ def test_due_slots_skips_disabled_day():
     )
     now = datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc)
     assert due_slots(sched, now_utc=now) == []
+
+
+def test_failed_schedule_start_retries_on_next_cron_poll(monkeypatch):
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="UTC",
+        days=[DaySlot() for _ in range(4)]
+        + [DaySlot(enabled=True, assemble_at="09:00")]
+        + [DaySlot() for _ in range(2)],
+    )
+    ledger: dict[str, dict] = {}
+    attempts = 0
+
+    monkeypatch.setattr(
+        schedule_module,
+        "list_schedules",
+        lambda *args, **kwargs: [sched],
+    )
+    monkeypatch.setattr(
+        schedule_module,
+        "read_ledger",
+        lambda _client, _bucket, key: ledger.get(key),
+    )
+    monkeypatch.setattr(
+        schedule_module,
+        "write_ledger",
+        lambda _client, _bucket, key, payload: ledger.__setitem__(key, payload),
+    )
+    monkeypatch.setattr(
+        schedule_module,
+        "evaluate_resources",
+        lambda *args, **kwargs: {"ready": True},
+    )
+
+    def start(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient RunJob failure")
+        return {
+            "execution_id": "asm_retry",
+            "gcp_execution_id": "gcp_retry",
+            "slot_key": "ch:2026-07-02:4:09:00",
+        }
+
+    monkeypatch.setattr(schedule_module, "start_scheduled_assembly", start)
+
+    first = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 2, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "unused",
+        start_extend_fn=MagicMock(),
+    )
+    second = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 2, 9, 20, tzinfo=timezone.utc),
+        new_execution_id=lambda: "unused",
+        start_extend_fn=MagicMock(),
+    )
+
+    assert first["results"][0]["action"] == "failed"
+    assert second["results"][0]["action"] == "started"
+    assert attempts == 2
 
 
 def test_ledger_is_terminal():
