@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from music_assembler.api import assembly_schedule as schedule_module
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -75,10 +76,80 @@ def test_due_slots_skips_disabled_day():
 
 
 def test_ledger_is_terminal():
+    assert ledger_is_terminal({"status": "starting"})
     assert ledger_is_terminal({"status": "started"})
     assert ledger_is_terminal({"status": "succeeded"})
     assert not ledger_is_terminal({"status": "skipped"})
     assert not ledger_is_terminal(None)
+
+
+def test_claim_schedule_slot_only_one_stale_create_wins():
+    class ClientError(Exception):
+        pass
+
+    class ConditionalClient:
+        exceptions = type("Exceptions", (), {"ClientError": ClientError})
+
+        def __init__(self):
+            self.keys: set[str] = set()
+
+        def put_object(self, **kwargs):
+            key = kwargs["Key"]
+            if kwargs.get("IfNoneMatch") == "*" and key in self.keys:
+                exc = ClientError()
+                exc.response = {"Error": {"Code": "PreconditionFailed"}}
+                raise exc
+            self.keys.add(key)
+
+    client = ConditionalClient()
+    key = "ch:2026-07-02:4:09:00"
+
+    # Both callers observed a missing ledger entry. R2's conditional write allows
+    # only one of them to reserve the slot.
+    assert schedule_module.claim_schedule_slot(
+        client, "bucket", key, None, channel="ch"
+    )
+    assert not schedule_module.claim_schedule_slot(
+        client, "bucket", key, None, channel="ch"
+    )
+
+
+def test_run_due_schedules_does_not_start_without_slot_claim(monkeypatch):
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="UTC",
+        days=[DaySlot() for _ in range(4)]
+        + [DaySlot(enabled=True, assemble_at="09:00")]
+        + [DaySlot() for _ in range(2)],
+    )
+    monkeypatch.setattr(schedule_module, "list_schedules", lambda *args, **kwargs: [sched])
+    monkeypatch.setattr(schedule_module, "read_ledger", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        schedule_module,
+        "evaluate_resources",
+        lambda *args, **kwargs: {"ready": True},
+    )
+    monkeypatch.setattr(schedule_module, "claim_schedule_slot", lambda *args, **kwargs: False)
+    start = MagicMock()
+    monkeypatch.setattr(schedule_module, "start_scheduled_assembly", start)
+
+    result = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 2, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "asm_unused",
+        start_extend_fn=MagicMock(),
+    )
+
+    assert result["results"] == [
+        {
+            "slot_key": "ch:2026-07-02:4:09:00",
+            "action": "skipped",
+            "reason": "already_claimed",
+        }
+    ]
+    start.assert_not_called()
 
 
 def test_ensure_schedule_upload_times_fills_missing():
