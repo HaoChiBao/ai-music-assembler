@@ -48,7 +48,7 @@ curl -X POST "$BASE/v1/assembly/jobs" \\
 curl "$BASE/v1/dashboard/snapshot?category=korean&light=1" -H "X-API-Key: $KEY"
 ```
 
-**Start extend batch (parallel — one Cloud Run job per image):**
+**Start extend batch (parallel — spread across at most 20 Cloud Run jobs):**
 ```bash
 curl -X POST "$BASE/v1/extend/jobs" \\
   -H "X-API-Key: $KEY" -H "Content-Type: application/json" \\
@@ -358,15 +358,17 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "tags": ["Extend"],
         "summary": "Start music-extend Cloud Run Job(s)",
         "description": (
-            "Pulls images from ``pre-processed/{category}/``, runs Gemini extend, uploads to "
-            "``post-processed/``. By default runs on GCP (``music-extend`` job), not in-process.\n\n"
-            "- ``parallel=true`` + ``limit`` > 1 → one Cloud Run execution per image (faster, isolated).\n"
+            "Pulls images from ``pre-processed/{source_folder}/``, runs Gemini extend, uploads to "
+            "the matching ``post-processed/`` folder. By default runs on GCP "
+            "(``music-extend`` job), not in-process.\n\n"
+            "- ``parallel=true`` + ``limit`` > 1 → spread work across at most 20 Cloud Run executions.\n"
             "- ``process_all=true`` → drain entire pending pool.\n"
             "- Returns **409** if no pending images.\n\n"
             "Workers atomically claim images so parallel jobs never extend the same file."
         ),
         "request_example": {
             "category": "korean",
+            "source_folder": "korean",
             "limit": 5,
             "process_all": False,
             "force": False,
