@@ -22,6 +22,7 @@ from music_assembler.api.dashboard_auth import (
     has_dashboard_session,
     set_dashboard_session,
 )
+from music_assembler.api.extend_batches import parallel_extend_workloads
 from music_assembler.api.extend_runner import run_extend_job
 from music_assembler.api import gcp_jobs
 from music_assembler.api import job_cancel
@@ -187,7 +188,10 @@ class StartExtendRequest(BaseModel):
     force: bool = Field(default=False, description="Include images that would normally be skipped.")
     parallel: bool = Field(
         default=True,
-        description="When limit>1, start one Cloud Run Job per image (recommended).",
+        description=(
+            "When limit>1, spread the batch across a bounded number of Cloud Run Jobs "
+            "(recommended)."
+        ),
     )
 
     @field_validator("source_folder")
@@ -1435,7 +1439,8 @@ def start_extend(
     jobs: list[dict[str, Any]] = []
 
     if body.parallel and batch > 1:
-        for _ in range(batch):
+        workloads = parallel_extend_workloads(batch)
+        for max_images in workloads:
             execution_id = _new_extend_id()
             jobs.append(
                 _queue_extend_job(
@@ -1445,7 +1450,7 @@ def start_extend(
                     execution_id=execution_id,
                     category=category,
                     source_folder=source_folder,
-                    max_images=1,
+                    max_images=max_images,
                     force=body.force,
                     exclude_gcp_ids=assigned_gcp,
                 )
@@ -1454,6 +1459,8 @@ def start_extend(
             "parallel": True,
             "jobs": jobs,
             "batch_size": len(jobs),
+            "requested_batch_size": batch,
+            "worker_count": len(jobs),
             "category": category,
             "source_folder": source_folder,
             "pending": pending,
