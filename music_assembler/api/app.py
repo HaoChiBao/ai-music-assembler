@@ -173,9 +173,9 @@ class StartJobRequest(BaseModel):
 
 class StartExtendRequest(BaseModel):
     category: str | None = Field(default=None, description="R2 category (defaults to ASSEMBLY_CATEGORY).")
-    source_folder: str = Field(
-        ...,
-        description="R2 subfolder under pre-processed/ to extend (required).",
+    source_folder: str | None = Field(
+        default=None,
+        description="R2 subfolder under pre-processed/ to extend (defaults to category).",
         examples=["korean"],
     )
     limit: int | None = Field(
@@ -192,7 +192,9 @@ class StartExtendRequest(BaseModel):
 
     @field_validator("source_folder")
     @classmethod
-    def _validate_source_folder(cls, value: str) -> str:
+    def _validate_source_folder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         try:
             return normalize_source_folder(value)
         except ValueError as exc:
@@ -1403,7 +1405,7 @@ def start_extend(
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
     category = (body.category or settings.default_category).strip()
-    source_folder = body.source_folder
+    source_folder = body.source_folder or category
     client, bucket = _r2()
     _assert_pre_processed_folder_exists(client, bucket, source_folder)
     _invalidate_category_cache(category)
