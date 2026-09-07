@@ -5234,10 +5234,10 @@ function postAssetUploadBatch(fd, onProgress) {
   });
 }
 
-function buildAssetUploadFormData(batch, pool, imagesFolder, overwrite) {
+function buildAssetUploadFormData(batch, category, pool, imagesFolder, overwrite) {
   const fd = new FormData();
   fd.append('pool', pool);
-  fd.append('category', cat());
+  fd.append('category', category);
   if (imagesFolder) fd.append('images_folder', imagesFolder);
   if (overwrite) fd.append('overwrite', 'true');
   for (const file of batch) fd.append('files', file);
@@ -5253,10 +5253,10 @@ function mergeUploadResults(a, b) {
   };
 }
 
-async function uploadAssetBatchWithRetry(batch, pool, imagesFolder, overwrite, onProgress) {
+async function uploadAssetBatchWithRetry(batch, category, pool, imagesFolder, overwrite, onProgress) {
   try {
     return await postAssetUploadBatch(
-      buildAssetUploadFormData(batch, pool, imagesFolder, overwrite),
+      buildAssetUploadFormData(batch, category, pool, imagesFolder, overwrite),
       onProgress
     );
   } catch (e) {
@@ -5266,11 +5266,11 @@ async function uploadAssetBatchWithRetry(batch, pool, imagesFolder, overwrite, o
       const second = batch.slice(mid);
       let firstResult = { count: 0, errors: [], uploaded: [], images_folder: null };
       try {
-        firstResult = await uploadAssetBatchWithRetry(first, pool, imagesFolder, overwrite, function (loaded, total) {
+        firstResult = await uploadAssetBatchWithRetry(first, category, pool, imagesFolder, overwrite, function (loaded, total) {
           const ratio = total > 0 ? loaded / total : 0;
           onProgress(ratio * estimateAssetUploadWireBytes(first), estimateAssetUploadWireBytes(batch));
         });
-        const secondResult = await uploadAssetBatchWithRetry(second, pool, imagesFolder, overwrite, function (loaded, total) {
+        const secondResult = await uploadAssetBatchWithRetry(second, category, pool, imagesFolder, overwrite, function (loaded, total) {
           const ratio = total > 0 ? loaded / total : 0;
           const firstDone = estimateAssetUploadWireBytes(first);
           onProgress(firstDone + ratio * estimateAssetUploadWireBytes(second), estimateAssetUploadWireBytes(batch));
@@ -5301,6 +5301,7 @@ async function uploadAssetFiles() {
     }
     return;
   }
+  const uploadCategory = cat();
   const uploadPool = ui.assetPool;
   if (!assetPoolAllowsUpload(uploadPool)) {
     if (statusEl) {
@@ -5363,6 +5364,7 @@ async function uploadAssetFiles() {
       const t0 = performance.now();
       const d = await uploadAssetBatchWithRetry(
         batch,
+        uploadCategory,
         uploadPool,
         imagesFolder,
         overwrite,
