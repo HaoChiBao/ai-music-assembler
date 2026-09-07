@@ -123,11 +123,12 @@ if (fmtPct(0.75) !== '75%') throw new Error('fmtPct');
         subprocess.run(["node", str(path)], check=True)
 
 
-def test_batched_asset_upload_snapshots_destination_pool(tmp_path):
+def test_batched_asset_upload_snapshots_destination(tmp_path):
     js = _dashboard_script()
+    assert "const uploadCategory = cat();" in js
     assert "const uploadPool = ui.assetPool;" in js
     assert re.search(
-        r"uploadAssetBatchWithRetry\(\s*batch,\s*uploadPool,\s*imagesFolder,",
+        r"uploadAssetBatchWithRetry\(\s*batch,\s*uploadCategory,\s*uploadPool,\s*imagesFolder,",
         js,
     )
 
@@ -139,10 +140,10 @@ class FormData {{
   constructor() {{ this.values = []; }}
   append(key, value) {{ this.values.push([key, value]); }}
 }}
-function cat() {{ return 'korean'; }}
 {build_form_data}
 const data = buildAssetUploadFormData(
   [{{name: 'background.jpg'}}],
+  'korean',
   'post-processed',
   'backgrounds',
   true
@@ -150,6 +151,10 @@ const data = buildAssetUploadFormData(
 const pool = data.values.find(([key]) => key === 'pool');
 if (!pool || pool[1] !== 'post-processed') {{
   throw new Error('upload pool was not preserved');
+}}
+const category = data.values.find(([key]) => key === 'category');
+if (!category || category[1] !== 'korean') {{
+  throw new Error('upload category was not preserved');
 }}
 """
     tmp = tmp_path / "dashboard-upload-pool-test.js"

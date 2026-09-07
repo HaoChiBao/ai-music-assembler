@@ -358,7 +358,8 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
         "tags": ["Extend"],
         "summary": "Start music-extend Cloud Run Job(s)",
         "description": (
-            "Pulls images from ``pre-processed/{category}/``, runs Gemini extend, uploads to "
+            "Pulls images from ``pre-processed/{source_folder}/`` (falling back to ``category``), "
+            "runs Gemini extend, uploads to "
             "``post-processed/``. By default runs on GCP (``music-extend`` job), not in-process.\n\n"
             "- ``parallel=true`` + ``limit`` > 1 → one Cloud Run execution per image (faster, isolated).\n"
             "- ``process_all=true`` → drain entire pending pool.\n"
