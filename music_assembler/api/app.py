@@ -746,6 +746,20 @@ def start_job(
                 category=category,
                 status="failed",
             )
+            if jobs:
+                return JSONResponse(
+                    status_code=207,
+                    content={
+                        "partial": True,
+                        "jobs": jobs,
+                        "count": len(jobs),
+                        "requested_count": body.count,
+                        "failed_job": {
+                            "execution_id": execution_id,
+                            "detail": f"Failed to start Cloud Run Job: {e}",
+                        },
+                    },
+                )
             raise HTTPException(
                 status_code=502,
                 detail=f"Failed to start Cloud Run Job ({execution_id}): {e}",
