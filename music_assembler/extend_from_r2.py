@@ -650,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
 
     execution_id = os.environ.get("EXTEND_EXECUTION_ID", "").strip()
     if execution_id:
+        from music_assembler.api.job_cancel import make_extend_cancel_checker
         from music_assembler.job_progress import write_progress_json
 
         category = os.environ.get("ASSEMBLY_CATEGORY", "").strip() or None
@@ -662,8 +663,12 @@ def main(argv: list[str] | None = None) -> int:
         bucket = cfg.bucket
         cat = category or cfg.category
         prefixes = extend_prefixes_for_config(cfg, source_folder)
+        should_cancel = make_extend_cancel_checker(client, bucket, execution_id)
 
         def on_progress(pct: float, stage: str, *, status: str = "running") -> None:
+            if should_cancel():
+                status = "cancelled"
+                stage = "Cancelled"
             write_progress_json(
                 client,
                 bucket,
@@ -683,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_folder=source_folder,
                 max_images=max_images,
                 force=force,
+                should_cancel=should_cancel,
                 on_progress=lambda pct, stage: on_progress(pct, stage),
             )
         except Exception as exc:
