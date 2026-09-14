@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
+
+# Direct script execution puts ``scripts/`` ahead of the repository on sys.path.
+# Prefer the checkout over a potentially stale non-editable installation.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if sys.path[0] != str(REPOSITORY_ROOT):
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from music_assembler.api import app as app_module
 from music_assembler.api import assembly_health
@@ -15,6 +23,14 @@ from music_assembler.api.config import ApiSettings
 
 
 RUN_COUNT = 50
+
+
+def _print_and_validate(result: dict[str, object]) -> None:
+    print(json.dumps(result, sort_keys=True))
+    if result["list_calls"] != 1:
+        raise AssertionError(
+            f'{result["scenario"]} made {result["list_calls"]} LIST calls; expected 1'
+        )
 
 
 def _runs() -> list[dict[str, object]]:
@@ -88,6 +104,9 @@ def _settings() -> ApiSettings:
 
 
 def main() -> None:
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "F", "location": "reproduce_dashboard_health_audit.py:main-entry", "message": "dashboard harness resolved runtime modules", "data": {"repository_root": str(REPOSITORY_ROOT), "app_module_file": app_module.__file__, "assembly_health_module_file": assembly_health.__file__}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+    # endregion
     runs = _runs()
     client = _CountingClient()
     app_module._r2 = lambda: (client, "debug-bucket")
@@ -118,17 +137,14 @@ def main() -> None:
 
     app_module.dashboard_cache = TTLCache()
     request_snapshot()
-    print(
-        json.dumps(
-            {
-                "scenario": "one cold dashboard request",
-                "runs": RUN_COUNT,
-                "list_calls": client.list_calls,
-                "unique_list_prefixes": len(set(client.list_prefixes)),
-                "head_calls": client.head_calls,
-            },
-            sort_keys=True,
-        )
+    _print_and_validate(
+        {
+            "scenario": "one cold dashboard request",
+            "runs": RUN_COUNT,
+            "list_calls": client.list_calls,
+            "unique_list_prefixes": len(set(client.list_prefixes)),
+            "head_calls": client.head_calls,
+        }
     )
 
     client.reset()
@@ -138,17 +154,14 @@ def main() -> None:
         futures = [pool.submit(request_snapshot) for _ in range(2)]
         for future in futures:
             future.result()
-    print(
-        json.dumps(
-            {
-                "scenario": "two concurrent cold dashboard requests",
-                "runs_per_request": RUN_COUNT,
-                "list_calls": client.list_calls,
-                "unique_list_prefixes": len(set(client.list_prefixes)),
-                "head_calls": client.head_calls,
-            },
-            sort_keys=True,
-        )
+    _print_and_validate(
+        {
+            "scenario": "two concurrent cold dashboard requests",
+            "runs_per_request": RUN_COUNT,
+            "list_calls": client.list_calls,
+            "unique_list_prefixes": len(set(client.list_prefixes)),
+            "head_calls": client.head_calls,
+        }
     )
 
 

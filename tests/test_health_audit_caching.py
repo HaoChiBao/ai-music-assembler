@@ -2,14 +2,49 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from music_assembler.api import assembly_health
 from music_assembler.api.cache import TTLCache
+
+
+class TestDashboardHealthAuditHarness(unittest.TestCase):
+    def test_direct_script_uses_checkout_and_real_dashboard_path(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [sys.executable, "scripts/reproduce_dashboard_health_audit.py"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        results = [
+            json.loads(line)
+            for line in completed.stdout.splitlines()
+            if line.strip()
+        ]
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [result["list_calls"] for result in results],
+            [1, 1],
+        )
+        self.assertEqual(
+            [result["head_calls"] for result in results],
+            [50, 50],
+        )
+        self.assertEqual(
+            [result["unique_list_prefixes"] for result in results],
+            [1, 1],
+        )
 
 
 class TestAssemblyHealthClaimReads(unittest.TestCase):
