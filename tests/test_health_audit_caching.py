@@ -2,48 +2,152 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from music_assembler.api import app as app_module
 from music_assembler.api import assembly_health
 from music_assembler.api.cache import TTLCache
+from music_assembler.api.config import ApiSettings
+
+
+RUN_COUNT = 50
+
+
+class _Paginator:
+    def __init__(self, client: "_CountingClient") -> None:
+        self.client = client
+
+    def paginate(self, **kwargs):
+        with self.client.lock:
+            self.client.list_calls += 1
+        time.sleep(0.002)
+        yield {"Contents": []}
+
+
+class _CountingClient:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.list_calls = 0
+        self.head_calls = 0
+        self.exceptions = SimpleNamespace(ClientError=RuntimeError)
+
+    def get_paginator(self, name: str) -> _Paginator:
+        self.assert_paginator_name(name)
+        return _Paginator(self)
+
+    @staticmethod
+    def assert_paginator_name(name: str) -> None:
+        if name != "list_objects_v2":
+            raise AssertionError(f"unexpected paginator: {name}")
+
+    def head_object(self, **_kwargs) -> dict[str, object]:
+        with self.lock:
+            self.head_calls += 1
+        time.sleep(0.002)
+        return {}
+
+
+def _settings() -> ApiSettings:
+    return ApiSettings(
+        api_key=None,
+        dashboard_password=None,
+        gcp_project="test",
+        gcp_region="test",
+        assembly_job_name="test",
+        extend_job_name="test",
+        extend_use_gcp=False,
+        default_category="korean",
+        configured_channels=(),
+        uploader_api_url=None,
+        uploader_api_key=None,
+    )
+
+
+def _runs() -> list[dict[str, object]]:
+    return [
+        {
+            "execution_id": f"asm_{index:03}",
+            "category": "korean",
+            "images_folder": "korean",
+            "channel": "listen-omyo",
+            "claimed_background": f"bg_{index:03}.png",
+            "progress": {
+                "status": "succeeded",
+                "video_id": f"mv_{index:03}",
+            },
+        }
+        for index in range(RUN_COUNT)
+    ]
 
 
 class TestDashboardHealthAuditHarness(unittest.TestCase):
-    def test_direct_script_uses_checkout_and_real_dashboard_path(self) -> None:
-        repository_root = Path(__file__).resolve().parents[1]
-        completed = subprocess.run(
-            [sys.executable, "scripts/reproduce_dashboard_health_audit.py"],
-            cwd=repository_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        results = [
-            json.loads(line)
-            for line in completed.stdout.splitlines()
-            if line.strip()
-        ]
+    def test_real_dashboard_path_deduplicates_cold_health_audits(self) -> None:
+        runs = _runs()
+        client = _CountingClient()
 
-        self.assertEqual(len(results), 2)
+        def request_snapshot() -> None:
+            app_module.dashboard_snapshot(
+                category="korean",
+                light=False,
+                refresh=False,
+                job_limit=RUN_COUNT,
+                _auth=None,
+                settings=_settings(),
+            )
+
+        with (
+            patch.object(app_module, "_r2", return_value=(client, "test-bucket")),
+            patch.object(
+                app_module.job_runs,
+                "list_r2_job_runs",
+                side_effect=lambda _client, _bucket, *, id_prefix, **_kwargs: (
+                    runs if id_prefix == "asm_" else []
+                ),
+            ),
+            patch.object(
+                app_module.job_status, "reconcile_assembly_runs", return_value=runs
+            ),
+            patch.object(app_module.job_status, "reconcile_extend_runs", return_value=[]),
+            patch.object(
+                app_module.job_status, "runs_need_gcp_reconcile", return_value=False
+            ),
+            patch.object(app_module.r2_catalog, "dashboard_inventory", return_value={}),
+            patch.object(app_module, "count_pending_r2_sources", return_value=0),
+            patch.object(app_module, "r2_config_from_env", return_value=object()),
+            patch.object(assembly_health.gcp_jobs, "list_executions", return_value=[]),
+            patch.object(app_module, "dashboard_cache", TTLCache()),
+        ):
+            request_snapshot()
+            one_cold = (client.list_calls, client.head_calls)
+
+            client.list_calls = 0
+            client.head_calls = 0
+            app_module.dashboard_cache = TTLCache()
+            start = threading.Barrier(3)
+
+            def concurrent_request() -> None:
+                start.wait()
+                request_snapshot()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(concurrent_request) for _ in range(2)]
+                start.wait()
+                for future in futures:
+                    future.result()
+            two_concurrent_cold = (client.list_calls, client.head_calls)
+
         self.assertEqual(
-            [result["list_calls"] for result in results],
+            [one_cold[0], two_concurrent_cold[0]],
             [1, 1],
         )
         self.assertEqual(
-            [result["head_calls"] for result in results],
+            [one_cold[1], two_concurrent_cold[1]],
             [50, 50],
-        )
-        self.assertEqual(
-            [result["unique_list_prefixes"] for result in results],
-            [1, 1],
         )
 
 

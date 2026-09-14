@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import sys
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -439,17 +436,9 @@ def list_in_flight_background_claims(
 ) -> dict[str, list[tuple[str, str]]]:
     """Map background filename → ``[(execution_id, in_flight_key), …]``."""
     prefix = f"{_normalize_prefix(images_prefix)}in-flight/"
-    list_started = time.perf_counter()
-    page_count = 0
-    object_count = 0
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B", "location": "r2_storage.py:list-claims-entry", "message": "in-flight claim prefix LIST started", "data": {"prefix": prefix, "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-    # endregion
     out: dict[str, list[tuple[str, str]]] = {}
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        page_count += 1
-        object_count += len(page.get("Contents", []))
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.endswith("/"):
@@ -464,9 +453,6 @@ def list_in_flight_background_claims(
             out.setdefault(filename, []).append((exec_id, key))
     for claims in out.values():
         claims.sort(key=lambda row: row[0])
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B", "location": "r2_storage.py:list-claims-exit", "message": "in-flight claim prefix LIST finished", "data": {"prefix": prefix, "page_count": page_count, "object_count": object_count, "claimed_filename_count": len(out), "elapsed_ms": round((time.perf_counter() - list_started) * 1000, 3), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-    # endregion
     return out
 
 

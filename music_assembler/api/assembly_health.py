@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import threading
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -75,15 +72,9 @@ def verify_assembly_run_output(
         elif not video_id:
             missing_reason = "missing video_id in progress"
         else:
-            # region agent log
-            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C", "location": "assembly_health.py:output-head-before", "message": "checking succeeded run output", "data": {"status": status, "has_channel": bool(channel), "has_video_id": bool(video_id), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-            # endregion
             output_exists = assembly_output_exists(
                 client, bucket, channel=channel, video_id=video_id
             )
-            # region agent log
-            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C", "location": "assembly_health.py:output-head-after", "message": "checked succeeded run output", "data": {"output_exists": output_exists, "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-            # endregion
             if not output_exists:
                 missing_reason = f"video not found on R2: {video_id}"
             else:
@@ -119,10 +110,6 @@ def audit_recent_assemblies(
     repair: bool = False,
 ) -> dict[str, Any]:
     """Check recent assembly runs for missing outputs and stale duplicate claims."""
-    audit_started = time.perf_counter()
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,D,E", "location": "assembly_health.py:audit-entry", "message": "assembly health audit started", "data": {"run_count": len(runs), "claim_eligible_count": sum(1 for run in runs if (run.get("images_folder") or run.get("category")) and run.get("claimed_background")), "succeeded_count": sum(1 for run in runs if (run.get("progress") or {}).get("status") == "succeeded"), "unique_claim_prefixes": len({run.get("images_folder") or run.get("category") for run in runs if (run.get("images_folder") or run.get("category")) and run.get("claimed_background")}), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-    # endregion
     checked: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
     claims_by_prefix: dict[str, dict[str, list[tuple[str, str]]]] = {}
@@ -136,10 +123,7 @@ def audit_recent_assemblies(
     except Exception:
         pass
 
-    for run_index, run in enumerate(runs):
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "assembly_health.py:audit-run", "message": "verifying one assembly run", "data": {"run_index": run_index, "status": (run.get("progress") or {}).get("status"), "claim_eligible": bool((run.get("images_folder") or run.get("category")) and run.get("claimed_background")), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-        # endregion
+    for run in runs:
         row = verify_assembly_run_output(
             client, bucket, run, _claims_by_prefix=claims_by_prefix
         )
@@ -168,14 +152,10 @@ def audit_recent_assemblies(
                     )
                     row["repaired"] = True
 
-    result = {
+    return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "checked": len(checked),
         "healthy": sum(1 for row in checked if row["healthy"]),
         "issues": issues,
         "runs": checked,
     }
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,C,D,E", "location": "assembly_health.py:audit-exit", "message": "assembly health audit finished", "data": {"checked": result["checked"], "healthy": result["healthy"], "issue_count": len(issues), "elapsed_ms": round((time.perf_counter() - audit_started) * 1000, 3), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
-    # endregion
-    return result
