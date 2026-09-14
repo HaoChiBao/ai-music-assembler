@@ -36,6 +36,10 @@ def verify_assembly_run_output(
     client,
     bucket: str,
     run: dict[str, Any],
+    *,
+    _claims_by_prefix: dict[
+        str, dict[str, list[tuple[str, str]]]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Return verification details for one assembly run."""
     execution_id = run.get("execution_id", "")
@@ -48,9 +52,15 @@ def verify_assembly_run_output(
     images_folder = run.get("images_folder") or run.get("category")
     if images_folder and run.get("claimed_background"):
         prefix = f"post-processed/{images_folder}/"
-        claims = list_in_flight_background_claims(client, bucket, prefix).get(
-            run["claimed_background"], []
-        )
+        if _claims_by_prefix is None:
+            claims_for_prefix = list_in_flight_background_claims(client, bucket, prefix)
+        else:
+            if prefix not in _claims_by_prefix:
+                _claims_by_prefix[prefix] = list_in_flight_background_claims(
+                    client, bucket, prefix
+                )
+            claims_for_prefix = _claims_by_prefix[prefix]
+        claims = claims_for_prefix.get(run["claimed_background"], [])
         if len(claims) > 1:
             duplicate_claims = [row[0] for row in claims]
 
@@ -61,10 +71,14 @@ def verify_assembly_run_output(
             missing_reason = "missing channel in job meta"
         elif not video_id:
             missing_reason = "missing video_id in progress"
-        elif not assembly_output_exists(client, bucket, channel=channel, video_id=video_id):
-            missing_reason = f"video not found on R2: {video_id}"
         else:
-            output_ok = True
+            output_exists = assembly_output_exists(
+                client, bucket, channel=channel, video_id=video_id
+            )
+            if not output_exists:
+                missing_reason = f"video not found on R2: {video_id}"
+            else:
+                output_ok = True
     elif status in ("running", "cancelling"):
         missing_reason = "job still running"
     elif status == "failed":
@@ -98,6 +112,7 @@ def audit_recent_assemblies(
     """Check recent assembly runs for missing outputs and stale duplicate claims."""
     checked: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
+    claims_by_prefix: dict[str, dict[str, list[tuple[str, str]]]] = {}
 
     gcp_by_id: dict[str, dict[str, Any]] = {}
     try:
@@ -109,7 +124,9 @@ def audit_recent_assemblies(
         pass
 
     for run in runs:
-        row = verify_assembly_run_output(client, bucket, run)
+        row = verify_assembly_run_output(
+            client, bucket, run, _claims_by_prefix=claims_by_prefix
+        )
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             row["gcp_status"] = gcp_by_id[gcp_id].get("status")
