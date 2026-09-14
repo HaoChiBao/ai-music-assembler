@@ -90,6 +90,10 @@ class TestDashboardHealthAuditHarness(unittest.TestCase):
         runs = _runs()
         client = _CountingClient()
 
+        def object_exists(r2_client, bucket: str, key: str) -> bool:
+            r2_client.head_object(Bucket=bucket, Key=key)
+            return True
+
         def request_snapshot() -> None:
             app_module.dashboard_snapshot(
                 category="korean",
@@ -120,6 +124,7 @@ class TestDashboardHealthAuditHarness(unittest.TestCase):
             patch.object(app_module, "count_pending_r2_sources", return_value=0),
             patch.object(app_module, "r2_config_from_env", return_value=object()),
             patch.object(assembly_health.gcp_jobs, "list_executions", return_value=[]),
+            patch.object(assembly_health, "object_exists", side_effect=object_exists),
             patch.object(app_module, "dashboard_cache", TTLCache()),
         ):
             request_snapshot()
