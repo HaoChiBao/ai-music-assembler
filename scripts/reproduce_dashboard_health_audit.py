@@ -102,17 +102,11 @@ def main() -> None:
     app_module.r2_config_from_env = lambda **_kwargs: object()
     assembly_health.gcp_jobs.list_executions = lambda *_args, **_kwargs: []
 
-    original_audit = assembly_health.audit_recent_assemblies
-    audit_barrier: threading.Barrier | None = None
-
-    def synchronized_audit(*args, **kwargs):
-        if audit_barrier is not None:
-            audit_barrier.wait(timeout=5)
-        return original_audit(*args, **kwargs)
-
-    assembly_health.audit_recent_assemblies = synchronized_audit
+    request_barrier: threading.Barrier | None = None
 
     def request_snapshot() -> None:
+        if request_barrier is not None:
+            request_barrier.wait(timeout=5)
         app_module.dashboard_snapshot(
             category="korean",
             light=False,
@@ -139,7 +133,7 @@ def main() -> None:
 
     client.reset()
     app_module.dashboard_cache = TTLCache()
-    audit_barrier = threading.Barrier(2)
+    request_barrier = threading.Barrier(2)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(request_snapshot) for _ in range(2)]
         for future in futures:
