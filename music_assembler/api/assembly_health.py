@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,6 +39,10 @@ def verify_assembly_run_output(
     client,
     bucket: str,
     run: dict[str, Any],
+    *,
+    _claims_by_prefix: dict[
+        str, dict[str, list[tuple[str, str]]]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Return verification details for one assembly run."""
     execution_id = run.get("execution_id", "")
@@ -48,9 +55,15 @@ def verify_assembly_run_output(
     images_folder = run.get("images_folder") or run.get("category")
     if images_folder and run.get("claimed_background"):
         prefix = f"post-processed/{images_folder}/"
-        claims = list_in_flight_background_claims(client, bucket, prefix).get(
-            run["claimed_background"], []
-        )
+        if _claims_by_prefix is None:
+            claims_for_prefix = list_in_flight_background_claims(client, bucket, prefix)
+        else:
+            if prefix not in _claims_by_prefix:
+                _claims_by_prefix[prefix] = list_in_flight_background_claims(
+                    client, bucket, prefix
+                )
+            claims_for_prefix = _claims_by_prefix[prefix]
+        claims = claims_for_prefix.get(run["claimed_background"], [])
         if len(claims) > 1:
             duplicate_claims = [row[0] for row in claims]
 
@@ -61,10 +74,20 @@ def verify_assembly_run_output(
             missing_reason = "missing channel in job meta"
         elif not video_id:
             missing_reason = "missing video_id in progress"
-        elif not assembly_output_exists(client, bucket, channel=channel, video_id=video_id):
-            missing_reason = f"video not found on R2: {video_id}"
         else:
-            output_ok = True
+            # region agent log
+            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C", "location": "assembly_health.py:output-head-before", "message": "checking succeeded run output", "data": {"status": status, "has_channel": bool(channel), "has_video_id": bool(video_id), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+            # endregion
+            output_exists = assembly_output_exists(
+                client, bucket, channel=channel, video_id=video_id
+            )
+            # region agent log
+            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "C", "location": "assembly_health.py:output-head-after", "message": "checked succeeded run output", "data": {"output_exists": output_exists, "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+            # endregion
+            if not output_exists:
+                missing_reason = f"video not found on R2: {video_id}"
+            else:
+                output_ok = True
     elif status in ("running", "cancelling"):
         missing_reason = "job still running"
     elif status == "failed":
@@ -96,8 +119,13 @@ def audit_recent_assemblies(
     repair: bool = False,
 ) -> dict[str, Any]:
     """Check recent assembly runs for missing outputs and stale duplicate claims."""
+    audit_started = time.perf_counter()
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,D,E", "location": "assembly_health.py:audit-entry", "message": "assembly health audit started", "data": {"run_count": len(runs), "claim_eligible_count": sum(1 for run in runs if (run.get("images_folder") or run.get("category")) and run.get("claimed_background")), "succeeded_count": sum(1 for run in runs if (run.get("progress") or {}).get("status") == "succeeded"), "unique_claim_prefixes": len({run.get("images_folder") or run.get("category") for run in runs if (run.get("images_folder") or run.get("category")) and run.get("claimed_background")}), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+    # endregion
     checked: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
+    claims_by_prefix: dict[str, dict[str, list[tuple[str, str]]]] = {}
 
     gcp_by_id: dict[str, dict[str, Any]] = {}
     try:
@@ -108,8 +136,13 @@ def audit_recent_assemblies(
     except Exception:
         pass
 
-    for run in runs:
-        row = verify_assembly_run_output(client, bucket, run)
+    for run_index, run in enumerate(runs):
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "assembly_health.py:audit-run", "message": "verifying one assembly run", "data": {"run_index": run_index, "status": (run.get("progress") or {}).get("status"), "claim_eligible": bool((run.get("images_folder") or run.get("category")) and run.get("claimed_background")), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+        # endregion
+        row = verify_assembly_run_output(
+            client, bucket, run, _claims_by_prefix=claims_by_prefix
+        )
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             row["gcp_status"] = gcp_by_id[gcp_id].get("status")
@@ -135,10 +168,14 @@ def audit_recent_assemblies(
                     )
                     row["repaired"] = True
 
-    return {
+    result = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "checked": len(checked),
         "healthy": sum(1 for row in checked if row["healthy"]),
         "issues": issues,
         "runs": checked,
     }
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,B,C,D,E", "location": "assembly_health.py:audit-exit", "message": "assembly health audit finished", "data": {"checked": result["checked"], "healthy": result["healthy"], "issue_count": len(issues), "elapsed_ms": round((time.perf_counter() - audit_started) * 1000, 3), "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+    # endregion
+    return result

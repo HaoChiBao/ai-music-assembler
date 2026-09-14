@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1364,6 +1366,9 @@ def dashboard_snapshot(
         health_key = _cache_key("health", cat)
 
         def load_health() -> dict[str, Any]:
+            # region agent log
+            open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "D,E", "location": "app.py:load-health", "message": "dashboard health cache factory entered", "data": {"health_key": health_key, "run_count": len(asm_raw), "refresh": refresh, "thread_id": threading.get_ident()}, "timestamp": time.time_ns() // 1_000_000}) + "\n")
+            # endregion
             report = assembly_health.audit_recent_assemblies(
                 settings, client, bucket, asm_raw, repair=False
             )

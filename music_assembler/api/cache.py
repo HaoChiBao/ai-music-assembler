@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any, Callable
 
 
@@ -18,6 +18,8 @@ class TTLCache:
     def __init__(self) -> None:
         self._data: dict[str, _Entry] = {}
         self._lock = Lock()
+        self._ready = Condition(self._lock)
+        self._loading: set[str] = set()
         self.hits = 0
         self.misses = 0
         self.sets = 0
@@ -37,13 +39,41 @@ class TTLCache:
             self.sets += 1
 
     def get_or_set(self, key: str, ttl_sec: float, factory: Callable[[], Any]) -> tuple[Any, bool]:
-        cached = self.get(key)
-        if cached is not None:
-            return cached, True
-        value = factory()
-        self.set(key, value, ttl_sec)
-        with self._lock:
+        with self._ready:
+            while key in self._loading:
+                self._ready.wait()
+                ent = self._data.get(key)
+                if (
+                    ent is not None
+                    and ent.value is not None
+                    and ent.expires_at > time.monotonic()
+                ):
+                    self.hits += 1
+                    return ent.value, True
+            ent = self._data.get(key)
+            if (
+                ent is not None
+                and ent.value is not None
+                and ent.expires_at > time.monotonic()
+            ):
+                self.hits += 1
+                return ent.value, True
+            self._loading.add(key)
+
+        try:
+            value = factory()
+        except BaseException:
+            with self._ready:
+                self._loading.remove(key)
+                self._ready.notify_all()
+            raise
+
+        with self._ready:
+            self._data[key] = _Entry(value, time.monotonic() + ttl_sec)
+            self.sets += 1
             self.misses += 1
+            self._loading.remove(key)
+            self._ready.notify_all()
         return value, False
 
     def invalidate_prefix(self, prefix: str) -> int:
