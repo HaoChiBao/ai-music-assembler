@@ -12,11 +12,16 @@ _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
 def _iter_body(body: Any, chunk_size: int = 1024 * 256) -> Iterator[bytes]:
-    while True:
-        chunk = body.read(chunk_size)
-        if not chunk:
-            break
-        yield chunk
+    try:
+        while True:
+            chunk = body.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        close = getattr(body, "close", None)
+        if close is not None:
+            close()
 
 
 def stream_r2_object(
@@ -41,8 +46,8 @@ def stream_r2_object(
 
     if not range_header:
         resp = client.get_object(Bucket=bucket, Key=key)
-        return Response(
-            content=resp["Body"].read(),
+        return StreamingResponse(
+            _iter_body(resp["Body"]),
             media_type=media_type,
             headers={
                 "Accept-Ranges": "bytes",
