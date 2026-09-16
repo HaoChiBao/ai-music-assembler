@@ -705,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
         stage = f"Done — extended {ok} image(s)"
         if failed:
             stage += f", failed {failed}"
-        on_progress(100, stage, status="succeeded")
+        on_progress(100, stage, status="failed" if failed else "succeeded")
         print(stage)
         return 1 if failed else 0
 
@@ -765,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Done. extended {ok}, failed {len(failures)}.")
     for item in failures:
         print(f"  - {Path(item['key']).name}: {item['error'].splitlines()[0]}", file=sys.stderr)
-    return 1 if (ok == 0 and failures) else 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
