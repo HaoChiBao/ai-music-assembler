@@ -76,7 +76,7 @@ def run_extend_job(
         stage = f"Done — extended {ok} image(s)"
         if failed:
             stage += f", failed {failed}"
-        on_progress(100, stage, status="succeeded")
+        on_progress(100, stage, status="failed" if failed else "succeeded")
     except Exception as exc:
         write_progress_json(
             client,
