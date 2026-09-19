@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from music_assembler.api import asset_upload
@@ -103,3 +105,58 @@ def test_upload_rejects_used_pool():
             images_folder=None,
             files=[("a.png", b"x")],
         )
+
+
+def test_streamed_upload_bounds_each_file_and_continues(monkeypatch):
+    monkeypatch.setattr(asset_upload, "MAX_BYTES_PER_FILE", 8)
+    monkeypatch.setattr(asset_upload, "READ_CHUNK_BYTES", 4)
+    uploaded_keys: list[str] = []
+
+    class FakeError(Exception):
+        def __init__(self, code: str):
+            self.response = {"Error": {"Code": code}}
+
+    class Client:
+        exceptions = type("exceptions", (), {"ClientError": FakeError})()
+
+        def head_object(self, *, Bucket, Key):  # noqa: N803
+            raise self.exceptions.ClientError("404")
+
+        def upload_file(self, path, bucket, key, ExtraArgs=None):  # noqa: N803
+            uploaded_keys.append(key)
+
+    class Upload:
+        def __init__(self, filename: str, size: int):
+            self.filename = filename
+            self.remaining = size
+            self.bytes_read = 0
+
+        async def read(self, size: int) -> bytes:
+            assert size == asset_upload.READ_CHUNK_BYTES
+            if self.remaining == 0:
+                return b""
+            count = min(size, self.remaining)
+            self.remaining -= count
+            self.bytes_read += count
+            return b"x" * count
+
+    too_large = Upload("huge.png", 20)
+    valid = Upload("safe.png", 3)
+    result = asyncio.run(
+        asset_upload.upload_streamed_asset_files(
+            Client(),
+            "bucket",
+            category="korean",
+            pool="pre-processed",
+            images_folder=None,
+            uploads=[too_large, valid],
+        )
+    )
+
+    assert too_large.bytes_read == 12
+    assert too_large.remaining == 8
+    assert result["count"] == 1
+    assert result["uploaded"][0]["name"] == "safe.png"
+    assert result["errors"][0]["name"] == "huge.png"
+    assert result["errors"][0]["error"].startswith("File exceeds")
+    assert uploaded_keys == ["pre-processed/korean/safe.png"]

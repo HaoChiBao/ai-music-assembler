@@ -12,6 +12,7 @@ from music_assembler.r2_storage import IMAGE_EXTENSIONS, object_exists
 UPLOAD_POOLS = frozenset({"pre-processed", "post-processed"})
 MAX_FILES_PER_REQUEST = 50
 MAX_BYTES_PER_FILE = 20 * 1024 * 1024
+READ_CHUNK_BYTES = 1024 * 1024
 
 _IMAGE_SUFFIXES = {ext.lower() for ext in IMAGE_EXTENSIONS}
 _CONTENT_TYPES = {
@@ -40,6 +41,20 @@ def sanitize_upload_filename(name: str) -> str:
 
 def content_type_for_filename(name: str) -> str:
     return _CONTENT_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
+
+
+async def read_upload_limited(upload: Any) -> bytes:
+    """Read one UploadFile without ever buffering an unbounded request body."""
+    data = bytearray()
+    while True:
+        chunk = await upload.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        if len(data) > MAX_BYTES_PER_FILE:
+            raise ValueError(
+                f"File exceeds {MAX_BYTES_PER_FILE // (1024 * 1024)} MB limit"
+            )
 
 
 def resolve_upload_key(
@@ -126,6 +141,60 @@ def upload_asset_files(
         except Exception as exc:  # noqa: BLE001 — collect per-file failures
             errors.append({"name": original_name, "error": str(exc)})
 
+    if not uploaded and errors:
+        raise ValueError(errors[0]["error"])
+
+    return {
+        "category": category,
+        "pool": pool,
+        "images_folder": images_folder,
+        "uploaded": uploaded,
+        "errors": errors,
+        "count": len(uploaded),
+    }
+
+
+async def upload_streamed_asset_files(
+    client,
+    bucket: str,
+    *,
+    category: str,
+    pool: str,
+    images_folder: str | None,
+    uploads: list[Any],
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Read and upload multipart files one at a time to bound API memory use."""
+    if len(uploads) > MAX_FILES_PER_REQUEST:
+        raise ValueError(f"At most {MAX_FILES_PER_REQUEST} files per request")
+
+    uploaded: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    saw_file = False
+    for upload in uploads:
+        original_name = upload.filename
+        if not original_name:
+            continue
+        saw_file = True
+        try:
+            data = await read_upload_limited(upload)
+            result = upload_asset_files(
+                client,
+                bucket,
+                category=category,
+                pool=pool,
+                images_folder=images_folder,
+                files=[(original_name, data)],
+                overwrite=overwrite,
+            )
+        except ValueError as exc:
+            errors.append({"name": original_name, "error": str(exc)})
+            continue
+        uploaded.extend(result["uploaded"])
+        errors.extend(result["errors"])
+
+    if not saw_file:
+        raise ValueError("No files to upload")
     if not uploaded and errors:
         raise ValueError(errors[0]["error"])
 
