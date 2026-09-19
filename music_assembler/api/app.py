@@ -1256,22 +1256,15 @@ async def upload_assets(
     if not files:
         raise HTTPException(status_code=400, detail="No files attached")
 
-    payloads: list[tuple[str, bytes]] = []
-    for upload in files:
-        if not upload.filename:
-            continue
-        data = await upload.read()
-        payloads.append((upload.filename, data))
-
     client, bucket = _r2()
     try:
-        result = asset_upload.upload_asset_files(
+        result = await asset_upload.upload_streamed_asset_files(
             client,
             bucket,
             category=cat,
             pool=pool,
             images_folder=folder,
-            files=payloads,
+            uploads=files,
             overwrite=overwrite,
         )
     except ValueError as exc:
