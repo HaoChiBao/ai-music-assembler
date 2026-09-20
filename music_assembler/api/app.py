@@ -223,8 +223,8 @@ class ChannelScheduleRequest(BaseModel):
         examples=["korean"],
     )
     template_id: str = Field(default=DEFAULT_TEMPLATE_ID, examples=[DEFAULT_TEMPLATE_ID, "shorts_vertical"])
-    duration_min: int = Field(default=90, ge=1, le=300)
-    variance_min: int = Field(default=15, ge=0, le=60)
+    duration_min: int | None = Field(default=None, ge=1, le=300)
+    variance_min: int | None = Field(default=None, ge=0, le=60)
     thumbnail_text: str | None = None
     queue_youtube: bool = True
     upload_privacy: str = "private"
@@ -278,6 +278,12 @@ class ChannelScheduleRequest(BaseModel):
 def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assembly_schedule.ChannelSchedule:
     if len(body.days) != 7:
         raise HTTPException(status_code=400, detail="days must contain exactly 7 entries (Sun–Sat)")
+    template = get_template(body.template_id)
+    duration_min = body.duration_min if body.duration_min is not None else template.default_duration_min
+    variance_min = body.variance_min if body.variance_min is not None else template.default_variance_min
+    thumbnail_text = body.thumbnail_text
+    if thumbnail_text is None and template.thumbnail_strategy != "none":
+        thumbnail_text = template.default_thumbnail_text
     upload_now = bool(body.queue_youtube and body.upload_now)
     upload_schedule_publish = bool(body.queue_youtube and body.upload_schedule_publish and not upload_now)
     sched = assembly_schedule.ChannelSchedule(
@@ -286,10 +292,10 @@ def _schedule_from_request(channel: str, body: ChannelScheduleRequest) -> assemb
         timezone=body.timezone.strip(),
         category=body.category,
         images_folder=body.images_folder,
-        template_id=body.template_id,
-        duration_min=body.duration_min,
-        variance_min=body.variance_min,
-        thumbnail_text=body.thumbnail_text,
+        template_id=template.id,
+        duration_min=duration_min,
+        variance_min=variance_min,
+        thumbnail_text=thumbnail_text,
         queue_youtube=body.queue_youtube,
         upload_privacy=body.upload_privacy,
         upload_schedule_publish=upload_schedule_publish,

@@ -123,10 +123,11 @@ class ChannelSchedule:
         # Immediate dispatch and timed publishAt are mutually exclusive.
         if upload_now:
             upload_schedule_publish = False
-        from music_assembler.video_templates import DEFAULT_TEMPLATE_ID, resolve_template_id
+        from music_assembler.video_templates import DEFAULT_TEMPLATE_ID, get_template
 
         try:
-            template_id = resolve_template_id(data.get("template_id"))
+            # Persisted schedules must not inherit a process-wide worker/CLI override.
+            template_id = get_template(data.get("template_id")).id
         except ValueError:
             template_id = DEFAULT_TEMPLATE_ID
         sched = cls(

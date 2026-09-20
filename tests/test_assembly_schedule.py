@@ -157,7 +157,8 @@ def test_channel_schedule_roundtrip_template_id():
     assert sched.to_dict()["template_id"] == "shorts_vertical"
 
 
-def test_channel_schedule_defaults_template_id():
+def test_channel_schedule_defaults_template_id_without_worker_env_override(monkeypatch):
+    monkeypatch.setenv("ASSEMBLY_TEMPLATE_ID", "shorts_vertical")
     sched = ChannelSchedule.from_dict(
         {
             "channel": "ch",
@@ -165,6 +166,21 @@ def test_channel_schedule_defaults_template_id():
         }
     )
     assert sched.template_id == "playlist_landscape"
+
+
+def test_schedule_request_uses_selected_template_defaults():
+    from music_assembler.api.app import ChannelScheduleRequest, _schedule_from_request
+
+    request = ChannelScheduleRequest(
+        images_folder="korean",
+        template_id="shorts_vertical",
+    )
+    sched = _schedule_from_request("ch", request)
+
+    assert sched.template_id == "shorts_vertical"
+    assert sched.duration_min == 1
+    assert sched.variance_min == 0
+    assert sched.thumbnail_text == "SHORTS"
 
 
 def test_effective_schedule_at_keeps_future():
