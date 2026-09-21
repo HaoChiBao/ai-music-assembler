@@ -42,6 +42,55 @@ def content_type_for_filename(name: str) -> str:
     return _CONTENT_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
 
 
+def _is_conditional_write_conflict(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    code = str(response.get("Error", {}).get("Code", ""))
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in {
+        "409",
+        "412",
+        "Conflict",
+        "ConditionalRequestConflict",
+        "PreconditionFailed",
+    } or status in (409, 412)
+
+
+def _put_with_unique_key(
+    client,
+    bucket: str,
+    *,
+    category: str,
+    pool: str,
+    filename: str,
+    images_folder: str | None,
+    data: bytes,
+) -> tuple[str, str]:
+    """Atomically create an object, suffixing its name when a key already exists."""
+    name = sanitize_upload_filename(filename)
+    initial_key = asset_object_key(category, pool, name, images_folder=images_folder)
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    prefix = initial_key[: -len(name)]
+
+    for index in range(1, 1000):
+        candidate_name = name if index == 1 else f"{stem}_{index}{suffix}"
+        key = f"{prefix}{candidate_name}"
+        try:
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type_for_filename(candidate_name),
+                IfNoneMatch="*",
+            )
+        except client.exceptions.ClientError as exc:
+            if _is_conditional_write_conflict(exc):
+                continue
+            raise
+        return key, candidate_name
+    raise ValueError(f"Could not find a free name for {name!r}")
+
+
 def resolve_upload_key(
     client,
     bucket: str,
@@ -99,27 +148,38 @@ def upload_asset_files(
             )
             continue
         try:
-            key = resolve_upload_key(
-                client,
-                bucket,
-                category=category,
-                pool=pool,
-                filename=original_name,
-                images_folder=images_folder,
-                overwrite=overwrite,
-            )
-            name = key.rsplit("/", 1)[-1]
-            local_path = Path(f"/tmp/r2-upload-{name}")
-            local_path.write_bytes(data)
-            try:
-                client.upload_file(
-                    str(local_path),
+            if overwrite:
+                key = resolve_upload_key(
+                    client,
                     bucket,
-                    key,
-                    ExtraArgs={"ContentType": content_type_for_filename(name)},
+                    category=category,
+                    pool=pool,
+                    filename=original_name,
+                    images_folder=images_folder,
+                    overwrite=True,
                 )
-            finally:
-                local_path.unlink(missing_ok=True)
+                name = key.rsplit("/", 1)[-1]
+                local_path = Path(f"/tmp/r2-upload-{name}")
+                local_path.write_bytes(data)
+                try:
+                    client.upload_file(
+                        str(local_path),
+                        bucket,
+                        key,
+                        ExtraArgs={"ContentType": content_type_for_filename(name)},
+                    )
+                finally:
+                    local_path.unlink(missing_ok=True)
+            else:
+                key, name = _put_with_unique_key(
+                    client,
+                    bucket,
+                    category=category,
+                    pool=pool,
+                    filename=original_name,
+                    images_folder=images_folder,
+                    data=data,
+                )
             uploaded.append({"name": name, "key": key, "size": len(data)})
         except ValueError as exc:
             errors.append({"name": original_name, "error": str(exc)})
