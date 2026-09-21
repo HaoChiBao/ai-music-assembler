@@ -8,7 +8,7 @@ dependencies = [
     "Pillow>=10.0.0",
     "google-genai>=1.0.0",
     "python-dotenv>=1.0.0",
-    "boto3>=1.28.0",
+    "boto3>=1.35.2",
     "rembg>=2.0.0",
     "onnxruntime>=1.16.0",
     "openai>=1.0.0",
@@ -28,9 +28,9 @@ youtube = [
     "openai>=1.0.0",
 ]
 # Cloudflare R2 sync — boto3 is a core dependency; kept for explicit installs.
-r2 = ["boto3>=1.28.0"]
+r2 = ["boto3>=1.35.2"]
 # Legacy alias (all deps are core now).
-cloud = ["boto3>=1.28.0", "rembg>=2.0.0", "onnxruntime>=1.16.0"]
+cloud = ["boto3>=1.35.2", "rembg>=2.0.0", "onnxruntime>=1.16.0"]
 # Music Assembly control API (FastAPI + Cloud Run Jobs client).
 api = [
     "fastapi>=0.115.0",
