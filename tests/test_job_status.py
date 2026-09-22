@@ -141,12 +141,12 @@ def test_summarize_run_metrics_success_and_percentiles():
     ("job_type", "api_prefix"),
     (("assembly", "asm"), ("extend", "ext")),
 )
-def test_reconcile_time_fallback_can_persist_cross_link_used_by_cancel(
+def test_reconcile_missing_exact_id_does_not_guess_or_cancel_other_execution(
     monkeypatch,
     job_type,
     api_prefix,
 ):
-    """Reproduce API job A cancelling Cloud Run execution B."""
+    """Do not guess an execution ID when concurrent starts are ambiguous."""
     base = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
     api_a = f"{api_prefix}_A"
     api_b = f"{api_prefix}_B"
@@ -223,14 +223,12 @@ def test_reconcile_time_fallback_can_persist_cross_link_used_by_cancel(
             (gcp_execution_id, job_resource)
         ),
     )
-    job_cancel.cancel_job(object(), "bucket", api_a, settings)
+    cancel_result = job_cancel.cancel_job(object(), "bucket", api_a, settings)
 
-    expected_resource = (
-        settings.extend_job_resource if job_type == "extend" else settings.job_resource
-    )
     observed = (
         reconciled[0]["gcp_execution_id"],
-        persisted_meta[api_a]["gcp_execution_id"],
-        cancel_calls[0],
+        persisted_meta[api_a].get("gcp_execution_id"),
+        cancel_calls,
+        cancel_result["gcp_cancelled"],
     )
-    assert observed == (gcp_a, gcp_a, (gcp_a, expected_resource))
+    assert observed == (None, None, [], False)

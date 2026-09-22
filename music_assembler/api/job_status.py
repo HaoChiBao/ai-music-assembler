@@ -306,6 +306,11 @@ def reconcile_assembly_runs(
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             gcp_row = gcp_by_id[gcp_id]
+        elif needs_gcp:
+            # region agent log
+            with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+                _agent_log_file.write(json.dumps({"hypothesisId": "A,B,C", "location": "job_status.py:reconcile_assembly_runs:missing_exact_id", "message": "assembly reconcile skipped unsafe time fallback", "data": {"api_execution_id": run.get("execution_id"), "metadata_gcp_execution_id": gcp_id}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+            # endregion
         elif needs_gcp and gcp_rows:
             gcp_row = _match_gcp_by_time(
                 run.get("created_at"),
@@ -446,6 +451,11 @@ def reconcile_extend_runs(
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             gcp_row = gcp_by_id[gcp_id]
+        elif needs_gcp:
+            # region agent log
+            with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+                _agent_log_file.write(json.dumps({"hypothesisId": "A,B,C", "location": "job_status.py:reconcile_extend_runs:missing_exact_id", "message": "extend reconcile skipped unsafe time fallback", "data": {"api_execution_id": run.get("execution_id"), "metadata_gcp_execution_id": gcp_id}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+            # endregion
         elif needs_gcp and gcp_rows:
             gcp_row = _match_gcp_by_time(
                 run.get("created_at"),
