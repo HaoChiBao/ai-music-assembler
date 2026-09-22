@@ -8,7 +8,7 @@ from typing import Any
 from music_assembler.api import gcp_jobs
 from music_assembler.api.config import ApiSettings
 from music_assembler.assemble_options import assembly_video_object_key, normalize_channel
-from music_assembler.job_progress import patch_meta_gcp_execution_id, write_progress_json
+from music_assembler.job_progress import write_progress_json
 from music_assembler.r2_storage import object_exists
 
 _SYNC_PHASE_SEC = 300.0
@@ -47,33 +47,6 @@ def _parse_ts(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _match_gcp_by_time(
-    meta_created: str | None,
-    gcp_rows: list[dict[str, Any]],
-    *,
-    max_delta_sec: float = 120.0,
-    exclude: set[str] | None = None,
-) -> dict[str, Any] | None:
-    meta_dt = _parse_ts(meta_created)
-    if meta_dt is None:
-        return None
-    taken = exclude or set()
-    best: dict[str, Any] | None = None
-    best_delta: float | None = None
-    for row in gcp_rows:
-        gcp_id = row.get("execution_id")
-        if gcp_id in taken:
-            continue
-        gcp_dt = _parse_ts(row.get("create_time"))
-        if gcp_dt is None:
-            continue
-        delta = abs((gcp_dt - meta_dt).total_seconds())
-        if delta <= max_delta_sec and (best_delta is None or delta < best_delta):
-            best = row
-            best_delta = delta
-    return best
 
 
 def _estimate_running_pct(gcp_row: dict[str, Any]) -> tuple[float, str]:
@@ -281,10 +254,6 @@ def reconcile_assembly_runs(
     except Exception:
         pass
 
-    linked_gcp: set[str] = {
-        r["gcp_execution_id"] for r in runs if r.get("gcp_execution_id")
-    }
-
     out: list[dict[str, Any]] = []
     for run in runs:
         row = _normalize_from_run(run)
@@ -297,22 +266,6 @@ def reconcile_assembly_runs(
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             gcp_row = gcp_by_id[gcp_id]
-        elif needs_gcp and gcp_rows:
-            gcp_row = _match_gcp_by_time(
-                run.get("created_at"),
-                gcp_rows,
-                exclude=linked_gcp,
-            )
-            if gcp_row:
-                row["gcp_execution_id"] = gcp_row["execution_id"]
-                linked_gcp.add(gcp_row["execution_id"])
-                if patch_r2 and run.get("execution_id"):
-                    patch_meta_gcp_execution_id(
-                        client,
-                        bucket,
-                        run["execution_id"],
-                        gcp_row["execution_id"],
-                    )
 
         if gcp_row and needs_gcp:
             gcp_status = gcp_row.get("status")
@@ -418,10 +371,6 @@ def reconcile_extend_runs(
         except Exception:
             pass
 
-    linked_gcp: set[str] = {
-        r["gcp_execution_id"] for r in runs if r.get("gcp_execution_id")
-    }
-
     out: list[dict[str, Any]] = []
     for run in runs:
         row = _normalize_from_run(run)
@@ -433,22 +382,6 @@ def reconcile_extend_runs(
         gcp_id = run.get("gcp_execution_id")
         if gcp_id and gcp_id in gcp_by_id:
             gcp_row = gcp_by_id[gcp_id]
-        elif needs_gcp and gcp_rows:
-            gcp_row = _match_gcp_by_time(
-                run.get("created_at"),
-                gcp_rows,
-                exclude=linked_gcp,
-            )
-            if gcp_row:
-                row["gcp_execution_id"] = gcp_row["execution_id"]
-                linked_gcp.add(gcp_row["execution_id"])
-                if patch_r2 and run.get("execution_id"):
-                    patch_meta_gcp_execution_id(
-                        client,
-                        bucket,
-                        run["execution_id"],
-                        gcp_row["execution_id"],
-                    )
 
         if gcp_row and needs_gcp:
             gcp_status = gcp_row.get("status")
