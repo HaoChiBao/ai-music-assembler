@@ -193,7 +193,12 @@ def test_reconcile_missing_exact_id_does_not_guess_or_cancel_other_execution(
     def persist_guess(_client, _bucket, execution_id, gcp_execution_id):
         persisted_meta[execution_id]["gcp_execution_id"] = gcp_execution_id
 
-    monkeypatch.setattr(job_status, "patch_meta_gcp_execution_id", persist_guess)
+    monkeypatch.setattr(
+        job_status,
+        "patch_meta_gcp_execution_id",
+        persist_guess,
+        raising=False,
+    )
     settings = SimpleNamespace(
         extend_use_gcp=True,
         default_category="korean",
