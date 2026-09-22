@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import time
 from typing import Any
 
 from music_assembler.api.config import ApiSettings
@@ -92,19 +90,11 @@ def cancel_job(
             if job_type == "extend"
             else settings.job_resource
         )
-        # region agent log
-        with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
-            _agent_log_file.write(json.dumps({"hypothesisId": "D", "location": "job_cancel.py:cancel_job:before_gcp_cancel", "message": "cancellation trusts persisted GCP execution id", "data": {"api_execution_id": execution_id, "job_type": job_type, "gcp_execution_id": gcp_id, "job_resource": job_resource}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
         try:
             gcp_jobs.cancel_execution(settings, gcp_id, job_resource=job_resource)
             gcp_cancelled = True
         except Exception as exc:
             gcp_error = str(exc)
-        # region agent log
-        with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
-            _agent_log_file.write(json.dumps({"hypothesisId": "D", "location": "job_cancel.py:cancel_job:after_gcp_cancel", "message": "cancellation target result", "data": {"api_execution_id": execution_id, "gcp_execution_id": gcp_id, "gcp_cancelled": gcp_cancelled, "had_error": gcp_error is not None}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
 
     write_progress_json(
         client,
