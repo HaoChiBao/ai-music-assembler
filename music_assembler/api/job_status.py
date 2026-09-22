@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,6 +61,10 @@ def _match_gcp_by_time(
     if meta_dt is None:
         return None
     taken = exclude or set()
+    # region agent log
+    with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+        _agent_log_file.write(json.dumps({"hypothesisId": "A", "location": "job_status.py:_match_gcp_by_time:entry", "message": "time fallback candidates", "data": {"meta_created": meta_created, "max_delta_sec": max_delta_sec, "exclude": sorted(taken), "candidates": [{"execution_id": row.get("execution_id"), "create_time": row.get("create_time")} for row in gcp_rows]}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+    # endregion
     best: dict[str, Any] | None = None
     best_delta: float | None = None
     for row in gcp_rows:
@@ -73,6 +78,10 @@ def _match_gcp_by_time(
         if delta <= max_delta_sec and (best_delta is None or delta < best_delta):
             best = row
             best_delta = delta
+    # region agent log
+    with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+        _agent_log_file.write(json.dumps({"hypothesisId": "A,B", "location": "job_status.py:_match_gcp_by_time:exit", "message": "time fallback selection", "data": {"meta_created": meta_created, "selected_execution_id": (best or {}).get("execution_id"), "selected_delta_sec": best_delta}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+    # endregion
     return best
 
 
@@ -306,6 +315,10 @@ def reconcile_assembly_runs(
             if gcp_row:
                 row["gcp_execution_id"] = gcp_row["execution_id"]
                 linked_gcp.add(gcp_row["execution_id"])
+                # region agent log
+                with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+                    _agent_log_file.write(json.dumps({"hypothesisId": "B,C", "location": "job_status.py:reconcile_assembly_runs:fallback", "message": "assembly fallback selected and may persist", "data": {"api_execution_id": run.get("execution_id"), "selected_gcp_execution_id": gcp_row.get("execution_id"), "patch_r2": patch_r2}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                # endregion
                 if patch_r2 and run.get("execution_id"):
                     patch_meta_gcp_execution_id(
                         client,
@@ -442,6 +455,10 @@ def reconcile_extend_runs(
             if gcp_row:
                 row["gcp_execution_id"] = gcp_row["execution_id"]
                 linked_gcp.add(gcp_row["execution_id"])
+                # region agent log
+                with open("/opt/cursor/logs/debug.log", "a") as _agent_log_file:
+                    _agent_log_file.write(json.dumps({"hypothesisId": "B,C", "location": "job_status.py:reconcile_extend_runs:fallback", "message": "extend fallback selected and may persist", "data": {"api_execution_id": run.get("execution_id"), "selected_gcp_execution_id": gcp_row.get("execution_id"), "patch_r2": patch_r2}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                # endregion
                 if patch_r2 and run.get("execution_id"):
                     patch_meta_gcp_execution_id(
                         client,
