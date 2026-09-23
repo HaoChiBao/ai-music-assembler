@@ -926,12 +926,20 @@ def schedules_overview(
 @app.get("/v1/schedules/{channel}")
 def get_schedule(
     channel: str,
+    response: Response,
     _auth: None = Depends(require_api_auth),
 ) -> dict[str, Any]:
     client, bucket = _r2()
-    sched = assembly_schedule.get_schedule(client, bucket, normalize_channel(channel))
+    sched, revision = assembly_schedule.get_schedule_with_revision(
+        client,
+        bucket,
+        normalize_channel(channel),
+    )
+    headers = {"ETag": revision} if revision else None
     if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+        raise HTTPException(status_code=404, detail="Schedule not found", headers=headers)
+    if revision:
+        response.headers["ETag"] = revision
     return sched.to_dict()
 
 
@@ -939,17 +947,42 @@ def get_schedule(
 def put_schedule(
     channel: str,
     body: ChannelScheduleRequest,
+    request: Request,
     _auth: None = Depends(require_api_auth),
-) -> dict[str, Any]:
+) -> JSONResponse:
     try:
         sched = _schedule_from_request(channel, body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if_match = request.headers.get("if-match")
+    if_none_match = request.headers.get("if-none-match")
+    if if_match and if_none_match:
+        raise HTTPException(status_code=400, detail="Send only one schedule revision precondition")
+    if not if_match and if_none_match != "*":
+        raise HTTPException(
+            status_code=428,
+            detail="Schedule revision required; reload the editor before saving",
+        )
     client, bucket = _r2()
     _assert_background_folder_exists(client, bucket, sched.images_folder or body.images_folder)
-    saved = assembly_schedule.upsert_schedule(client, bucket, sched)
+    try:
+        saved, revision = assembly_schedule.upsert_schedule_if_revision(
+            client,
+            bucket,
+            sched,
+            expected_revision=if_match,
+            create_if_absent=if_none_match == "*",
+        )
+    except assembly_schedule.ScheduleRevisionConflict as exc:
+        raise HTTPException(
+            status_code=412,
+            detail="Schedule changed since it was loaded; reload before saving",
+        ) from exc
     _invalidate_schedule_cache()
-    return saved.to_dict()
+    return JSONResponse(
+        content=saved.to_dict(),
+        headers={"ETag": revision} if revision else None,
+    )
 
 
 @app.delete("/v1/schedules/{channel}")
@@ -4214,7 +4247,13 @@ async function api(path, opts={}) {
     if (obs.fetches.length > 25) obs.fetches.pop();
     renderObsBar();
     if (r.status === 401) { window.location.reload(); throw new Error('Session expired'); }
-    if (!r.ok) { obs.lastError = path + ' ' + r.status; throw new Error(await r.text()); }
+    if (!r.ok) {
+      obs.lastError = path + ' ' + r.status;
+      const error = new Error(await r.text());
+      error.status = r.status;
+      error.response = r;
+      throw error;
+    }
     clearAuthError();
     if (opts.expectJson === false) return r;
     return r.json();
@@ -5472,6 +5511,8 @@ document.getElementById('modal').onclick = (e) => { if (e.target.id === 'modal')
 const SCHEDULE_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const SCHEDULE_DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DEFAULT_ASSEMBLE_TIME = '11:00';
+let scheduleEditorRevision = null;
+let scheduleEditorChannel = '';
 
 function timeInputValue(hhmm) {
   if (!hhmm) return '';
@@ -6141,6 +6182,8 @@ async function loadScheduleEditor(channel) {
   const banner = document.getElementById('scheduleNewBanner');
   const hint = document.getElementById('scheduleEditorHint');
   if (!channel) {
+      scheduleEditorRevision = null;
+      scheduleEditorChannel = '';
     empty.hidden = false;
     editor.hidden = true;
     if (banner) banner.hidden = true;
@@ -6159,12 +6202,22 @@ async function loadScheduleEditor(channel) {
   if (titleEl) titleEl.textContent = channel;
   let data;
   let isNew = false;
+  scheduleEditorRevision = null;
+  scheduleEditorChannel = '';
   try {
-    data = await api('/v1/schedules/' + encodeURIComponent(channel));
+    const response = await api(
+      '/v1/schedules/' + encodeURIComponent(channel),
+      { expectJson: false }
+    );
+    data = await response.json();
+    scheduleEditorRevision = response.headers.get('ETag');
+    scheduleEditorChannel = channel;
   } catch (e) {
     if (isScheduleNotFound(e)) {
       isNew = true;
       data = defaultNewSchedule(channel);
+      scheduleEditorRevision = e.response?.headers.get('ETag') || null;
+      scheduleEditorChannel = channel;
     } else {
       console.error('schedule editor', e);
       empty.hidden = false;
@@ -6203,7 +6256,7 @@ async function loadScheduleEditor(channel) {
 }
 function isScheduleNotFound(err) {
   const msg = String(err || '');
-  return msg.includes('Schedule not found') || /\b404\b/.test(msg);
+  return err?.status === 404 || msg.includes('Schedule not found') || /\b404\b/.test(msg);
 }
 function defaultNewSchedule(channel) {
   const tmpl = findVideoTemplate(DEFAULT_TEMPLATE_ID);
@@ -6251,6 +6304,10 @@ async function saveSchedule() {
   if (!channel) { alert('Select a channel'); return; }
   const imagesFolder = document.getElementById('scheduleImagesFolder').value.trim();
   if (!imagesFolder) { alert('Select a background folder'); return; }
+  if (scheduleEditorChannel !== channel) {
+    alert('Reload this schedule before saving. Your unsaved edits are still here.');
+    return;
+  }
   const btn = document.getElementById('scheduleSave');
   setBtnLoading(btn, true, 'Saving…');
   try {
@@ -6278,11 +6335,22 @@ async function saveSchedule() {
       days: collectScheduleDays(),
       apply_default_to_enabled_days: false,
     };
-    await api('/v1/schedules/' + encodeURIComponent(channel), { method: 'PUT', body: JSON.stringify(body) });
+    const revisionHeaders = scheduleEditorRevision
+      ? { 'If-Match': scheduleEditorRevision }
+      : { 'If-None-Match': '*' };
+    await api('/v1/schedules/' + encodeURIComponent(channel), {
+      method: 'PUT',
+      headers: revisionHeaders,
+      body: JSON.stringify(body),
+    });
     await loadScheduleEditor(channel);
     await loadScheduleOverview();
   } catch (e) {
-    alert('Save failed: ' + e);
+    if (e?.status === 409 || e?.status === 412 || e?.status === 428) {
+      alert('Save conflict: this schedule changed elsewhere. Your unsaved edits are still here; reload when ready.');
+    } else {
+      alert('Save failed: ' + e);
+    }
   }
   setBtnLoading(btn, false);
 }

@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import io
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
+
+import pytest
 
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
+    ScheduleRevisionConflict,
     apply_default_times,
     due_slots,
     ensure_schedule_upload_times,
+    get_schedule_with_revision,
     ledger_is_terminal,
     preview_schedule,
     slot_key,
+    upsert_schedule_if_revision,
     upload_time_after_assemble,
     upsert_schedule,
 )
@@ -229,3 +236,134 @@ def test_upsert_schedule_roundtrip():
     assert loaded is not None
     assert loaded.channel == "nappabeats"
     assert loaded.variance_min == 0
+
+
+class _ConditionalClientError(Exception):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
+class _ConditionalR2:
+    exceptions = MagicMock(ClientError=_ConditionalClientError)
+
+    def __init__(self, doc: dict | None):
+        self.body = json.dumps(doc).encode("utf-8") if doc is not None else None
+        self.revision = 1 if doc is not None else 0
+        self.put_calls: list[dict] = []
+        self.race_body: bytes | None = None
+
+    @property
+    def etag(self) -> str | None:
+        return f'"revision-{self.revision}"' if self.body is not None else None
+
+    def get_object(self, **_kwargs):
+        if self.body is None:
+            raise _ConditionalClientError("NoSuchKey")
+        return {"Body": io.BytesIO(self.body), "ETag": self.etag}
+
+    def put_object(self, **kwargs):
+        self.put_calls.append(kwargs)
+        if self.race_body is not None:
+            self.body = self.race_body
+            self.race_body = None
+            self.revision += 1
+        if kwargs.get("IfMatch") and kwargs["IfMatch"] != self.etag:
+            raise _ConditionalClientError("PreconditionFailed")
+        if kwargs.get("IfNoneMatch") == "*" and self.body is not None:
+            raise _ConditionalClientError("PreconditionFailed")
+        self.body = kwargs["Body"]
+        self.revision += 1
+        return {"ETag": self.etag}
+
+
+def _schedule_doc(schedule: ChannelSchedule) -> dict:
+    return {"version": 1, "schedules": [schedule.to_dict()]}
+
+
+def test_conditional_upsert_with_matching_revision_succeeds():
+    original = ChannelSchedule(channel="ch", default_assemble_at="10:00")
+    client = _ConditionalR2(_schedule_doc(original))
+    loaded, revision = get_schedule_with_revision(client, "bucket", "ch")
+    assert loaded is not None
+    assert revision == '"revision-1"'
+
+    loaded.default_assemble_at = "14:00"
+    saved, new_revision = upsert_schedule_if_revision(
+        client,
+        "bucket",
+        loaded,
+        expected_revision=revision,
+    )
+
+    assert saved.default_assemble_at == "14:00"
+    assert new_revision == '"revision-2"'
+    assert client.put_calls[-1]["IfMatch"] == '"revision-1"'
+    current, _ = get_schedule_with_revision(client, "bucket", "ch")
+    assert current is not None
+    assert current.default_assemble_at == "14:00"
+
+
+def test_conditional_upsert_rejects_stale_revision_without_mutation():
+    original = ChannelSchedule(channel="ch", default_assemble_at="10:00")
+    client = _ConditionalR2(_schedule_doc(original))
+    stale, stale_revision = get_schedule_with_revision(client, "bucket", "ch")
+    assert stale is not None
+
+    latest = ChannelSchedule(channel="ch", default_assemble_at="14:00")
+    upsert_schedule_if_revision(
+        client,
+        "bucket",
+        latest,
+        expected_revision=stale_revision,
+    )
+    body_before_stale_save = client.body
+    put_count = len(client.put_calls)
+
+    with pytest.raises(ScheduleRevisionConflict):
+        upsert_schedule_if_revision(
+            client,
+            "bucket",
+            stale,
+            expected_revision=stale_revision,
+        )
+
+    assert client.body == body_before_stale_save
+    assert len(client.put_calls) == put_count
+
+
+def test_conditional_upsert_maps_racing_put_precondition_to_conflict():
+    original = ChannelSchedule(channel="ch", default_assemble_at="10:00")
+    client = _ConditionalR2(_schedule_doc(original))
+    loaded, revision = get_schedule_with_revision(client, "bucket", "ch")
+    assert loaded is not None
+    external = ChannelSchedule(channel="ch", default_assemble_at="16:00")
+    external_body = json.dumps(_schedule_doc(external)).encode("utf-8")
+    client.race_body = external_body
+
+    loaded.default_assemble_at = "14:00"
+    with pytest.raises(ScheduleRevisionConflict):
+        upsert_schedule_if_revision(
+            client,
+            "bucket",
+            loaded,
+            expected_revision=revision,
+        )
+
+    assert client.body == external_body
+    assert client.put_calls[-1]["IfMatch"] == '"revision-1"'
+
+
+def test_conditional_upsert_creates_missing_document_with_if_none_match():
+    client = _ConditionalR2(None)
+    schedule = ChannelSchedule(channel="ch")
+
+    _, revision = upsert_schedule_if_revision(
+        client,
+        "bucket",
+        schedule,
+        create_if_absent=True,
+    )
+
+    assert revision == '"revision-1"'
+    assert client.put_calls[-1]["IfNoneMatch"] == "*"
