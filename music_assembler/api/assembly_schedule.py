@@ -27,6 +27,16 @@ DEFAULT_ASSEMBLE_AT = "11:00"
 DEFAULT_LATE_UPLOAD_GRACE_MINUTES = 5
 VALID_UPLOAD_PRIVACY = ("private", "unlisted", "public")
 SCHEDULE_DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+_PRECONDITION_FAILURE_CODES = (
+    "409",
+    "412",
+    "ConditionalRequestConflict",
+    "PreconditionFailed",
+)
+
+
+class ScheduleRevisionConflict(RuntimeError):
+    """The schedules document changed before a conditional write completed."""
 
 
 @dataclass
@@ -325,26 +335,112 @@ def slot_key(channel: str, local_date: date, dow: int, assemble_at: str) -> str:
     return f"{channel}:{local_date.isoformat()}:{dow}:{assemble_at}"
 
 
-def load_schedules_document(client, bucket: str) -> dict[str, Any]:
+def load_schedules_document_with_revision(client, bucket: str) -> tuple[dict[str, Any], str | None]:
     try:
         resp = client.get_object(Bucket=bucket, Key=SCHEDULES_KEY)
-        return json.loads(resp["Body"].read().decode("utf-8"))
+        return json.loads(resp["Body"].read().decode("utf-8")), resp.get("ETag")
     except client.exceptions.ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound"):
-            return {"version": 1, "schedules": []}
+            return {"version": 1, "schedules": []}, None
         raise
 
 
-def save_schedules_document(client, bucket: str, doc: dict[str, Any]) -> None:
+def load_schedules_document(client, bucket: str) -> dict[str, Any]:
+    doc, _ = load_schedules_document_with_revision(client, bucket)
+    return doc
+
+
+def save_schedules_document(
+    client,
+    bucket: str,
+    doc: dict[str, Any],
+    *,
+    if_match: str | None = None,
+    if_none_match: bool = False,
+) -> str | None:
+    if if_match and if_none_match:
+        raise ValueError("if_match and if_none_match are mutually exclusive")
     doc["version"] = int(doc.get("version") or 1)
     doc["updated_at"] = datetime.now(timezone.utc).isoformat()
-    client.put_object(
-        Bucket=bucket,
-        Key=SCHEDULES_KEY,
-        Body=json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
-        ContentType="application/json",
+    request: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": SCHEDULES_KEY,
+        "Body": json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        "ContentType": "application/json",
+    }
+    if if_match:
+        request["IfMatch"] = if_match
+    elif if_none_match:
+        request["IfNoneMatch"] = "*"
+    try:
+        response = client.put_object(**request)
+    except client.exceptions.ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in _PRECONDITION_FAILURE_CODES:
+            raise ScheduleRevisionConflict("schedules document changed") from exc
+        raise
+    return response.get("ETag") if response else None
+
+
+def get_schedule_with_revision(
+    client,
+    bucket: str,
+    channel: str,
+) -> tuple[ChannelSchedule | None, str | None]:
+    """Read one schedule and the ETag of the exact document snapshot containing it."""
+    channel = channel.strip()
+    doc, revision = load_schedules_document_with_revision(client, bucket)
+    for item in doc.get("schedules") or []:
+        if isinstance(item, dict) and item.get("channel") == channel:
+            return ChannelSchedule.from_dict(item), revision
+    return None, revision
+
+
+def _replace_schedule_in_document(
+    doc: dict[str, Any],
+    schedule: ChannelSchedule,
+) -> None:
+    schedules = [ChannelSchedule.from_dict(s) for s in doc.get("schedules") or [] if isinstance(s, dict)]
+    replaced = False
+    for i, existing in enumerate(schedules):
+        if existing.channel == schedule.channel:
+            schedules[i] = schedule
+            replaced = True
+            break
+    if not replaced:
+        schedules.append(schedule)
+    schedules.sort(key=lambda s: s.channel.lower())
+    doc["schedules"] = [s.to_dict() for s in schedules]
+
+
+def upsert_schedule_if_revision(
+    client,
+    bucket: str,
+    schedule: ChannelSchedule,
+    *,
+    expected_revision: str | None = None,
+    create_if_absent: bool = False,
+) -> tuple[ChannelSchedule, str | None]:
+    """Conditionally update the shared schedules document and return its new ETag."""
+    if bool(expected_revision) == bool(create_if_absent):
+        raise ValueError("provide exactly one of expected_revision or create_if_absent")
+    ensure_schedule_upload_times(schedule)
+    doc, current_revision = load_schedules_document_with_revision(client, bucket)
+    if expected_revision:
+        if current_revision != expected_revision:
+            raise ScheduleRevisionConflict("schedules document changed")
+    elif current_revision is not None:
+        raise ScheduleRevisionConflict("schedules document already exists")
+    _replace_schedule_in_document(doc, schedule)
+    revision = save_schedules_document(
+        client,
+        bucket,
+        doc,
+        if_match=current_revision if expected_revision else None,
+        if_none_match=create_if_absent,
     )
+    return schedule, revision
 
 
 def list_schedules(client, bucket: str, *, persist_backfill: bool = False) -> list[ChannelSchedule]:
@@ -381,17 +477,7 @@ def get_schedule(client, bucket: str, channel: str) -> ChannelSchedule | None:
 def upsert_schedule(client, bucket: str, schedule: ChannelSchedule) -> ChannelSchedule:
     ensure_schedule_upload_times(schedule)
     doc = load_schedules_document(client, bucket)
-    schedules = [ChannelSchedule.from_dict(s) for s in doc.get("schedules") or [] if isinstance(s, dict)]
-    replaced = False
-    for i, existing in enumerate(schedules):
-        if existing.channel == schedule.channel:
-            schedules[i] = schedule
-            replaced = True
-            break
-    if not replaced:
-        schedules.append(schedule)
-    schedules.sort(key=lambda s: s.channel.lower())
-    doc["schedules"] = [s.to_dict() for s in schedules]
+    _replace_schedule_in_document(doc, schedule)
     save_schedules_document(client, bucket, doc)
     return schedule
 
