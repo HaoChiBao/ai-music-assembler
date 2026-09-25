@@ -125,14 +125,18 @@ class StartJobRequest(BaseModel):
     upload_schedule_publish: bool = Field(
         default=False,
         description=(
-            "When true with publish_at, register with YouTube publishAt (and upload_at). "
+            "When true, register with YouTube publishAt (and upload_at); if only upload_at "
+            "is supplied, it is also used as publish_at. "
             "When false with queue_youtube, register with upload_now + no_schedule so the "
             "uploader dispatches immediately using upload_privacy."
         ),
     )
     publish_at: str | None = Field(
         default=None,
-        description="RFC3339 UTC go-live time. Also used as upload_at when upload_at is omitted.",
+        description=(
+            "RFC3339 UTC go-live time. Also used as upload_at when upload_at is omitted; "
+            "when only upload_at is supplied for scheduled publishing, the same time is used here."
+        ),
     )
     upload_at: str | None = Field(
         default=None,
@@ -169,6 +173,14 @@ class StartJobRequest(BaseModel):
         if raw not in assembly_schedule.VALID_UPLOAD_PRIVACY:
             raise ValueError(f"upload_privacy must be one of {assembly_schedule.VALID_UPLOAD_PRIVACY}")
         return raw
+
+    @model_validator(mode="after")
+    def _default_publish_at_from_upload_at(self) -> StartJobRequest:
+        if self.upload_schedule_publish and not (self.publish_at or "").strip():
+            upload_at = (self.upload_at or "").strip()
+            if upload_at:
+                self.publish_at = upload_at
+        return self
 
 
 class StartExtendRequest(BaseModel):
