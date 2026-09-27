@@ -138,21 +138,15 @@ def upload_video_with_retry(
     on_retry: Callable[[int, int, BaseException], None] | None = None,
     **upload_kwargs,
 ) -> dict:
-    """Call :func:`upload_video`, retrying transient failures with linear backoff."""
+    """Upload once, retrying transient chunk requests on the same resumable session."""
     attempts = max(1, max_attempts)
-    last_error: BaseException | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return upload_video(video_path, **upload_kwargs)
-        except BaseException as e:
-            last_error = e
-            if attempt >= attempts or not is_transient_upload_error(e):
-                raise
-            if on_retry is not None:
-                on_retry(attempt, attempts, e)
-            time.sleep(retry_delay_sec * attempt)
-    assert last_error is not None
-    raise last_error
+    return upload_video(
+        video_path,
+        next_chunk_max_attempts=attempts,
+        next_chunk_retry_delay_sec=retry_delay_sec,
+        on_chunk_retry=on_retry,
+        **upload_kwargs,
+    )
 
 
 def get_credentials(client_secret: Path, token_path: Path, *, oauth_port: int = 8080):
@@ -194,6 +188,9 @@ def upload_video(
     publish_at: str | None = None,
     oauth_port: int = 8080,
     on_progress=None,
+    next_chunk_max_attempts: int = 1,
+    next_chunk_retry_delay_sec: float = 30.0,
+    on_chunk_retry: Callable[[int, int, BaseException], None] | None = None,
 ) -> dict:
     """Upload ``video_path`` (resumable) and optionally set a custom thumbnail.
 
@@ -236,8 +233,21 @@ def upload_video(
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
     response = None
+    chunk_attempt = 1
+    chunk_attempts = max(1, next_chunk_max_attempts)
     while response is None:
-        status, response = request.next_chunk()
+        try:
+            status, response = request.next_chunk()
+        except BaseException as e:
+            transient = is_transient_upload_error(e)
+            if chunk_attempt >= chunk_attempts or not transient:
+                raise
+            if on_chunk_retry is not None:
+                on_chunk_retry(chunk_attempt, chunk_attempts, e)
+            time.sleep(next_chunk_retry_delay_sec * chunk_attempt)
+            chunk_attempt += 1
+            continue
+        chunk_attempt = 1
         if status and on_progress:
             on_progress(status.progress())
     if on_progress:
