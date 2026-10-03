@@ -126,8 +126,14 @@ class StartJobRequest(BaseModel):
         default=False,
         description=(
             "When true with publish_at, register with YouTube publishAt (and upload_at). "
-            "When false with queue_youtube, register with upload_now + no_schedule so the "
-            "uploader dispatches immediately using upload_privacy."
+            "When false, leave the upload pending unless upload_now is explicitly true."
+        ),
+    )
+    upload_now: bool = Field(
+        default=False,
+        description=(
+            "When true with queue_youtube, register with uploader upload_now + no_schedule "
+            "so upload starts immediately using upload_privacy."
         ),
     )
     publish_at: str | None = Field(
@@ -675,17 +681,16 @@ def start_job(
     publish_at = (body.publish_at or "").strip() or None
     upload_at = (body.upload_at or "").strip() or None
     upload_now = False
-    if body.queue_youtube and body.upload_schedule_publish:
+    if body.queue_youtube and body.upload_now:
+        publish_at = None
+        upload_at = None
+        upload_now = True
+    elif body.queue_youtube and body.upload_schedule_publish:
         if not publish_at and not upload_at:
             raise HTTPException(
                 status_code=400,
                 detail="publish_at or upload_at is required when upload_schedule_publish is true",
             )
-    elif body.queue_youtube and not body.upload_schedule_publish:
-        # Post immediately: uploader register with upload_now + no_schedule.
-        publish_at = None
-        upload_at = None
-        upload_now = True
     elif not body.upload_schedule_publish:
         publish_at = None
         upload_at = None
@@ -6544,6 +6549,7 @@ document.getElementById('runBtn').onclick = async () => {
     if (queueYoutube) {
       payload.upload_privacy = document.getElementById('runUploadPrivacy').value || 'private';
       payload.upload_schedule_publish = schedulePublish;
+      payload.upload_now = timing === 'immediate';
       payload.upload_tags = document.getElementById('runUploadTags').value || '';
       payload.upload_category_id = document.getElementById('runUploadCategory').value || '10';
       payload.upload_made_for_kids = document.getElementById('runUploadMadeForKids').checked;
