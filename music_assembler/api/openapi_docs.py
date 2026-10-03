@@ -253,10 +253,10 @@ ENDPOINT_DOCS: dict[str, dict[str, Any]] = {
             "By default ``queue_youtube`` is **true**: each finished video is registered on the "
             "youtube-uploader pending queue after R2 upload (worker needs ``UPLOADER_API_URL`` + "
             "``UPLOADER_API_KEY``). Set ``queue_youtube: false`` to skip.\n\n"
-            "Optional YouTube flags: ``upload_privacy``, ``upload_schedule_publish``, ``publish_at`` / "
+            "Optional YouTube flags: ``upload_privacy``, ``upload_schedule_publish``, ``upload_now``, ``publish_at`` / "
             "``upload_at`` (RFC3339 UTC), ``upload_tags``, ``upload_category_id``, ``upload_made_for_kids``. "
-            "When ``upload_schedule_publish`` is false, the worker registers with uploader "
-            "``upload_now`` + ``no_schedule`` so upload starts as soon as assembly finishes."
+            "Set ``upload_now: true`` to register with uploader ``upload_now`` + ``no_schedule`` "
+            "so upload starts as soon as assembly finishes. Otherwise an unscheduled upload remains pending."
         ),
         "request_example": {
             "category": "korean",

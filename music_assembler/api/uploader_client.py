@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -193,14 +192,6 @@ def register_youtube_upload(
     if made_for_kids is not None:
         payload["made_for_kids"] = bool(made_for_kids)
 
-    # region agent log
-    try:
-        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _debug_log:
-            _debug_log.write(json.dumps({"hypothesisId": "D", "location": "music_assembler/api/uploader_client.py:register_youtube_upload:payload", "message": "Built uploader register mode fields", "data": {"uploadNow": payload.get("upload_now") is True, "noSchedule": payload.get("no_schedule") is True, "publishAtPresent": "publish_at" in payload, "uploadAtPresent": "upload_at" in payload, "privacyPresent": "privacy" in payload}, "timestamp": int(time.time() * 1000)}) + "\n")
-    except OSError:
-        pass
-    # endregion
-
     url = f"{base}/v1/channels/{channel_ref}/jobs/register"
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -215,15 +206,7 @@ def register_youtube_upload(
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            # region agent log
-            try:
-                with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _debug_log:
-                    _debug_log.write(json.dumps({"hypothesisId": "D", "location": "music_assembler/api/uploader_client.py:register_youtube_upload:response", "message": "Uploader register completed", "data": {"status": str(result.get("status") or ""), "uploadNowRequested": upload_now, "noScheduleRequested": no_schedule}, "timestamp": int(time.time() * 1000)}) + "\n")
-            except OSError:
-                pass
-            # endregion
-            return result
+            return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"uploader register HTTP {exc.code}: {detail}") from exc

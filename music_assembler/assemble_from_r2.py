@@ -16,7 +16,6 @@ pending queue after R2 upload (needs ``UPLOADER_API_URL`` + ``UPLOADER_API_KEY``
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
@@ -278,13 +277,6 @@ def _maybe_queue_youtube_upload(
     upload_at = os.environ.get("ASSEMBLY_UPLOAD_AT", "").strip() or None
     upload_now_raw = os.environ.get("ASSEMBLY_UPLOAD_NOW", "").strip().lower()
     upload_now = upload_now_raw in ("1", "true", "yes", "on")
-    # region agent log
-    try:
-        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _debug_log:
-            _debug_log.write(json.dumps({"hypothesisId": "C", "location": "music_assembler/assemble_from_r2.py:_maybe_queue_youtube_upload:env", "message": "Resolved worker YouTube environment", "data": {"enabled": enabled, "uploadNowRawPresent": bool(upload_now_raw), "resolvedUploadNow": upload_now, "publishAtPresent": bool(publish_at), "uploadAtPresent": bool(upload_at)}, "timestamp": int(datetime.now().timestamp() * 1000)}) + "\n")
-    except OSError:
-        pass
-    # endregion
     # Late-assembly guard: if the planned go-live/upload time already passed while
     # encoding, bump to a few minutes after finish so Cloud Scheduler can still arm.
     try:

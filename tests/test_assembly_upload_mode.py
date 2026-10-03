@@ -1,4 +1,4 @@
-"""Temporary diagnostics for the assembly API's default YouTube dispatch mode."""
+"""Regression coverage for assembly API YouTube upload modes."""
 
 from types import SimpleNamespace
 
@@ -7,12 +7,9 @@ from music_assembler import assemble_from_r2
 from music_assembler.api import gcp_jobs
 
 
-def test_omitted_upload_mode_becomes_immediate(monkeypatch):
+def _start_job_kwargs(monkeypatch, **payload):
     captured: dict = {}
-    body = app_module.StartJobRequest(channel="nappabeats", images_folder="korean")
-    assert "queue_youtube" not in body.model_fields_set
-    assert "upload_schedule_publish" not in body.model_fields_set
-
+    body = app_module.StartJobRequest(channel="nappabeats", images_folder="korean", **payload)
     monkeypatch.setattr(app_module, "_r2", lambda: (object(), "bucket"))
     monkeypatch.setattr(app_module, "_assert_background_folder_exists", lambda *args: None)
     monkeypatch.setattr(app_module, "_invalidate_category_cache", lambda *args: None)
@@ -29,7 +26,34 @@ def test_omitted_upload_mode_becomes_immediate(monkeypatch):
         None,
         SimpleNamespace(default_category="korean"),
     )
+    return body, captured
 
+
+def test_omitted_upload_mode_remains_queue_only(monkeypatch):
+    body, captured = _start_job_kwargs(monkeypatch)
+    assert "queue_youtube" not in body.model_fields_set
+    assert "upload_schedule_publish" not in body.model_fields_set
+    assert "upload_now" not in body.model_fields_set
+
+    assert captured["queue_youtube"] is True
+    assert captured["upload_now"] is False
+    assert captured["publish_at"] is None
+    assert captured["upload_at"] is None
+
+
+def test_explicit_unscheduled_mode_remains_queue_only(monkeypatch):
+    body, captured = _start_job_kwargs(
+        monkeypatch,
+        queue_youtube=True,
+        upload_schedule_publish=False,
+    )
+    assert body.upload_now is False
+    assert captured["upload_now"] is False
+
+
+def test_explicit_upload_now_requests_immediate_dispatch(monkeypatch):
+    body, captured = _start_job_kwargs(monkeypatch, upload_now=True)
+    assert body.upload_now is True
     assert captured["queue_youtube"] is True
     assert captured["upload_now"] is True
     assert captured["publish_at"] is None
@@ -65,7 +89,7 @@ def test_immediate_mode_reaches_cloud_run_and_worker(monkeypatch):
     monkeypatch.setattr(
         assemble_from_r2,
         "uploader_credentials_from_env",
-        lambda: ("https://uploader.invalid", "diagnostic-key"),
+        lambda: ("https://uploader.invalid", "test-key"),
     )
 
     def fake_register(**kwargs):
@@ -80,7 +104,7 @@ def test_immediate_mode_reaches_cloud_run_and_worker(monkeypatch):
         channel="nappabeats",
         basename="mv_test",
         result={
-            "youtube_metadata": SimpleNamespace(title="Diagnostic title", description=""),
+            "youtube_metadata": SimpleNamespace(title="Test title", description=""),
             "thumbnail_png": None,
         },
         no_upload=False,
