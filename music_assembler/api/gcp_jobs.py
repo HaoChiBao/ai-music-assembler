@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -240,6 +241,13 @@ def start_assembly_job(
                 value="true" if upload_made_for_kids else "false",
             )
         )
+    # region agent log
+    try:
+        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _debug_log:
+            _debug_log.write(json.dumps({"hypothesisId": "C", "location": "music_assembler/api/gcp_jobs.py:start_assembly_job:before-run", "message": "Built YouTube-related Cloud Run overrides", "data": {"queueYoutube": queue_youtube, "uploadNowArgument": upload_now, "uploadNowEnvPresent": any(item.name == "ASSEMBLY_UPLOAD_NOW" for item in env), "publishAtEnvPresent": any(item.name == "ASSEMBLY_PUBLISH_AT" for item in env), "uploadAtEnvPresent": any(item.name == "ASSEMBLY_UPLOAD_AT" for item in env)}, "timestamp": int(time.time() * 1000)}) + "\n")
+    except OSError:
+        pass
+    # endregion
     return _run_cloud_job(
         settings,
         job_resource=settings.job_resource,

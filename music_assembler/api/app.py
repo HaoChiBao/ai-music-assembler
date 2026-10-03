@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import uuid
@@ -689,6 +690,14 @@ def start_job(
     elif not body.upload_schedule_publish:
         publish_at = None
         upload_at = None
+
+    # region agent log
+    try:
+        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _debug_log:
+            _debug_log.write(json.dumps({"hypothesisId": "A,B", "location": "music_assembler/api/app.py:start_job:resolved-youtube-mode", "message": "Resolved assembly request YouTube mode", "data": {"queueYoutube": body.queue_youtube, "schedulePublish": body.upload_schedule_publish, "scheduleFieldExplicit": "upload_schedule_publish" in body.model_fields_set, "resolvedUploadNow": upload_now, "publishAtPresent": bool(publish_at), "uploadAtPresent": bool(upload_at)}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+    except OSError:
+        pass
+    # endregion
 
     jobs: list[dict[str, Any]] = []
     assigned_gcp: set[str] = set()
