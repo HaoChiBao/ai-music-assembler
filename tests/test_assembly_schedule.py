@@ -204,13 +204,15 @@ def test_start_scheduled_assembly_uses_template_thumbnail_default(monkeypatch):
     monkeypatch.setattr(assembly_schedule, "patch_meta_gcp_execution_id", MagicMock())
     monkeypatch.setattr(assembly_schedule, "write_ledger", MagicMock())
 
-    schedule = ChannelSchedule(
-        channel="nappabeats",
-        timezone="UTC",
-        category="korean",
-        images_folder="shorts",
-        template_id="shorts_vertical",
-        thumbnail_text=None,
+    schedule = ChannelSchedule.from_dict(
+        {
+            "channel": "nappabeats",
+            "timezone": "UTC",
+            "category": "korean",
+            "images_folder": "shorts",
+            "template_id": "shorts_vertical",
+            "thumbnail_text": None,
+        }
     )
     slot = {
         "slot_key": "nappabeats:2026-07-05:0:10:00",
