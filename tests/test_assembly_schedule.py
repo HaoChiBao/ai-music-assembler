@@ -193,6 +193,46 @@ def test_preview_schedule_returns_future_slots():
     assert upcoming[0]["assemble_at"] == "10:00"
 
 
+def test_start_scheduled_assembly_uses_template_thumbnail_default(monkeypatch):
+    from music_assembler.api import assembly_schedule
+
+    start_job = MagicMock(return_value={"gcp_execution_id": "gcp-1"})
+    monkeypatch.setattr(assembly_schedule.gcp_jobs, "start_assembly_job", start_job)
+    monkeypatch.setattr(assembly_schedule, "write_meta_json", MagicMock())
+    monkeypatch.setattr(assembly_schedule, "_patch_meta_schedule_slot", MagicMock())
+    monkeypatch.setattr(assembly_schedule, "write_progress_json", MagicMock())
+    monkeypatch.setattr(assembly_schedule, "patch_meta_gcp_execution_id", MagicMock())
+    monkeypatch.setattr(assembly_schedule, "write_ledger", MagicMock())
+
+    schedule = ChannelSchedule(
+        channel="nappabeats",
+        timezone="UTC",
+        category="korean",
+        images_folder="shorts",
+        template_id="shorts_vertical",
+        thumbnail_text=None,
+    )
+    slot = {
+        "slot_key": "nappabeats:2026-07-05:0:10:00",
+        "local_date": "2026-07-05",
+        "day_name": "Sunday",
+        "assemble_at": "10:00",
+        "upload_at": "11:00",
+    }
+
+    assembly_schedule.start_scheduled_assembly(
+        MagicMock(),
+        "bucket",
+        MagicMock(default_category="korean"),
+        schedule,
+        slot,
+        new_execution_id=lambda: "asm-1",
+    )
+
+    assert start_job.call_args.kwargs["thumbnail_text"] == "SHORTS"
+    assert assembly_schedule.write_meta_json.call_args.kwargs["thumbnail_text"] == "SHORTS"
+
+
 def test_upsert_schedule_roundtrip():
     client = MagicMock()
     bucket = "b"
