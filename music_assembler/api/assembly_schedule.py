@@ -15,6 +15,7 @@ from music_assembler.api.progress_store import patch_meta_gcp_execution_id, writ
 from music_assembler.api.r2_catalog import category_inventory
 from music_assembler.extend_from_r2 import count_pending_r2_sources
 from music_assembler.r2_storage import r2_config_from_env
+from music_assembler.video_templates import get_template
 
 SCHEDULES_KEY = "schedules/schedules.json"
 SCHEDULE_RUNS_PREFIX = "schedules/runs/"
@@ -710,6 +711,10 @@ def start_scheduled_assembly(
 ) -> dict[str, Any]:
     category = _category(schedule, settings)
     images_folder = _images_folder(schedule, settings)
+    template = get_template(schedule.template_id)
+    thumbnail_text = schedule.thumbnail_text
+    if thumbnail_text is None and template.thumbnail_strategy != "none":
+        thumbnail_text = template.default_thumbnail_text
     execution_id = new_execution_id()
     write_meta_json(
         client,
@@ -721,7 +726,7 @@ def start_scheduled_assembly(
         template_id=schedule.template_id,
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
-        thumbnail_text=schedule.thumbnail_text,
+        thumbnail_text=thumbnail_text,
         job_type="assembly",
     )
     _patch_meta_schedule_slot(client, bucket, execution_id, slot["slot_key"])
@@ -744,7 +749,7 @@ def start_scheduled_assembly(
         channel=schedule.channel,
         images_folder=images_folder,
         template_id=schedule.template_id,
-        thumbnail_text=schedule.thumbnail_text,
+        thumbnail_text=thumbnail_text,
         duration_min=schedule.duration_min,
         variance_min=schedule.variance_min,
         queue_youtube=schedule.queue_youtube,
