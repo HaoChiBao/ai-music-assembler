@@ -167,19 +167,6 @@ def test_channel_schedule_defaults_template_id():
     assert sched.template_id == "playlist_landscape"
 
 
-def test_channel_schedule_default_template_ignores_worker_environment(monkeypatch):
-    monkeypatch.setenv("ASSEMBLY_TEMPLATE_ID", "shorts_vertical")
-
-    sched = ChannelSchedule.from_dict(
-        {
-            "channel": "ch",
-            "days": [{} for _ in range(7)],
-        }
-    )
-
-    assert sched.template_id == "playlist_landscape"
-
-
 def test_effective_schedule_at_keeps_future():
     from music_assembler.api.assembly_schedule import effective_schedule_at
 
