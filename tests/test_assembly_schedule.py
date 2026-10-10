@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from music_assembler.api import assembly_schedule as schedule_module
 from music_assembler.api.assembly_schedule import (
     ChannelSchedule,
     DaySlot,
@@ -72,6 +73,66 @@ def test_due_slots_skips_disabled_day():
     )
     now = datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc)
     assert due_slots(sched, now_utc=now) == []
+
+
+def test_auto_extend_uses_extend_execution_id(monkeypatch):
+    sched = ChannelSchedule(
+        channel="ch",
+        timezone="UTC",
+        auto_extend=True,
+        days=[DaySlot(enabled=True, assemble_at="09:00")] + [DaySlot() for _ in range(6)],
+    )
+    monkeypatch.setattr(schedule_module, "list_schedules", lambda *_args, **_kwargs: [sched])
+    monkeypatch.setattr(schedule_module, "read_ledger", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        schedule_module,
+        "evaluate_resources",
+        lambda *_args, **_kwargs: {
+            "ready": False,
+            "extend_pending": 1,
+            "blockers": ["low_backgrounds", "extend_recommended"],
+            "category": "korean",
+        },
+    )
+    start_extend = MagicMock(return_value={"gcp_execution_id": "gcp-extend"})
+
+    result = schedule_module.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "asm_wrong_namespace",
+        new_extend_execution_id=lambda: "ext_schedule",
+        start_extend_fn=start_extend,
+    )
+
+    assert result["results"][0]["extend_execution_id"] == "ext_schedule"
+    assert start_extend.call_args.kwargs["execution_id"] == "ext_schedule"
+
+
+def test_scheduled_extend_persists_gcp_execution_id(monkeypatch):
+    from music_assembler.api import app as app_module
+
+    monkeypatch.setattr(app_module, "write_meta_json", MagicMock())
+    monkeypatch.setattr(app_module, "write_progress_json", MagicMock())
+    start_extend = MagicMock(return_value={"gcp_execution_id": "gcp-extend"})
+    monkeypatch.setattr(app_module.gcp_jobs, "start_extend_job", start_extend)
+    patch_meta = MagicMock()
+    monkeypatch.setattr(app_module, "patch_meta_gcp_execution_id", patch_meta)
+    client = MagicMock()
+
+    result = app_module._start_extend_for_schedule(
+        client,
+        "bucket",
+        MagicMock(),
+        execution_id="ext_schedule",
+        category="korean",
+        max_images=3,
+        force=False,
+    )
+
+    assert result["gcp_execution_id"] == "gcp-extend"
+    patch_meta.assert_called_once_with(client, "bucket", "ext_schedule", "gcp-extend")
 
 
 def test_ledger_is_terminal():

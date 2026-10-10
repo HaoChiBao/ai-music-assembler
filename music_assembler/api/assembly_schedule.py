@@ -784,6 +784,7 @@ def run_due_schedules(
     window_minutes: int = DEFAULT_WINDOW_MINUTES,
     dry_run: bool = False,
     new_execution_id,
+    new_extend_execution_id,
     start_extend_fn,
 ) -> dict[str, Any]:
     """Evaluate all schedules; start assembly or record skip/defer."""
@@ -800,7 +801,7 @@ def run_due_schedules(
                     if dry_run:
                         results.append({"slot_key": slot["slot_key"], "action": "would_defer_extend", "resources": resources})
                         continue
-                    ext_id = new_execution_id()
+                    ext_id = new_extend_execution_id()
                     try:
                         start_extend_fn(client, bucket, settings, execution_id=ext_id, category=resources["category"], max_images=3, force=False)
                         write_ledger(
