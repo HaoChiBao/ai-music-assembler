@@ -872,13 +872,17 @@ def _start_extend_for_schedule(
         status="running",
         extra={"job_type": "extend", "source": "schedule"},
     )
-    return gcp_jobs.start_extend_job(
+    result = gcp_jobs.start_extend_job(
         settings,
         execution_id=execution_id,
         category=category,
         max_images=max_images,
         force=force,
     )
+    gcp_id = result.get("gcp_execution_id")
+    if gcp_id:
+        patch_meta_gcp_execution_id(client, bucket, execution_id, gcp_id)
+    return result
 
 
 @app.get("/v1/schedules")
@@ -1053,6 +1057,7 @@ def cron_run_schedules(
         window_minutes=window_minutes,
         dry_run=dry_run,
         new_execution_id=_new_execution_id,
+        new_extend_execution_id=_new_extend_id,
         start_extend_fn=_extend,
     )
 
