@@ -664,6 +664,8 @@ def start_job(
     duration_min = body.duration_min if body.duration_min is not None else template.default_duration_min
     variance_min = body.variance_min if body.variance_min is not None else template.default_variance_min
     thumbnail_text = body.thumbnail_text
+    if thumbnail_text is not None and not thumbnail_text.strip():
+        thumbnail_text = None
     if thumbnail_text is None and template.thumbnail_strategy != "none":
         thumbnail_text = template.default_thumbnail_text
     client, bucket = _r2()
