@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from music_assembler.video_templates import (
@@ -100,3 +102,30 @@ def test_list_templates_stable_order():
     a = [t.id for t in list_templates()]
     b = [t.id for t in list_templates()]
     assert a == b
+
+
+def test_manual_job_blank_thumbnail_uses_selected_template_default(monkeypatch):
+    from music_assembler.api import app as app_module
+
+    start_assembly = MagicMock(return_value={"status": "starting"})
+    monkeypatch.setattr(app_module, "_r2", lambda: (MagicMock(), "bucket"))
+    monkeypatch.setattr(app_module, "_assert_background_folder_exists", MagicMock())
+    monkeypatch.setattr(app_module, "_invalidate_category_cache", MagicMock())
+    monkeypatch.setattr(app_module, "_new_execution_id", lambda: "asm-test")
+    monkeypatch.setattr(app_module, "write_meta_json", MagicMock())
+    monkeypatch.setattr(app_module, "write_progress_json", MagicMock())
+    monkeypatch.setattr(app_module.gcp_jobs, "start_assembly_job", start_assembly)
+
+    app_module.start_job(
+        app_module.StartJobRequest(
+            channel="nappabeats",
+            images_folder="shorts",
+            template_id="shorts_vertical",
+            thumbnail_text="",
+            queue_youtube=False,
+        ),
+        settings=MagicMock(default_category="korean"),
+    )
+
+    assert start_assembly.call_args.kwargs["thumbnail_text"] == "SHORTS"
+    assert app_module.write_meta_json.call_args.kwargs["thumbnail_text"] == "SHORTS"
