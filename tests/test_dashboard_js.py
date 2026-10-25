@@ -164,3 +164,27 @@ def test_schedule_subtab_switch_preserves_unsaved_editor_state():
 
     assert "loadScheduleOverview()" in js[start:end]
     assert "loadScheduleEditor(" not in js[start:end]
+
+
+def test_schedule_thumbnail_falls_back_to_selected_template(tmp_path):
+    js = _dashboard_script()
+    start = js.index("function findVideoTemplate(id)")
+    end = js.index("\nfunction selectedTemplateId", start)
+    helpers = js[start:end]
+    harness = f"""
+const DEFAULT_TEMPLATE_ID = 'playlist_landscape';
+const VIDEO_TEMPLATES = [
+  {{id: 'playlist_landscape', default_thumbnail_text: 'PLAYLIST'}},
+  {{id: 'shorts_vertical', default_thumbnail_text: 'SHORTS'}},
+];
+{helpers}
+if (scheduleThumbnailText({{thumbnail_text: null}}, 'shorts_vertical') !== 'SHORTS') {{
+  throw new Error('missing Shorts thumbnail did not use the selected template default');
+}}
+if (scheduleThumbnailText({{thumbnail_text: 'CUSTOM'}}, 'shorts_vertical') !== 'CUSTOM') {{
+  throw new Error('custom thumbnail text was not preserved');
+}}
+"""
+    path = tmp_path / "dashboard-schedule-thumbnail-test.js"
+    path.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(path)], check=True)
