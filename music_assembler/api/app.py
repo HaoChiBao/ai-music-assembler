@@ -4396,6 +4396,11 @@ function findVideoTemplate(id) {
   const tid = (id || DEFAULT_TEMPLATE_ID).trim();
   return VIDEO_TEMPLATES.find((t) => t.id === tid) || VIDEO_TEMPLATES[0] || null;
 }
+function scheduleThumbnailText(data, templateId) {
+  const saved = data?.thumbnail_text;
+  if (typeof saved === 'string' && saved.trim()) return saved;
+  return findVideoTemplate(templateId)?.default_thumbnail_text || '';
+}
 function selectedTemplateId(inputId) {
   const el = document.getElementById(inputId);
   const tid = (el?.value || DEFAULT_TEMPLATE_ID).trim();
@@ -5850,7 +5855,7 @@ function fillScheduleForm(data) {
     });
     updateScheduleSummary();
   });
-  document.getElementById('scheduleThumb').value = data.thumbnail_text || '__DEFAULT_THUMBNAIL__';
+  document.getElementById('scheduleThumb').value = scheduleThumbnailText(data, scheduleTemplateId);
   document.getElementById('scheduleDuration').value = data.duration_min ?? findVideoTemplate(scheduleTemplateId)?.default_duration_min ?? 90;
   document.getElementById('scheduleVariance').value = data.variance_min ?? findVideoTemplate(scheduleTemplateId)?.default_variance_min ?? 15;
   document.getElementById('scheduleQueueYoutube').checked = data.queue_youtube !== false;
