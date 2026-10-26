@@ -25,9 +25,14 @@ def require_api_key(
     request: Request,
     header_key: str | None = Security(_api_key_header),
 ) -> None:
-    """Require ``X-API-Key`` when ``ASSEMBLY_API_KEY`` is configured."""
+    """Require ``X-API-Key`` and fail closed when other auth is configured."""
     settings = ApiSettings.from_env()
     if not settings.api_key:
+        if settings.dashboard_password:
+            raise HTTPException(
+                status_code=503,
+                detail="API key authentication is not configured",
+            )
         return
     token = _extract_api_key(request, header_key)
     if token != settings.api_key:

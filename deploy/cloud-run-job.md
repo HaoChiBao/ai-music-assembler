@@ -62,7 +62,7 @@ gcloud scheduler jobs create http music-assemble-daily \
 
 ### Assembly health check (recommended)
 
-The control API exposes ``GET`` or ``POST /v1/cron/assembly-health`` (``X-API-Key``). It audits recent ``asm_*`` jobs, flags “succeeded” runs with no MP4 on R2, and can rewrite false successes when ``repair=true``.
+The control API exposes ``POST /v1/cron/assembly-health`` (``X-API-Key``). It audits recent ``asm_*`` jobs, flags “succeeded” runs with no MP4 on R2, and can rewrite false successes when ``repair=true``.
 
 ```bash
 API_URL="https://music-assembly-api-17161979106.northamerica-northeast2.run.app"
@@ -85,7 +85,7 @@ Returns HTTP ``207`` when issues are found (useful for alerting).
 
 ### Per-channel assembly schedules (YAN-46)
 
-The control API exposes ``GET`` or ``POST /v1/cron/run-schedules`` (``X-API-Key``). Every **15 minutes** it evaluates per-channel schedules stored in R2 ``schedules/schedules.json``, matches due slots in each channel's timezone, runs pre-flight resource checks, and starts ``music-assemble`` jobs with idempotency via ``schedules/runs/{slot_key}.json``.
+The control API exposes ``POST /v1/cron/run-schedules`` (``X-API-Key``). Every **15 minutes** it evaluates per-channel schedules stored in R2 ``schedules/schedules.json``, matches due slots in each channel's timezone, runs pre-flight resource checks, and starts ``music-assemble`` jobs with idempotency via ``schedules/runs/{slot_key}.json``.
 
 Configure schedules in the dashboard **Schedule** tab or via ``PUT /v1/schedules/{channel}``.
 
@@ -101,7 +101,12 @@ gcloud scheduler jobs create http assembly-run-schedules \
   --headers "X-API-Key=YOUR_ASSEMBLY_API_KEY"
 ```
 
-Dry-run (no jobs started): ``GET /v1/cron/run-schedules?dry_run=true``
+Dry-run (no jobs started):
+
+```bash
+curl -X POST "${API_URL}/v1/cron/run-schedules?dry_run=true" \
+  -H "X-API-Key: YOUR_ASSEMBLY_API_KEY"
+```
 
 The legacy ``music-assemble-daily`` job (direct Cloud Run Job HTTP trigger at 02:00 UTC) is superseded by this dispatcher — schedules can specify per-day local times instead of a single UTC cron.
 

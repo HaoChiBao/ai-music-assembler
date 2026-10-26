@@ -23,6 +23,8 @@ Most ``/v1/*`` routes accept **either**:
 - **`X-API-Key`** header (scripts, curl, automation) when ``ASSEMBLY_API_KEY`` is set, or
 - **Dashboard session cookie** after ``POST /v1/dashboard/login`` (browser UI).
 
+Cron mutation routes under ``/v1/cron/*`` are POST-only and require ``X-API-Key``.
+
 Public routes: ``GET /health``, ``GET /v1/version``, ``GET /v1/capabilities``, ``POST /v1/dashboard/login``.
 
 ## Job IDs

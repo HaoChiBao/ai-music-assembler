@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from music_assembler import __version__
 from music_assembler.assemble_options import normalize_channel
-from music_assembler.api.auth import require_api_auth
+from music_assembler.api.auth import require_api_auth, require_api_key
 from music_assembler.api.config import ApiSettings
 from music_assembler.api.dashboard_auth import (
     clear_dashboard_session,
@@ -596,7 +596,6 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/video-templates",
             "GET /v1/updates",
             "GET /v1/version",
-            "GET /v1/cron/assembly-health",
             "POST /v1/cron/assembly-health",
             "GET /v1/schedules",
             "GET /v1/schedules/overview",
@@ -607,7 +606,6 @@ def capabilities(settings: ApiSettings = Depends(_settings)) -> dict[str, Any]:
             "GET /v1/schedules/runs",
             "GET /v1/schedules/{channel}/runs",
             "DELETE /v1/schedules/runs/{slot_key}",
-            "GET /v1/cron/run-schedules",
             "POST /v1/cron/run-schedules",
         ],
     }
@@ -824,14 +822,13 @@ def list_r2_runs(
 
 
 @app.post("/v1/cron/assembly-health")
-@app.get("/v1/cron/assembly-health")
 def cron_assembly_health(
     limit: int = Query(default=30, ge=1, le=100),
     repair: bool = Query(
         default=True,
         description="Rewrite false succeeded jobs on R2 when output video is missing",
     ),
-    _auth: None = Depends(require_api_auth),
+    _auth: None = Depends(require_api_key),
     settings: ApiSettings = Depends(_settings),
 ) -> JSONResponse:
     """Audit recent assembly jobs (intended for Cloud Scheduler every few hours)."""
@@ -1025,11 +1022,10 @@ def clear_schedule_run(
 
 
 @app.post("/v1/cron/run-schedules")
-@app.get("/v1/cron/run-schedules")
 def cron_run_schedules(
     dry_run: bool = Query(default=False),
     window_minutes: int = Query(default=assembly_schedule.DEFAULT_WINDOW_MINUTES, ge=5, le=60),
-    _auth: None = Depends(require_api_auth),
+    _auth: None = Depends(require_api_key),
     settings: ApiSettings = Depends(_settings),
 ) -> dict[str, Any]:
     """Evaluate per-channel schedules and start assembly jobs (Cloud Scheduler every 15m)."""
