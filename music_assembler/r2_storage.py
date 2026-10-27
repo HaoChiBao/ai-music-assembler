@@ -419,10 +419,7 @@ def retire_claimed_pre_processed_on_r2(
     dest_key = f"{_normalize_prefix(used_pre_processed_prefix)}{filename}"
     if not object_exists(client, bucket, in_flight):
         return object_exists(client, bucket, dest_key)
-    if object_exists(client, bucket, dest_key):
-        client.delete_object(Bucket=bucket, Key=in_flight)
-    else:
-        copy_then_delete_object(client, bucket, in_flight, dest_key)
+    copy_then_delete_object(client, bucket, in_flight, dest_key)
     return object_exists(client, bucket, dest_key) and not object_exists(client, bucket, in_flight)
 
 

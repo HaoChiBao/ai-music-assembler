@@ -9,6 +9,7 @@ from music_assembler.r2_storage import (
     R2Config,
     claim_pre_processed_on_r2,
     list_claimable_pre_processed_keys,
+    retire_claimed_pre_processed_on_r2,
 )
 
 
@@ -68,6 +69,31 @@ class PreProcessedClaimTests(unittest.TestCase):
                 execution_id="ext_test",
             )
         self.assertIsNone(claimed)
+
+    def test_retire_overwrites_stale_used_source(self) -> None:
+        cfg = _cfg()
+        client = MagicMock()
+        in_flight = f"{cfg.pre_processed_prefix}in-flight/ext_test/photo.jpg"
+        used = f"{cfg.used_pre_processed_prefix}photo.jpg"
+
+        with patch(
+            "music_assembler.r2_storage.object_exists",
+            side_effect=[True, True, False],
+        ), patch(
+            "music_assembler.r2_storage.copy_then_delete_object",
+        ) as move:
+            retired = retire_claimed_pre_processed_on_r2(
+                client,
+                cfg.bucket,
+                pre_processed_prefix=cfg.pre_processed_prefix,
+                used_pre_processed_prefix=cfg.used_pre_processed_prefix,
+                execution_id="ext_test",
+                filename="photo.jpg",
+            )
+
+        self.assertTrue(retired)
+        move.assert_called_once_with(client, cfg.bucket, in_flight, used)
+        client.delete_object.assert_not_called()
 
 
 if __name__ == "__main__":
