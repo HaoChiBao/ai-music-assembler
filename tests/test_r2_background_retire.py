@@ -128,6 +128,31 @@ class TestClaimAndRetire(unittest.TestCase):
         self.assertFalse(check["in_pool"])
         self.assertFalse(check["in_flight"])
 
+    def test_retire_replaces_stale_used_object_before_deleting_claim(self) -> None:
+        flight = in_flight_key(IMAGES, EXEC, FILE)
+        used = f"{USED}{FILE}"
+        client = _FakeClient({flight, used})
+        _patch_exists(client)
+
+        ok = retire_claimed_background_on_r2(
+            client,  # type: ignore[arg-type]
+            BUCKET,
+            images_prefix=IMAGES,
+            used_images_prefix=USED,
+            execution_id=EXEC,
+            filename=FILE,
+        )
+
+        self.assertTrue(ok)
+        client.copy_object.assert_called_once_with(
+            Bucket=BUCKET,
+            CopySource={"Bucket": BUCKET, "Key": flight},
+            Key=used,
+            MetadataDirective="COPY",
+        )
+        self.assertNotIn(flight, client._keys)
+        self.assertIn(used, client._keys)
+
     def test_retire_from_pool_without_claim(self) -> None:
         pool = f"{IMAGES}{FILE}"
         client = _FakeClient({pool})
