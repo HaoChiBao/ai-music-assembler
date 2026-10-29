@@ -18,6 +18,32 @@ _R2_TRUST_PCT = 12.0
 _TERMINAL_R2 = frozenset({"succeeded", "failed", "cancelled"})
 
 
+def _channel_from_run(
+    run: dict[str, Any],
+    *,
+    progress: dict[str, Any] | None = None,
+    preserve_invalid: bool = False,
+) -> str | None:
+    """Return the first valid stored channel, optionally retaining legacy text."""
+    prog = (run.get("progress") or {}) if progress is None else progress
+    first_invalid: str | None = None
+    for candidate in (run.get("channel"), prog.get("channel")):
+        if not isinstance(candidate, str):
+            continue
+        raw = candidate.strip()
+        if not raw:
+            continue
+        try:
+            normalized = normalize_channel(raw)
+        except ValueError:
+            if first_invalid is None:
+                first_invalid = raw
+            continue
+        if normalized:
+            return normalized
+    return first_invalid if preserve_invalid else None
+
+
 def _assembly_output_verified(
     client,
     bucket: str,
@@ -26,17 +52,14 @@ def _assembly_output_verified(
 ) -> bool:
     if not prog or prog.get("status") != "succeeded":
         return False
-    channel = run.get("channel") or prog.get("channel")
+    channel = _channel_from_run(run, progress=prog)
     video_id = prog.get("video_id")
     if not channel or not video_id:
-        return False
-    ch = normalize_channel(str(channel))
-    if not ch:
         return False
     return object_exists(
         client,
         bucket,
-        assembly_video_object_key(ch, str(video_id)),
+        assembly_video_object_key(channel, str(video_id)),
     )
 
 
@@ -151,11 +174,7 @@ def _normalize_from_run(run: dict[str, Any]) -> dict[str, Any]:
     status = prog.get("status") or "running"
     updated_at = prog.get("updated_at")
     created_at = run.get("created_at")
-    channel = run.get("channel") or prog.get("channel")
-    if isinstance(channel, str):
-        channel = normalize_channel(channel) or channel.strip() or None
-    else:
-        channel = None
+    channel = _channel_from_run(run, preserve_invalid=True)
     video_id = prog.get("video_id")
     if isinstance(video_id, str):
         video_id = video_id.strip() or None

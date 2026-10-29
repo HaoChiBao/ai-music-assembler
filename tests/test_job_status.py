@@ -118,6 +118,81 @@ def test_reconcile_includes_ops_detail_fields():
     assert row["images_folder"] == "korean"
 
 
+@pytest.mark.parametrize(
+    "reconcile",
+    [job_status.reconcile_assembly_runs, job_status.reconcile_extend_runs],
+)
+def test_reconcile_prefers_valid_progress_channel_over_invalid_meta(reconcile):
+    runs = [
+        {
+            "execution_id": "asm_legacy",
+            "channel": "legacy.channel",
+            "progress": {
+                "status": "succeeded",
+                "pct": 100,
+                "channel": "Valid Progress",
+            },
+        }
+    ]
+
+    out = reconcile(None, None, None, runs, reconcile_gcp=False)
+
+    assert out[0]["channel"] == "valid-progress"
+
+
+def test_reconcile_preserves_invalid_channel_for_display():
+    runs = [
+        {
+            "execution_id": "asm_legacy",
+            "channel": "  legacy.channel  ",
+            "progress": {"status": "succeeded", "pct": 100},
+        }
+    ]
+
+    out = job_status.reconcile_assembly_runs(
+        None, None, None, runs, reconcile_gcp=False
+    )
+
+    assert out[0]["channel"] == "legacy.channel"
+
+
+def test_output_verification_uses_valid_progress_channel(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(
+        job_status,
+        "object_exists",
+        lambda _client, _bucket, key: seen.append(key) or True,
+    )
+    run = {
+        "channel": "legacy.channel",
+        "progress": {
+            "status": "succeeded",
+            "channel": "Valid Progress",
+            "video_id": "mv_legacy",
+        },
+    }
+
+    assert job_status._assembly_output_verified(None, "bucket", run, run["progress"])
+    assert seen == [
+        "music-video/valid-progress/mv_legacy/mv_legacy_video.mp4"
+    ]
+
+
+def test_output_verification_rejects_invalid_channel_without_r2_lookup(monkeypatch):
+    def unexpected_lookup(*_args, **_kwargs):
+        raise AssertionError("invalid channel must not produce an R2 key")
+
+    monkeypatch.setattr(job_status, "object_exists", unexpected_lookup)
+    run = {
+        "channel": "legacy.channel",
+        "progress": {"status": "succeeded", "video_id": "mv_legacy"},
+    }
+
+    assert not job_status._assembly_output_verified(
+        None, "bucket", run, run["progress"]
+    )
+
+
 def test_summarize_run_metrics_success_and_percentiles():
     runs = [
         {"status": "succeeded", "elapsed_sec": 60},

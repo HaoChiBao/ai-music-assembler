@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock, patch
 
 from music_assembler.api.assembly_health import verify_assembly_run_output
 from music_assembler.assemble_options import unique_output_basename
@@ -114,6 +114,46 @@ class TestAssemblyHealth(unittest.TestCase):
         row = verify_assembly_run_output(MagicMock(), "bucket", run)
         self.assertFalse(row["healthy"])
         self.assertIn("not found", row["issue"] or "")
+
+    def test_prefers_valid_progress_channel_over_invalid_meta(self) -> None:
+        run = {
+            "execution_id": "asm_legacy",
+            "channel": "legacy.channel",
+            "progress": {
+                "status": "succeeded",
+                "channel": "Valid Progress",
+                "video_id": "mv_legacy",
+            },
+        }
+        with patch(
+            "music_assembler.api.assembly_health.object_exists",
+            return_value=True,
+        ) as exists:
+            row = verify_assembly_run_output(MagicMock(), "bucket", run)
+
+        self.assertTrue(row["healthy"])
+        self.assertEqual(row["channel"], "valid-progress")
+        exists.assert_called_once_with(
+            ANY,
+            "bucket",
+            "music-video/valid-progress/mv_legacy/mv_legacy_video.mp4",
+        )
+
+    def test_invalid_channel_is_missing_without_r2_lookup(self) -> None:
+        run = {
+            "execution_id": "asm_legacy",
+            "channel": "legacy.channel",
+            "progress": {"status": "succeeded", "video_id": "mv_legacy"},
+        }
+        with patch(
+            "music_assembler.api.assembly_health.object_exists",
+        ) as exists:
+            row = verify_assembly_run_output(MagicMock(), "bucket", run)
+
+        self.assertFalse(row["healthy"])
+        self.assertIsNone(row["channel"])
+        self.assertEqual(row["issue"], "missing channel in job meta")
+        exists.assert_not_called()
 
 
 if __name__ == "__main__":
