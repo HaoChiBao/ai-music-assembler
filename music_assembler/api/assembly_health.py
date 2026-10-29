@@ -21,9 +21,16 @@ def _video_id_for_run(run: dict[str, Any]) -> str | None:
 
 
 def _channel_for_run(run: dict[str, Any]) -> str | None:
-    ch = run.get("channel") or (run.get("progress") or {}).get("channel")
-    if isinstance(ch, str) and ch.strip():
-        return normalize_channel(ch)
+    prog = run.get("progress") or {}
+    for candidate in (run.get("channel"), prog.get("channel")):
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        try:
+            normalized = normalize_channel(candidate)
+        except ValueError:
+            continue
+        if normalized:
+            return normalized
     return None
 
 
