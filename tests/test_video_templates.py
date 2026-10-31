@@ -72,6 +72,14 @@ def test_resolve_template_id_clears_blank_env(monkeypatch):
     assert resolve_template_id(None) == DEFAULT_TEMPLATE_ID
 
 
+def test_request_models_blank_template_id_ignore_environment(monkeypatch):
+    monkeypatch.setenv(ENV_TEMPLATE_ID, "shorts_vertical")
+    from music_assembler.api.app import ChannelScheduleRequest, StartJobRequest
+
+    assert StartJobRequest(images_folder="korean", template_id="").template_id == DEFAULT_TEMPLATE_ID
+    assert ChannelScheduleRequest(images_folder="korean", template_id="").template_id == DEFAULT_TEMPLATE_ID
+
+
 def test_public_list_shape():
     public = templates_public_list()
     assert len(public) >= 2

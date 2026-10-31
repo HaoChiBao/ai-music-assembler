@@ -164,3 +164,41 @@ def test_schedule_subtab_switch_preserves_unsaved_editor_state():
 
     assert "loadScheduleOverview()" in js[start:end]
     assert "loadScheduleEditor(" not in js[start:end]
+
+
+def test_blank_schedule_numbers_use_selected_template_defaults(tmp_path):
+    js = _dashboard_script()
+    start = js.index("function readScheduleVideoSettings()")
+    end = js.index("\nfunction updateScheduleSummary()", start)
+    helper = js[start:end]
+    harness = f"""
+const values = {{
+  scheduleThumb: {{value: ''}},
+  scheduleDuration: {{value: '1'}},
+  scheduleVariance: {{value: '0'}},
+}};
+const document = {{getElementById: (id) => values[id]}};
+function selectedTemplateId() {{ return 'shorts_vertical'; }}
+function findVideoTemplate() {{
+  return {{default_duration_min: 1, default_variance_min: 0}};
+}}
+{helper}
+const cases = [
+  ['', '0'],
+  ['1', ''],
+  ['', ''],
+];
+for (const [duration, variance] of cases) {{
+  values.scheduleDuration.value = duration;
+  values.scheduleVariance.value = variance;
+  const result = readScheduleVideoSettings();
+  if (result.template_id !== 'shorts_vertical'
+      || result.duration_min !== 1
+      || result.variance_min !== 0) {{
+    throw new Error('wrong Shorts defaults: ' + JSON.stringify(result));
+  }}
+}}
+"""
+    path = tmp_path / "dashboard-schedule-defaults-test.js"
+    path.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(path)], check=True)
