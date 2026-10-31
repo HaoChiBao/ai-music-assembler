@@ -44,7 +44,6 @@ from music_assembler.video_templates import (
     DEFAULT_TEMPLATE_ID,
     UnknownTemplateError,
     get_template,
-    resolve_template_id,
     templates_public_list,
 )
 
@@ -158,7 +157,7 @@ class StartJobRequest(BaseModel):
     @classmethod
     def _validate_template_id(cls, value: str) -> str:
         try:
-            return resolve_template_id(value)
+            return get_template(value).id
         except UnknownTemplateError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -255,7 +254,7 @@ class ChannelScheduleRequest(BaseModel):
     @classmethod
     def _validate_schedule_template_id(cls, value: str) -> str:
         try:
-            return resolve_template_id(value)
+            return get_template(value).id
         except UnknownTemplateError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -5740,12 +5739,14 @@ function readScheduleUploadSettings() {
 }
 function readScheduleVideoSettings() {
   const thumb = document.getElementById('scheduleThumb')?.value.trim() || '';
+  const templateId = selectedTemplateId('scheduleTemplate');
+  const tmpl = findVideoTemplate(templateId);
   let duration = parseInt(document.getElementById('scheduleDuration')?.value, 10);
   let variance = parseInt(document.getElementById('scheduleVariance')?.value, 10);
-  if (!Number.isFinite(duration)) duration = 90;
-  if (!Number.isFinite(variance)) variance = 15;
+  if (!Number.isFinite(duration)) duration = tmpl?.default_duration_min ?? 90;
+  if (!Number.isFinite(variance)) variance = tmpl?.default_variance_min ?? 15;
   return {
-    template_id: selectedTemplateId('scheduleTemplate'),
+    template_id: templateId,
     thumbnail_text: thumb || null,
     duration_min: Math.min(300, Math.max(1, duration)),
     variance_min: Math.min(60, Math.max(0, variance)),
