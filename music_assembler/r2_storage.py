@@ -178,18 +178,28 @@ def sync_prefix_to_dir(
 ) -> int:
     """Download every object under ``prefix`` into ``local_dir``. Returns file count."""
     prefix = _normalize_prefix(prefix)
-    local_dir.mkdir(parents=True, exist_ok=True)
+    local_root = local_dir.resolve()
+    local_root.mkdir(parents=True, exist_ok=True)
     count = 0
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
+            if not key.startswith(prefix):
+                raise ValueError(f"R2 key {key!r} is outside requested prefix {prefix!r}")
+            rel = key[len(prefix) :]
+            if not rel:
+                raise ValueError(f"R2 key {key!r} has an empty relative path")
+            rel_path = Path(rel)
+            if rel_path.is_absolute():
+                raise ValueError(f"R2 key {key!r} has an absolute relative path")
+            dest = (local_root / rel_path).resolve()
+            if not dest.is_relative_to(local_root):
+                raise ValueError(f"R2 key {key!r} resolves outside destination {local_root}")
             if key.endswith("/"):
                 continue
-            rel = key[len(prefix) :]
             if any(rel.startswith(ex) for ex in exclude_relative_prefixes):
                 continue
-            dest = local_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             client.download_file(bucket, key, str(dest))
             count += 1
