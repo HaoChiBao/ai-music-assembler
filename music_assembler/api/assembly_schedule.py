@@ -123,12 +123,16 @@ class ChannelSchedule:
         # Immediate dispatch and timed publishAt are mutually exclusive.
         if upload_now:
             upload_schedule_publish = False
-        from music_assembler.video_templates import DEFAULT_TEMPLATE_ID, resolve_template_id
+        from music_assembler.video_templates import DEFAULT_TEMPLATE_ID, UnknownTemplateError, get_template
 
-        try:
-            template_id = resolve_template_id(data.get("template_id"))
-        except ValueError:
+        raw_template_id = data.get("template_id")
+        if raw_template_id is None or not str(raw_template_id).strip():
             template_id = DEFAULT_TEMPLATE_ID
+        else:
+            try:
+                template_id = get_template(str(raw_template_id)).id
+            except UnknownTemplateError:
+                template_id = str(raw_template_id).strip()
         sched = cls(
             channel=channel,
             enabled=bool(data.get("enabled", True)),
@@ -787,12 +791,45 @@ def run_due_schedules(
     start_extend_fn,
 ) -> dict[str, Any]:
     """Evaluate all schedules; start assembly or record skip/defer."""
+    from music_assembler.video_templates import UnknownTemplateError, get_template
+
     results: list[dict[str, Any]] = []
     for schedule in list_schedules(client, bucket, persist_backfill=True):
-        for slot in due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes):
+        slots = due_slots(schedule, now_utc=now_utc, window_minutes=window_minutes)
+        if not slots:
+            continue
+        try:
+            get_template(schedule.template_id)
+        except UnknownTemplateError:
+            unknown_template = True
+        else:
+            unknown_template = False
+        for slot in slots:
             entry = read_ledger(client, bucket, slot["slot_key"])
             if ledger_is_terminal(entry):
                 results.append({"slot_key": slot["slot_key"], "action": "skipped", "reason": "already_started"})
+                continue
+            if unknown_template:
+                if not dry_run:
+                    write_ledger(
+                        client,
+                        bucket,
+                        slot["slot_key"],
+                        {
+                            "status": "skipped",
+                            "reason": "unknown_template",
+                            "template_id": schedule.template_id,
+                            "channel": schedule.channel,
+                        },
+                    )
+                results.append(
+                    {
+                        "slot_key": slot["slot_key"],
+                        "action": "would_skip" if dry_run else "skipped",
+                        "reason": "unknown_template",
+                        "template_id": schedule.template_id,
+                    }
+                )
                 continue
             resources = evaluate_resources(client, bucket, schedule, settings)
             if not resources["ready"]:

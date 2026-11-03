@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -165,6 +166,122 @@ def test_channel_schedule_defaults_template_id():
         }
     )
     assert sched.template_id == "playlist_landscape"
+
+
+def test_channel_schedule_blank_or_missing_template_id_uses_default(monkeypatch):
+    monkeypatch.setenv("ASSEMBLY_TEMPLATE_ID", "shorts_vertical")
+
+    missing = ChannelSchedule.from_dict({"channel": "missing"})
+    blank = ChannelSchedule.from_dict({"channel": "blank", "template_id": "  "})
+
+    assert missing.template_id == "playlist_landscape"
+    assert blank.template_id == "playlist_landscape"
+
+
+def test_unknown_template_id_survives_unrelated_upsert(monkeypatch):
+    from music_assembler.api import assembly_schedule
+
+    original = {
+        "version": 1,
+        "schedules": [
+            {
+                "channel": "future",
+                "template_id": "future_square_v2",
+                "days": [{} for _ in range(7)],
+            }
+        ],
+    }
+    saved: dict = {}
+    monkeypatch.setattr(
+        assembly_schedule,
+        "load_schedules_document",
+        lambda client, bucket: deepcopy(original),
+    )
+    monkeypatch.setattr(
+        assembly_schedule,
+        "save_schedules_document",
+        lambda client, bucket, doc: saved.update(deepcopy(doc)),
+    )
+
+    upsert_schedule(
+        MagicMock(),
+        "bucket",
+        ChannelSchedule(channel="unrelated", template_id="shorts_vertical"),
+    )
+
+    by_channel = {row["channel"]: row for row in saved["schedules"]}
+    assert by_channel["future"]["template_id"] == "future_square_v2"
+    assert by_channel["unrelated"]["template_id"] == "shorts_vertical"
+
+
+def test_unknown_template_is_skipped_without_blocking_valid_schedule(monkeypatch):
+    from music_assembler.api import assembly_schedule
+
+    invalid = ChannelSchedule(channel="invalid", template_id="future_square_v2")
+    valid = ChannelSchedule(channel="valid", template_id="shorts_vertical")
+    monkeypatch.setattr(
+        assembly_schedule,
+        "list_schedules",
+        lambda client, bucket, persist_backfill=False: [invalid, valid],
+    )
+    monkeypatch.setattr(
+        assembly_schedule,
+        "due_slots",
+        lambda schedule, **kwargs: [
+            {
+                "slot_key": f"{schedule.channel}:2026-07-05:0:09:00",
+                "channel": schedule.channel,
+                "day_name": "Sunday",
+                "assemble_at": "09:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(assembly_schedule, "read_ledger", lambda *args: None)
+    monkeypatch.setattr(
+        assembly_schedule,
+        "evaluate_resources",
+        lambda *args, **kwargs: {"ready": True},
+    )
+    ledger_writes = []
+    monkeypatch.setattr(
+        assembly_schedule,
+        "write_ledger",
+        lambda client, bucket, key, payload: ledger_writes.append((key, payload)),
+    )
+    starts = []
+    monkeypatch.setattr(
+        assembly_schedule,
+        "start_scheduled_assembly",
+        lambda client, bucket, settings, schedule, slot, **kwargs: (
+            starts.append(schedule.channel)
+            or {
+                "execution_id": f"asm-{schedule.channel}",
+                "gcp_execution_id": f"gcp-{schedule.channel}",
+                "slot_key": slot["slot_key"],
+            }
+        ),
+    )
+
+    result = assembly_schedule.run_due_schedules(
+        MagicMock(),
+        "bucket",
+        MagicMock(),
+        now_utc=datetime(2026, 7, 5, 9, 5, tzinfo=timezone.utc),
+        new_execution_id=lambda: "unused",
+        start_extend_fn=MagicMock(),
+    )
+
+    assert starts == ["valid"]
+    assert [(row["action"], row.get("reason")) for row in result["results"]] == [
+        ("skipped", "unknown_template"),
+        ("started", None),
+    ]
+    assert ledger_writes[0][1] == {
+        "status": "skipped",
+        "reason": "unknown_template",
+        "template_id": "future_square_v2",
+        "channel": "invalid",
+    }
 
 
 def test_effective_schedule_at_keeps_future():
