@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 import random
 import sys
-import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -410,19 +408,13 @@ def release_pre_processed_claim(
     dest = f"{_normalize_prefix(pre_processed_prefix)}{filename}"
     src_exists = object_exists(client, bucket, src)
     dest_exists = object_exists(client, bucket, dest)
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C,D", "location": "r2_storage.py:release_pre_processed_claim:entry", "message": "release pre-processed claim state", "data": {"src": src, "dest": dest, "src_exists": src_exists, "dest_exists": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
-    # endregion
     if not src_exists:
         return dest_exists
     try:
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "r2_storage.py:release_pre_processed_claim:copy", "message": "copy stale claim to pool", "data": {"src": src, "dest": dest, "dest_existed_before_copy": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
-        copy_then_delete_object(client, bucket, src, dest)
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "r2_storage.py:release_pre_processed_claim:exit", "message": "pre-processed release completed", "data": {"src": src, "dest": dest}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
+        if dest_exists:
+            client.delete_object(Bucket=bucket, Key=src)
+        else:
+            copy_then_delete_object(client, bucket, src, dest)
         return True
     except client.exceptions.ClientError:
         return False
@@ -567,19 +559,13 @@ def release_background_claim(
     dest = f"{_normalize_prefix(images_prefix)}{filename}"
     src_exists = object_exists(client, bucket, src)
     dest_exists = object_exists(client, bucket, dest)
-    # region agent log
-    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C,D", "location": "r2_storage.py:release_background_claim:entry", "message": "release background claim state", "data": {"src": src, "dest": dest, "src_exists": src_exists, "dest_exists": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
-    # endregion
     if not src_exists:
         return dest_exists
     try:
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C", "location": "r2_storage.py:release_background_claim:copy", "message": "copy stale claim to pool", "data": {"src": src, "dest": dest, "dest_existed_before_copy": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
-        copy_then_delete_object(client, bucket, src, dest)
-        # region agent log
-        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C", "location": "r2_storage.py:release_background_claim:exit", "message": "background release completed", "data": {"src": src, "dest": dest}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # endregion
+        if dest_exists:
+            client.delete_object(Bucket=bucket, Key=src)
+        else:
+            copy_then_delete_object(client, bucket, src, dest)
         return True
     except client.exceptions.ClientError:
         return False
