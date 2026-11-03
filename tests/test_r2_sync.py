@@ -35,7 +35,6 @@ class _FakeClient:
 def test_sync_prefix_rejects_unsafe_object_keys(tmp_path):
     prefix = "music/korean/"
     unsafe_keys = [
-        prefix,
         "music/koreanish/sibling.mp3",
         prefix + "../../escaped.mp3",
         prefix + str(tmp_path / "absolute.mp3"),
@@ -49,6 +48,16 @@ def test_sync_prefix_rejects_unsafe_object_keys(tmp_path):
             sync_prefix_to_dir(client, "bucket", prefix, local_dir)
 
         assert client.downloads == []
+
+
+def test_sync_prefix_ignores_directory_marker(tmp_path):
+    prefix = "music/korean/"
+    client = _FakeClient([prefix])
+
+    count = sync_prefix_to_dir(client, "bucket", prefix, tmp_path / "download")
+
+    assert count == 0
+    assert client.downloads == []
 
 
 def test_sync_prefix_rejects_symlink_escape(tmp_path):

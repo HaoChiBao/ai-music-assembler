@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import random
 import sys
+import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -187,6 +189,8 @@ def sync_prefix_to_dir(
             key = obj["Key"]
             if not key.startswith(prefix):
                 raise ValueError(f"R2 key {key!r} is outside requested prefix {prefix!r}")
+            if key.endswith("/"):
+                continue
             rel = key[len(prefix) :]
             if not rel:
                 raise ValueError(f"R2 key {key!r} has an empty relative path")
@@ -196,8 +200,6 @@ def sync_prefix_to_dir(
             dest = (local_root / rel_path).resolve()
             if not dest.is_relative_to(local_root):
                 raise ValueError(f"R2 key {key!r} resolves outside destination {local_root}")
-            if key.endswith("/"):
-                continue
             if any(rel.startswith(ex) for ex in exclude_relative_prefixes):
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -406,10 +408,21 @@ def release_pre_processed_claim(
     """Return a claimed pre-processed photo to the pool after a failed extend."""
     src = pre_processed_in_flight_key(pre_processed_prefix, execution_id, filename)
     dest = f"{_normalize_prefix(pre_processed_prefix)}{filename}"
-    if not object_exists(client, bucket, src):
-        return object_exists(client, bucket, dest)
+    src_exists = object_exists(client, bucket, src)
+    dest_exists = object_exists(client, bucket, dest)
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C,D", "location": "r2_storage.py:release_pre_processed_claim:entry", "message": "release pre-processed claim state", "data": {"src": src, "dest": dest, "src_exists": src_exists, "dest_exists": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
+    # endregion
+    if not src_exists:
+        return dest_exists
     try:
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "r2_storage.py:release_pre_processed_claim:copy", "message": "copy stale claim to pool", "data": {"src": src, "dest": dest, "dest_existed_before_copy": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
+        # endregion
         copy_then_delete_object(client, bucket, src, dest)
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "A,C", "location": "r2_storage.py:release_pre_processed_claim:exit", "message": "pre-processed release completed", "data": {"src": src, "dest": dest}, "timestamp": int(time.time() * 1000)}) + "\n")
+        # endregion
         return True
     except client.exceptions.ClientError:
         return False
@@ -552,10 +565,21 @@ def release_background_claim(
     """Return a claimed background to the available pool after a failed encode."""
     src = in_flight_key(images_prefix, execution_id, filename)
     dest = f"{_normalize_prefix(images_prefix)}{filename}"
-    if not object_exists(client, bucket, src):
-        return object_exists(client, bucket, dest)
+    src_exists = object_exists(client, bucket, src)
+    dest_exists = object_exists(client, bucket, dest)
+    # region agent log
+    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C,D", "location": "r2_storage.py:release_background_claim:entry", "message": "release background claim state", "data": {"src": src, "dest": dest, "src_exists": src_exists, "dest_exists": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
+    # endregion
+    if not src_exists:
+        return dest_exists
     try:
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C", "location": "r2_storage.py:release_background_claim:copy", "message": "copy stale claim to pool", "data": {"src": src, "dest": dest, "dest_existed_before_copy": dest_exists}, "timestamp": int(time.time() * 1000)}) + "\n")
+        # endregion
         copy_then_delete_object(client, bucket, src, dest)
+        # region agent log
+        open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId": "B,C", "location": "r2_storage.py:release_background_claim:exit", "message": "background release completed", "data": {"src": src, "dest": dest}, "timestamp": int(time.time() * 1000)}) + "\n")
+        # endregion
         return True
     except client.exceptions.ClientError:
         return False
