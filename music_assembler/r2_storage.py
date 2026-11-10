@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,29 +17,6 @@ except ImportError:  # pragma: no cover - optional extra
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".PNG", ".JPG", ".JPEG", ".WEBP")
 AUDIO_EXTENSIONS = (".mp3", ".MP3")
-
-
-def _agent_debug_log(
-    hypothesis_id: str, location: str, message: str, data: dict[str, object]
-) -> None:
-    """Temporary investigation instrumentation; remove after the claim-boundary diagnosis."""
-    try:
-        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-
 
 R2_ENV_VARS = (
     "CLOUDFLARE_R2_BUCKET",
@@ -353,7 +328,6 @@ def list_claimable_pre_processed_keys(
     reserved = list_in_flight_pre_processed_names(client, bucket, pre_processed_prefix)
     existing_stems = set() if force else _post_processed_png_stems(client, bucket, images_prefix)
     keys: list[str] = []
-    pool_image_count = 0
     for key in list_object_keys(
         client,
         bucket,
@@ -365,26 +339,48 @@ def list_claimable_pre_processed_keys(
             continue
         if not _is_image_key(rel):
             continue
-        pool_image_count += 1
         if rel in reserved:
             continue
         if not force and Path(rel).stem in existing_stems:
             continue
         keys.append(key)
-    # region agent log
-    _agent_debug_log(
-        "C",
-        "music_assembler/r2_storage.py:list_claimable_pre_processed_keys",
-        "pre-processed availability filtered",
-        {
-            "reservedCount": len(reserved),
-            "poolImageCount": pool_image_count,
-            "claimableCount": len(keys),
-            "force": force,
-        },
-    )
-    # endregion
     return keys
+
+
+def _reconcile_claim_move_error(
+    client, bucket: str, src_key: str, dest_key: str
+) -> bool:
+    """Resolve an ambiguous copy-then-delete error without stranding ``dest_key``.
+
+    Returns ``True`` when the destination should be treated as this worker's claim.
+    When both copies remain, retry the intended source delete first; if that still
+    fails, roll back only the destination after confirming the source remains.
+    """
+    source_exists = object_exists(client, bucket, src_key)
+    destination_exists = object_exists(client, bucket, dest_key)
+
+    if destination_exists and not source_exists:
+        return True
+    if not (source_exists and destination_exists):
+        return False
+
+    try:
+        client.delete_object(Bucket=bucket, Key=src_key)
+    except client.exceptions.ClientError:
+        pass
+    source_exists = object_exists(client, bucket, src_key)
+    destination_exists = object_exists(client, bucket, dest_key)
+
+    if destination_exists and not source_exists:
+        return True
+    if not (source_exists and destination_exists):
+        return False
+
+    try:
+        client.delete_object(Bucket=bucket, Key=dest_key)
+    except client.exceptions.ClientError:
+        pass
+    return object_exists(client, bucket, dest_key)
 
 
 def claim_pre_processed_on_r2(
@@ -418,16 +414,9 @@ def claim_pre_processed_on_r2(
             continue
         try:
             copy_then_delete_object(client, bucket, src_key, dest_key)
-        except client.exceptions.ClientError as exc:
-            # region agent log
-            _agent_debug_log(
-                "C",
-                "music_assembler/r2_storage.py:claim_pre_processed_on_r2",
-                "claim move raised ClientError and was skipped",
-                {"errorCode": exc.response.get("Error", {}).get("Code", "")},
-            )
-            # endregion
-            continue
+        except client.exceptions.ClientError:
+            if not _reconcile_claim_move_error(client, bucket, src_key, dest_key):
+                continue
         if object_exists(client, bucket, dest_key):
             return filename
     return None
@@ -513,7 +502,6 @@ def list_available_background_keys(client, bucket: str, images_prefix: str) -> l
     images_prefix = _normalize_prefix(images_prefix)
     reserved = list_in_flight_background_names(client, bucket, images_prefix)
     keys: list[str] = []
-    pool_image_count = 0
     for key in list_object_keys(
         client,
         bucket,
@@ -525,22 +513,9 @@ def list_available_background_keys(client, bucket: str, images_prefix: str) -> l
             continue
         if not _is_image_key(rel):
             continue
-        pool_image_count += 1
         if rel in reserved:
             continue
         keys.append(key)
-    # region agent log
-    _agent_debug_log(
-        "A-B",
-        "music_assembler/r2_storage.py:list_available_background_keys",
-        "background availability filtered",
-        {
-            "reservedCount": len(reserved),
-            "poolImageCount": pool_image_count,
-            "claimableCount": len(keys),
-        },
-    )
-    # endregion
     return keys
 
 
@@ -571,16 +546,9 @@ def claim_background_on_r2(
                 continue
             try:
                 copy_then_delete_object(client, bucket, src_key, dest_key)
-            except client.exceptions.ClientError as exc:
-                # region agent log
-                _agent_debug_log(
-                    "A-B",
-                    "music_assembler/r2_storage.py:claim_background_on_r2",
-                    "claim move raised ClientError and was skipped",
-                    {"errorCode": exc.response.get("Error", {}).get("Code", "")},
-                )
-                # endregion
-                continue
+            except client.exceptions.ClientError:
+                if not _reconcile_claim_move_error(client, bucket, src_key, dest_key):
+                    continue
             if not object_exists(client, bucket, dest_key):
                 continue
             claims = list_in_flight_background_claims(client, bucket, images_prefix).get(
@@ -684,37 +652,13 @@ def copy_then_delete_object(client, bucket: str, src_key: str, dest_key: str) ->
     """Copy ``src_key`` to ``dest_key`` in the same bucket, then delete the source."""
     if src_key == dest_key:
         raise ValueError(f"refusing to copy object onto itself: {src_key}")
-    # region agent log
-    _agent_debug_log(
-        "A-C-D",
-        "music_assembler/r2_storage.py:copy_then_delete_object",
-        "starting copy-then-delete",
-        {},
-    )
-    # endregion
     client.copy_object(
         Bucket=bucket,
         Key=dest_key,
         CopySource={"Bucket": bucket, "Key": src_key},
         MetadataDirective="COPY",
     )
-    # region agent log
-    _agent_debug_log(
-        "A-C-D",
-        "music_assembler/r2_storage.py:copy_then_delete_object",
-        "copy completed before source delete",
-        {},
-    )
-    # endregion
     client.delete_object(Bucket=bucket, Key=src_key)
-    # region agent log
-    _agent_debug_log(
-        "D",
-        "music_assembler/r2_storage.py:copy_then_delete_object",
-        "source delete completed",
-        {},
-    )
-    # endregion
 
 
 def move_object(client, bucket: str, src_key: str, dest_key: str) -> None:
