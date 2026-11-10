@@ -347,6 +347,42 @@ def list_claimable_pre_processed_keys(
     return keys
 
 
+def _reconcile_claim_move_error(
+    client, bucket: str, src_key: str, dest_key: str
+) -> bool:
+    """Resolve an ambiguous copy-then-delete error without stranding ``dest_key``.
+
+    Returns ``True`` when the destination should be treated as this worker's claim.
+    When both copies remain, retry the intended source delete first; if that still
+    fails, roll back only the destination after confirming the source remains.
+    """
+    source_exists = object_exists(client, bucket, src_key)
+    destination_exists = object_exists(client, bucket, dest_key)
+
+    if destination_exists and not source_exists:
+        return True
+    if not (source_exists and destination_exists):
+        return False
+
+    try:
+        client.delete_object(Bucket=bucket, Key=src_key)
+    except client.exceptions.ClientError:
+        pass
+    source_exists = object_exists(client, bucket, src_key)
+    destination_exists = object_exists(client, bucket, dest_key)
+
+    if destination_exists and not source_exists:
+        return True
+    if not (source_exists and destination_exists):
+        return False
+
+    try:
+        client.delete_object(Bucket=bucket, Key=dest_key)
+    except client.exceptions.ClientError:
+        pass
+    return object_exists(client, bucket, dest_key)
+
+
 def claim_pre_processed_on_r2(
     client,
     bucket: str,
@@ -379,7 +415,8 @@ def claim_pre_processed_on_r2(
         try:
             copy_then_delete_object(client, bucket, src_key, dest_key)
         except client.exceptions.ClientError:
-            continue
+            if not _reconcile_claim_move_error(client, bucket, src_key, dest_key):
+                continue
         if object_exists(client, bucket, dest_key):
             return filename
     return None
@@ -510,7 +547,8 @@ def claim_background_on_r2(
             try:
                 copy_then_delete_object(client, bucket, src_key, dest_key)
             except client.exceptions.ClientError:
-                continue
+                if not _reconcile_claim_move_error(client, bucket, src_key, dest_key):
+                    continue
             if not object_exists(client, bucket, dest_key):
                 continue
             claims = list_in_flight_background_claims(client, bucket, images_prefix).get(
