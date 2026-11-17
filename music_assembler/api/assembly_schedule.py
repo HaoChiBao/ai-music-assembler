@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -18,6 +19,9 @@ from music_assembler.r2_storage import r2_config_from_env
 
 SCHEDULES_KEY = "schedules/schedules.json"
 SCHEDULE_RUNS_PREFIX = "schedules/runs/"
+_SCHEDULE_RUN_KEY_RE = re.compile(
+    r"^(?P<channel>.+)-\d{4}-\d{2}-\d{2}(?:-\d+-\d{2}-\d{2})?\.json$"
+)
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 DAY_ABBR = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
@@ -279,6 +283,20 @@ def slot_publish_at_utc(slot: dict[str, Any], schedule: ChannelSchedule) -> str 
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _schedule_run_key_channel(key: str) -> str | None:
+    relative = key.removeprefix(SCHEDULE_RUNS_PREFIX)
+    match = _SCHEDULE_RUN_KEY_RE.fullmatch(relative)
+    return match.group("channel") if match else None
+
+
+def _schedule_run_modified_rank(value: Any) -> float:
+    if not isinstance(value, datetime):
+        return float("-inf")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
 def list_schedule_runs(
     client,
     bucket: str,
@@ -287,24 +305,44 @@ def list_schedule_runs(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """List idempotency ledger entries under ``schedules/runs/``."""
+    requested_limit = max(limit, 0)
+    if requested_limit == 0:
+        return []
     rows: list[dict[str, Any]] = []
+    candidates: list[tuple[float, str]] = []
+    # Keep bounded fallback candidates so transient GET failures do not
+    # immediately reduce the response below its requested size.
+    candidate_limit = requested_limit * 2
+    encoded_channel = channel.replace("/", "_").replace(":", "-") if channel else None
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=SCHEDULE_RUNS_PREFIX):
         for obj in page.get("Contents") or []:
             key = obj.get("Key") or ""
             if not key.endswith(".json"):
                 continue
-            try:
-                resp = client.get_object(Bucket=bucket, Key=key)
-                entry = json.loads(resp["Body"].read().decode("utf-8"))
-            except client.exceptions.ClientError:
+            if encoded_channel and _schedule_run_key_channel(key) != encoded_channel:
                 continue
-            if channel and entry.get("channel") != channel:
-                continue
-            entry["ledger_key"] = key
-            rows.append(entry)
+            candidate = (_schedule_run_modified_rank(obj.get("LastModified")), key)
+            if len(candidates) < candidate_limit:
+                heapq.heappush(candidates, candidate)
+            elif candidate > candidates[0]:
+                heapq.heapreplace(candidates, candidate)
+
+    for _, key in sorted(candidates, reverse=True):
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+            raw = resp["Body"].read()
+            entry = json.loads(raw.decode("utf-8"))
+        except client.exceptions.ClientError:
+            continue
+        if channel and entry.get("channel") != channel:
+            continue
+        entry["ledger_key"] = key
+        rows.append(entry)
+        if len(rows) >= requested_limit:
+            break
     rows.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
-    return rows[: max(limit, 0)]
+    return rows[:requested_limit]
 
 
 def delete_schedule_run(client, bucket: str, slot_key: str) -> bool:
