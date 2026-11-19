@@ -62,6 +62,88 @@ def test_dashboard_javascript_syntax():
         subprocess.run(["node", "--check", str(path)], check=True)
 
 
+def test_extend_progress_poll_preserves_newer_snapshot_progress(tmp_path):
+    js = _dashboard_script()
+    upsert_start = js.index("function upsertJobRow")
+    upsert_end = js.index("\nfunction syncJobTable", upsert_start)
+    refresh_start = js.index("async function refreshRunningExtendProgress")
+    refresh_end = js.index("\nasync function refreshRunningAssemblyProgress", refresh_start)
+    upsert = js[upsert_start:upsert_end]
+    refresh = js[refresh_start:refresh_end]
+    harness = f"""
+const executionId = 'ext_poll_regression';
+const gcpExecutionId = 'music-extend-execution-abc12';
+const cells = {{
+  '.job-check': {{outerHTML: ''}},
+  '.job-id': {{innerHTML: ''}},
+  '.job-status': {{className: '', textContent: '', title: ''}},
+  '.job-actions': {{outerHTML: ''}},
+  '.bar-fill': {{style: {{}}}},
+  '.job-pct': {{textContent: ''}},
+  '.job-stage': {{textContent: ''}},
+  '.job-details': {{innerHTML: ''}},
+  '.job-timing': {{innerHTML: ''}},
+}};
+const tr = {{
+  classList: {{contains: () => true, toggle: () => {{}}}},
+  querySelector: (selector) => cells[selector] || null,
+  dataset: {{}},
+  style: {{}},
+}};
+const ui = {{
+  extend: new Map([[executionId, tr]]),
+  selectedJobs: new Set(),
+  jobFilter: '',
+}};
+const document = {{getElementById: () => null}};
+const isCancellableStatus = (status) => status === 'running' || status === 'cancelling';
+const jobCheckboxHtml = () => '';
+const jobActionsHtml = () => '';
+const bindJobActionButtons = () => {{}};
+const esc = (value) => String(value);
+const fmtTime = (value) => String(value);
+const jobDetailsHtml = () => '';
+const jobTimingHtml = () => '';
+const api = async () => ({{
+  execution_id: executionId,
+  gcp_execution_id: gcpExecutionId,
+  status: 'running',
+  pct: 3,
+  stage: 'R2 heartbeat',
+  status_source: 'r2',
+}});
+{upsert}
+const actualUpsert = upsertJobRow;
+actualUpsert('extendBody', ui.extend, {{
+  execution_id: executionId,
+  gcp_execution_id: gcpExecutionId,
+  status: 'running',
+  pct: 28,
+  stage: 'Encoding on Cloud Run…',
+  status_source: 'gcp_estimate',
+}});
+let mapped = null;
+upsertJobRow = (...args) => {{
+  mapped = args[2];
+  return actualUpsert(...args);
+}};
+{refresh}
+(async () => {{
+  await refreshRunningExtendProgress();
+  if (mapped.pct !== 28) throw new Error('progress regressed: ' + mapped.pct);
+  if (mapped.stage !== 'Encoding on Cloud Run…') throw new Error('stage regressed');
+  if (mapped.status_source !== 'gcp_estimate') throw new Error('status source regressed');
+  if (mapped.gcp_execution_id !== gcpExecutionId) throw new Error('GCP execution ID lost');
+  if (!cells['.job-id'].innerHTML.includes(gcpExecutionId)) {{
+    throw new Error('GCP execution link disappeared');
+  }}
+}})().catch((error) => {{ console.error(error); process.exit(1); }});
+"""
+    path = tmp_path / "dashboard-extend-poll-test.js"
+    path.write_text(harness, encoding="utf-8")
+    subprocess.run(["node", str(path)], check=True)
+
+
 def test_dashboard_timing_helpers():
     js = _dashboard_script()
     start = js.index("function fmtDuration(sec)")
