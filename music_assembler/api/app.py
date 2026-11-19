@@ -4932,6 +4932,10 @@ function upsertJobRow(tableId, map, row) {
   }
   tr.classList.toggle('is-running', running);
   const pct = Number(row.pct) || 0;
+  tr.dataset.jobPct = String(pct);
+  tr.dataset.jobStage = row.stage || '';
+  tr.dataset.gcpExecutionId = row.gcp_execution_id || '';
+  tr.dataset.statusSource = row.status_source || '';
   tr.querySelector('.bar-fill').style.width = Math.min(100, Math.max(0, pct)) + '%';
   tr.querySelector('.job-pct').textContent = pct.toFixed(0) + '% ';
   tr.querySelector('.job-stage').textContent = row.stage || (running ? 'Working…' : '');
@@ -6379,11 +6383,16 @@ async function refreshRunningExtendProgress() {
   await Promise.all(ids.map(async (id) => {
     try {
       const p = await api('/v1/extend/jobs/' + encodeURIComponent(id) + '/progress');
+      const tr = ui.extend.get(id);
+      const currentPct = Number(tr?.dataset.jobPct) || 0;
+      const incomingPct = Number(p.pct) || 0;
+      const keepCurrentProgress = isCancellableStatus(p.status || '') && incomingPct < currentPct;
       upsertJobRow('extendBody', ui.extend, {
         execution_id: id,
+        gcp_execution_id: p.gcp_execution_id || tr?.dataset.gcpExecutionId,
         status: p.status,
-        pct: p.pct,
-        stage: p.stage,
+        pct: keepCurrentProgress ? currentPct : incomingPct,
+        stage: keepCurrentProgress ? tr?.dataset.jobStage : p.stage,
         updated_at: p.updated_at,
         created_at: p.created_at,
         started_at: p.started_at,
@@ -6395,7 +6404,7 @@ async function refreshRunningExtendProgress() {
         duration_min: p.duration_min,
         images_folder: p.images_folder,
         category: p.category,
-        status_source: 'r2',
+        status_source: keepCurrentProgress ? tr?.dataset.statusSource : p.status_source,
       });
     } catch (e) { console.warn('extend progress poll', id, e); }
   }));
